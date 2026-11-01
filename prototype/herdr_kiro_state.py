@@ -13,14 +13,15 @@ until the grace ends, then reports idle, releases, and exits.
 """
 from __future__ import annotations
 
+import datetime
 import fcntl
 import json
-import datetime
 import os
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 SOURCE = "hook:kiro"
@@ -403,7 +404,7 @@ def release_authority(pane: str, path: str) -> bool:
         AGENT,
         "--seq",
         release_seq,
-    ) and ok
+    )
 
 
 def pane_text(pane: str) -> str:
@@ -430,7 +431,8 @@ def tail_text(text: str) -> str:
 BANNER_LINE = re.compile(r"(?i)^\s*▶\s+\S+\s+running\b.*\bctrl\+x\b")
 IDLE_PROMPT = re.compile(r"(?i)ask a question or describe a task")
 RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kiro-detection.toml")
-_RULES = None
+_EXPLAIN_ENV = None
+_SCREEN_CACHE = {}
 
 
 def workflow_banner_from(text: str) -> bool:
@@ -438,112 +440,81 @@ def workflow_banner_from(text: str) -> bool:
     return any(BANNER_LINE.search(line) for line in tail_text(text).splitlines())
 
 
-def _quoted_list(chunk: str, key: str) -> list:
-    matched = re.search(r"(?m)^%s\s*=\s*\[(.*?)\]" % key, chunk, re.S)
-    if not matched:
-        return []
-    found = []
-    for double, single in re.findall(r'"((?:\\.|[^"\\])*)"|\'((?:\\.|[^\'\\])*)\'', matched.group(1)):
-        found.append(double or single)
-    return found
-
-
-def detection_rules() -> list:
-    """Blocked and working rules from the toml herdr loads. Flat gates only."""
-    global _RULES
-    if _RULES is not None:
-        return _RULES
+def explain_env() -> dict:
+    """Point herdr at the toml next to this script, not a previously installed copy."""
+    global _EXPLAIN_ENV
+    if _EXPLAIN_ENV is not None:
+        return _EXPLAIN_ENV
+    base = tempfile.mkdtemp(prefix="herdr-kiro-rules-")
+    dest = os.path.join(base, "herdr", "agent-detection")
+    os.makedirs(dest, exist_ok=True)
     try:
-        with open(RULES_PATH, encoding="utf-8") as handle:
-            raw = handle.read()
+        with open(RULES_PATH, "rb") as source, open(os.path.join(dest, "kiro.toml"), "wb") as target:
+            target.write(source.read())
     except OSError:
-        _RULES = []
-        return _RULES
-    rules = []
-    for chunk in re.split(r"(?m)^\[\[rules\]\]\s*$", raw)[1:]:
-        chunk = re.split(r"(?m)^\[\[", chunk)[0]
-        if re.search(r"(?m)^(any|all|not)\s*=", chunk):
-            continue
-        identity = re.search(r'(?m)^id\s*=\s*"([^"]+)"', chunk)
-        state = re.search(r'(?m)^state\s*=\s*"([^"]+)"', chunk)
-        priority = re.search(r"(?m)^priority\s*=\s*(\d+)", chunk)
-        region = re.search(r'(?m)^region\s*=\s*"([^"]+)"', chunk)
-        if not (identity and state and priority):
-            continue
-        rules.append(
-            {
-                "id": identity.group(1),
-                "state": state.group(1),
-                "priority": int(priority.group(1)),
-                "region": region.group(1) if region else "whole_recent",
-                "contains": _quoted_list(chunk, "contains"),
-                "line_regex": _quoted_list(chunk, "line_regex"),
-                "regex": _quoted_list(chunk, "regex"),
-            }
+        _EXPLAIN_ENV = dict(os.environ)
+        return _EXPLAIN_ENV
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = base
+    _EXPLAIN_ENV = env
+    return env
+
+
+def screen_view(text: str) -> dict:
+    """Winning herdr rule for this screen. herdr's matcher, not a second copy of it."""
+    cached = _SCREEN_CACHE.get(text)
+    if cached is not None:
+        return cached
+    view = {"state": "idle", "id": None}
+    fd, path = tempfile.mkstemp(prefix="herdr-kiro-screen-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text or "")
+        completed = subprocess.run(
+            ["herdr", "agent", "explain", "--file", path, "--agent", "kiro", "--json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            env=explain_env(),
+            check=False,
         )
-    _RULES = rules
-    return _RULES
-
-
-def region_text(text: str, spec: str) -> str:
-    matched = re.match(r"bottom_non_empty_lines\((\d+)\)", spec or "")
-    if not matched:
-        return text
-    count = int(matched.group(1))
-    lines = text.splitlines()
-    indexes = [index for index, line in enumerate(lines) if line.strip()]
-    if not indexes:
-        return ""
-    start = indexes[-count] if len(indexes) >= count else indexes[0]
-    return "\n".join(lines[start:])
-
-
-def rule_matches(rule: dict, text: str) -> bool:
-    if not (rule["contains"] or rule["line_regex"] or rule["regex"]):
-        return False
-    region = region_text(text, rule["region"])
-    lowered = region.lower()
-    if rule["contains"] and not all(needle.lower() in lowered for needle in rule["contains"]):
-        return False
-    lines = region.splitlines() or [region]
-    for pattern in rule["line_regex"]:
+        if completed.returncode == 0 and completed.stdout:
+            data = json.loads(completed.stdout)
+            rule = data.get("matched_rule") or {}
+            view = {"state": data.get("state") or "idle", "id": rule.get("id")}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        if workflow_banner_from(text):
+            view = {"state": "working", "id": "workflow_banner_working"}
+        elif approval_text(text):
+            view = {"state": "blocked", "id": "workflow_chooser_blocked"}
+    finally:
         try:
-            compiled = re.compile(pattern)
-        except re.error:
-            return False
-        if not any(compiled.search(line) for line in lines):
-            return False
-    for pattern in rule["regex"]:
-        try:
-            compiled = re.compile(pattern)
-        except re.error:
-            return False
-        if compiled.search(region) is None:
-            return False
-    return True
+            os.remove(path)
+        except OSError:
+            pass
+    if len(_SCREEN_CACHE) > 4:
+        _SCREEN_CACHE.clear()
+    _SCREEN_CACHE[text] = view
+    return view
 
 
 def highest_rule(text: str):
-    best = None
-    text = tail_text(text)
-    for rule in detection_rules():
-        if not rule_matches(rule, text):
-            continue
-        if best is None or rule["priority"] > best["priority"]:
-            best = rule
-    return best
+    view = screen_view(text)
+    if not view.get("id"):
+        return None
+    return {"id": view["id"], "state": view["state"]}
 
 
 def blocker_visible(text: str) -> bool:
-    """True when the winning detection rule is blocked, or the chooser footer is up.
-
-    The rule text comes from kiro-detection.toml, which is the file herdr evaluates.
-    A workflow banner is a lower priority, so it loses while a blocker is visible.
-    """
+    """True when herdr's winning rule for this screen is blocked."""
     if approval_text(text):
         return True
-    winner = highest_rule(text)
-    return bool(winner and winner["state"] == "blocked")
+    return screen_view(text).get("state") == "blocked"
+
+
+def banner_visible(text: str) -> bool:
+    return screen_view(text).get("id") == "workflow_banner_working"
 
 
 def screen_is_settled(text: str) -> bool:
@@ -562,6 +533,20 @@ def screen_is_quiet(text: str) -> bool:
     if not IDLE_PROMPT.search(tail_text(text) or ""):
         return False
     return screen_is_settled(text)
+
+
+def prompt_visible(text: str) -> bool:
+    """Kiro's idle prompt, or a shell prompt. Model text is neither."""
+    tail = tail_text(text)
+    if IDLE_PROMPT.search(tail or ""):
+        return True
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped or len(stripped) > 120:
+            continue
+        if re.search(r"[$#%]\s*$", stripped) and ("/" in stripped or ":" in stripped or stripped.endswith("$")):
+            return True
+    return False
 
 
 def report_for(screen: str, action: str):
@@ -593,10 +578,25 @@ def workflow_banner(pane: str) -> bool:
     return workflow_banner_from(pane_text(pane))
 
 
-def ps_column(pid: int, column: str):
+_TABLE = None
+_PS_LINE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.*?)\s*$"
+)
+
+
+def begin_tick() -> None:
+    """Drop the process table so this tick pays for one ps, not one per pid."""
+    global _TABLE
+    _TABLE = None
+
+
+def process_table():
+    global _TABLE
+    if _TABLE is not None:
+        return _TABLE
     try:
         completed = subprocess.run(
-            ["ps", "-p", str(pid), "-o", column + "="],
+            ["ps", "-eo", "pid=,ppid=,lstart=,comm="],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -604,10 +604,23 @@ def ps_column(pid: int, column: str):
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return {"error": True}
+        _TABLE = "error"
+        return _TABLE
     if completed.returncode != 0:
-        return None
-    return (completed.stdout or "").strip()
+        _TABLE = "error"
+        return _TABLE
+    rows = {}
+    for line in (completed.stdout or "").splitlines():
+        matched = _PS_LINE.match(line)
+        if not matched:
+            continue
+        rows[int(matched.group(1))] = {
+            "ppid": int(matched.group(2)),
+            "lstart": start_token(matched.group(3)),
+            "comm": comm_basename(matched.group(4)),
+        }
+    _TABLE = rows
+    return _TABLE
 
 
 def comm_basename(text: str) -> str:
@@ -628,27 +641,16 @@ def start_token(text: str) -> str:
 
 
 def process_snapshot(pid: int) -> dict:
-    """Return ppid, lstart, and comm basename. None if the pid is gone."""
+    """Return ppid, lstart, and comm basename. None if the pid is gone.
+
+    One ps fills the table for the tick. Later lookups do not call ps again.
+    """
     if pid <= 0:
         return None
-    ppid_text = ps_column(pid, "ppid")
-    if isinstance(ppid_text, dict):
-        return ppid_text
-    if ppid_text is None:
-        return None
-    lstart = ps_column(pid, "lstart")
-    comm = ps_column(pid, "comm")
-    if isinstance(lstart, dict) or isinstance(comm, dict):
+    table = process_table()
+    if table == "error":
         return {"error": True}
-    try:
-        ppid = int(str(ppid_text).strip())
-    except ValueError:
-        return {"error": True}
-    return {
-        "ppid": ppid,
-        "lstart": start_token(lstart or ""),
-        "comm": comm_basename(comm or ""),
-    }
+    return table.get(int(pid))
 
 
 def owner_is_dead(owner, started: str) -> bool:
@@ -683,6 +685,77 @@ def alive(pid: int, started: str = "") -> bool:
     if started and snap.get("lstart") != started:
         return False
     return True
+
+
+def agent_lookup(pane: str) -> str:
+    """herdr's view of the pane. 'gone' when the agent process is not there."""
+    command = ["herdr"]
+    session = os.environ.get("HERDR_SESSION")
+    if session:
+        command.extend(["--session", session])
+    command.extend(["agent", "get", pane])
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    raw = (completed.stdout or "") + (completed.stderr or "")
+    if "agent_not_found" in raw:
+        return "gone"
+    if completed.returncode != 0:
+        return "unknown"
+    try:
+        data = json.loads(completed.stdout or "{}")
+    except ValueError:
+        return "unknown"
+    if (data.get("error") or {}).get("code") == "agent_not_found":
+        return "gone"
+    agent = (data.get("result") or {}).get("agent") or {}
+    return agent.get("agent_status") or "unknown"
+
+
+def kiro_in_pane(owner_ids) -> bool:
+    """True when a kiro process is still under one of this pane's owners."""
+    table = process_table()
+    if table == "error":
+        return True
+    owners = set()
+    for owner in owner_ids:
+        try:
+            owners.add(int(owner))
+        except (TypeError, ValueError):
+            continue
+    for pid, row in table.items():
+        if "kiro" not in command_name(row.get("comm") or ""):
+            continue
+        cursor = pid
+        seen = set()
+        while cursor > 1 and cursor not in seen:
+            seen.add(cursor)
+            if cursor in owners:
+                return True
+            parent = table.get(cursor, {}).get("ppid") or 0
+            if parent in owners:
+                return True
+            cursor = parent
+    return False
+
+
+def owners_status(state: dict) -> str:
+    owners = state.get("owners") or {}
+    if not owners:
+        return "none"
+    started = state.get("owner_started") or {}
+    for key, owner in owners.items():
+        if not owner_is_dead(owner, started.get(key) or ""):
+            return "alive"
+    return "dead"
 
 
 def command_name(comm: str) -> str:
@@ -802,8 +875,36 @@ def clear_watcher(path: str) -> None:
     remove_pidfile(path, os.getpid())
 
 
+def stop_watcher(pane: str, path: str, reason: str) -> None:
+    update(path, release_stuck)
+    release_authority(pane, path)
+    clear_watcher(path)
+    log("watcher exit " + reason)
+
+
+def note_report(pane: str, path: str, kind: str, reported, misses: int):
+    ok = send_report(pane, path, kind, release=False)
+    if ok:
+        return kind, 0
+    misses += 1
+    if misses >= 30:
+        clear_watcher(path)
+        log("watcher stopping after herdr failures")
+        return None, misses
+    return reported, misses
+
+
 def watch_loop(pane: str, path: str) -> None:
+    try:
+        _watch_loop(pane, path)
+    except Exception as exc:
+        log("watcher error %s: %s" % (type(exc).__name__, exc))
+        clear_watcher(path)
+
+
+def _watch_loop(pane: str, path: str) -> None:
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    begin_tick()
     snap = process_snapshot(os.getpid())
     started = "" if not snap or snap.get("error") else snap.get("lstart") or ""
 
@@ -819,24 +920,27 @@ def watch_loop(pane: str, path: str) -> None:
     quiet_since = None
     while True:
         time.sleep(TICK_SECS)
+        begin_tick()
+        looked = agent_lookup(pane)
         state = update(path, lambda _state: None)
+        owners = owners_status(state)
+        pane_kiro = kiro_in_pane((state.get("owners") or {}).values())
+        # A dead pane can still show the old banner. Do not report working over that.
+        if looked == "gone" or (owners == "dead" and not pane_kiro):
+            stop_watcher(pane, path, "agent gone")
+            return
         screen = pane_text(pane)
         now = time.time()
-        # A newer working report beats a visible blocker until the next screen
-        # scan. Report blocked, and do not report working, while one is up.
-        if blocker_visible(screen):
+        view = screen_view(screen)
+        blocked = view.get("state") == "blocked" or approval_text(screen)
+        banner = view.get("id") == "workflow_banner_working"
+        if blocked:
             quiet_since = None
-            ok = send_report(pane, path, "blocked")
-            if ok:
-                reported = "blocked"
-                misses = 0
-            else:
-                misses += 1
-                if misses >= 30:
-                    clear_watcher(path)
+            if reported != "blocked":
+                reported, misses = note_report(pane, path, "blocked", reported, misses)
+                if reported is None and misses >= 30:
                     return
             continue
-        banner = workflow_banner_from(screen)
         if banner:
             quiet_since = None
 
@@ -845,7 +949,7 @@ def watch_loop(pane: str, path: str) -> None:
                 current["grace_until"] = revised["grace_until"]
 
             state = update(path, extend)
-        elif screen_is_settled(screen):
+        elif prompt_visible(screen) and screen_is_settled(screen):
             if quiet_since is None:
                 quiet_since = now
             elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
@@ -859,40 +963,19 @@ def watch_loop(pane: str, path: str) -> None:
             banner,
             time.time(),
         )
-        # Hook idle beats a visible working rule, and one dropped working
-        # report stays idle. Re-send working while the banner is up.
-        if banner:
-            ok = send_report(pane, path, "working")
-            if ok:
-                reported = "working"
-                misses = 0
-            else:
-                misses += 1
-                if misses >= 30:
-                    clear_watcher(path)
-                    return
-            continue
-        if action == "idle" and not state["busy"] and not screen_is_quiet(screen):
-            # The outer kiro-cli is gone and the shell prompt is back. A kiro
-            # working footer is a live turn, so that one stays with screen detection.
-            if "kiro is working" not in screen.lower():
-                release_authority(pane, path)
-                clear_watcher(path)
-                log("watcher exit after owner")
+        # Hook idle beats a visible working rule. Re-send working while the banner is up
+        # and a kiro process for this pane is still alive.
+        if banner and owners != "dead":
+            reported, misses = note_report(pane, path, "working", reported, misses)
+            if reported is None and misses >= 30:
                 return
+            continue
         if action == "idle" and screen_is_quiet(screen):
             if reported != "idle":
-                ok = send_report(pane, path, "idle", release=False)
-                if ok:
-                    reported = "idle"
-                    misses = 0
-                    log("watcher idle")
-                else:
-                    misses += 1
-                    if misses >= 30:
-                        log("watcher stopping after herdr failures")
-                        clear_watcher(path)
-                        return
+                reported, misses = note_report(pane, path, "idle", reported, misses)
+                if reported is None and misses >= 30:
+                    return
+                log("watcher idle")
             held = quiet_since is not None and now - quiet_since >= RELEASE_DELAY
             if reported == "idle" and not state["busy"] and held:
                 release_authority(pane, path)
@@ -902,18 +985,11 @@ def watch_loop(pane: str, path: str) -> None:
             continue
         if action == reported:
             continue
-        if action != "working":
+        if action != "working" or owners == "dead":
             continue
-        ok = send_report(pane, path, "working")
-        if ok:
-            reported = "working"
-            misses = 0
-        else:
-            misses += 1
-            if misses >= 30:
-                log("watcher stopping after herdr failures")
-                clear_watcher(path)
-                return
+        reported, misses = note_report(pane, path, "working", reported, misses)
+        if reported is None and misses >= 30:
+            return
 
 
 def session_of(payload: dict, ppid: int = 0) -> str:
@@ -954,6 +1030,7 @@ def main() -> int:
     session = session_of(payload)
     if event not in BUSY_EVENTS and event != "Stop":
         return 0
+    begin_tick()
     owner, owner_started = kiro_ancestor()
     log(f"event={event} session={session} pane={pane} chain={process_chain()}")
 

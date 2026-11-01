@@ -251,8 +251,8 @@ class GraceTests(unittest.TestCase):
             with mock.patch.object(hook, "pane_text", read), mock.patch.object(
                 hook, "send_report", report
             ), mock.patch.object(hook, "release_authority", report), mock.patch.object(
-                hook.time, "sleep", sleep
-            ):
+                hook, "agent_lookup", lambda _pane: "idle"
+            ), mock.patch.object(hook.time, "sleep", sleep):
                 hook.watch_loop("w1:p1", path)
         finally:
             hook.RELEASE_DELAY = previous_delay
@@ -377,6 +377,50 @@ class GraceTests(unittest.TestCase):
         with mock.patch.object(hook, "process_snapshot", snap):
             self.assertFalse(hook.alive(50, started="THEN"))
             self.assertTrue(hook.alive(50, started="NOW"))
+
+    def test_release_authority_reports_success(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: None)
+        calls = []
+
+        def fake_herdr(*args):
+            calls.append(args)
+            return True
+
+        with mock.patch.object(hook, "herdr", fake_herdr):
+            self.assertTrue(hook.release_authority("w1:p9", path))
+        self.assertEqual(calls[0][0], "release-agent")
+        self.assertIn("w1:p9", calls[0])
+
+    def test_watcher_exits_when_the_agent_is_gone(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: None)
+        reports = []
+
+        def report(*args, **kwargs):
+            reports.append(args)
+            return True
+
+        def banner(_pane):
+            return "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+
+        with mock.patch.object(hook, "pane_text", banner), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "gone"
+        ), mock.patch.object(hook, "send_report", report), mock.patch.object(
+            hook, "herdr", lambda *_args: True
+        ), mock.patch.object(hook.time, "sleep", lambda _delay: None):
+            hook.watch_loop("w1:p9", path)
+        self.assertEqual(reports, [])
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["watcher"], 0)
+        pidfile = os.path.join(directory, "pids", str(os.getpid()))
+        self.assertFalse(os.path.exists(pidfile))
+
+    def test_model_text_does_not_arm_the_idle_clear(self):
+        text = "The step is still thinking about the file list.\n"
+        self.assertFalse(hook.prompt_visible(text))
 
     def test_shell_after_exit_counts_as_settled(self):
         shell = "ubuntu@host:/workspace$\n"

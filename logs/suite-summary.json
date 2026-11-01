@@ -1,39 +1,14 @@
 {
-  "sequential": {
-    "banner_samples": 64,
-    "mid_run_idle": 0,
-    "idle_gap_s": 0.389,
-    "watcher_left": false
-  },
-  "parallel": {
-    "banner_samples": 38,
-    "mid_run_idle": 0,
-    "idle_gap_s": 0.332,
-    "watcher_left": false
-  },
-  "repeat": {
-    "banner_samples": 40,
-    "mid_run_idle": 0,
-    "idle_gap_s": 0.243,
-    "watcher_left": false
-  },
-  "watch": {
-    "banner_samples": 25,
-    "mid_run_idle": 0,
-    "idle_gap_s": 0.418,
-    "watcher_left": false
-  },
-  "solo": {
-    "banner_samples": 31,
-    "mid_run_idle": 0,
-    "idle_gap_s": 0.128,
-    "watcher_left": false,
-    "note": "third pass. first two passes each had one idle poll during the banner"
-  },
+  "sequential": {"banner_samples": 63, "mid_run_idle": 0, "idle_gap_s": 0.103, "watcher_left": false},
+  "parallel": {"banner_samples": 35, "mid_run_idle": 0, "idle_gap_s": 0.035, "watcher_left": false},
+  "repeat": {"banner_samples": 33, "mid_run_idle": 0, "idle_gap_s": 0.424, "watcher_left": false},
+  "watch": {"banner_samples": 24, "mid_run_idle": 0, "idle_gap_s": 0.209, "watcher_left": false},
+  "solo": {"banner_samples": 29, "mid_run_idle": 0, "idle_gap_s": 0.517, "watcher_left": false},
   "watch-tool": {
     "banner_samples": 25,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.107,
-    "watcher_left": false
+    "idle_gap_s": 0.353,
+    "watcher_left": false,
+    "note": "third pass. first two passes each had one idle poll during the banner"
   }
 }

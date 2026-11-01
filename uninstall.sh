@@ -160,13 +160,19 @@ if os.path.isfile(legacy_log):
         pass
 PY
 if command -v herdr >/dev/null 2>&1; then
+  failed=0
   if [ -n "${HERDR_SESSION:-}" ]; then
     if ! herdr --session "$HERDR_SESSION" server reload-agent-manifests; then
       echo "warning: herdr --session ${HERDR_SESSION} server reload-agent-manifests failed" >&2
+      failed=1
     fi
   fi
   if ! herdr server reload-agent-manifests; then
     echo "warning: herdr server reload-agent-manifests failed" >&2
+    failed=1
+  fi
+  if [ "$failed" -ne 0 ]; then
+    exit 1
   fi
 fi
 echo "Removed $DEST/herdr-kiro.json"

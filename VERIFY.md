@@ -57,19 +57,15 @@ Kiro CLI 2.37.0, herdr 0.9.5, engine v3. Polls are 0.4 seconds apart. Grace is 0
 
 | run | banner samples | non-working while banner up | idle after the run | watcher left |
 | --- | --- | --- | --- | --- |
-| sequential | 64 | 0 | 0.389s | no |
-| parallel | 38 | 0 | 0.332s | no |
-| repeat | 40 | 0 | 0.243s | no |
-| watch, `/workflow run watch-step` | 25 | 0 | 0.418s | no |
-| solo | 31 | 0 | 0.128s | no |
-| watch, model run-workflow tool | 25 | 0 | 0.107s | no |
+| sequential | 63 | 0 | 0.103s | no |
+| parallel | 35 | 0 | 0.035s | no |
+| repeat | 33 | 0 | 0.424s | no |
+| watch, `/workflow run watch-step` | 24 | 0 | 0.209s | no |
+| solo | 29 | 0 | 0.517s | no |
+| watch, model run-workflow tool | 25 | 0 | 0.353s | no |
 
-Solo showed one idle poll during the banner on the first two passes. The row above is the third pass. A 0.4 second poll can still land in the gap between working reports.
+The model-started watch had one idle poll during the banner on the first two passes. The row above is the third pass. A 0.4 second poll can still land on a one-frame idle prompt under the banner.
 
-The subagent widget (`⚠ 1 tool approval pending` with Approve all pending) was blocked on 12 of 12 polls while it stayed up. The first poll after it left was idle, and the next poll was working. The pane was idle at the end. `herdr agent explain` on the captured screen is blocked by `crew_approval` with no hook involved. With the watcher frozen, the same screen stayed blocked on 20 of 20 polls. With the watcher reporting working, the same screen flickered.
+The approval widget was blocked on 8 of 8 polls in each of 3 runs, and the watcher was gone after each. A double Ctrl-C during `two-step` removed the watcher in 0.971 seconds. No `report-agent` followed `watcher exit agent gone`, and the pid file was removed.
 
-One Ctrl-C went idle in 0.257s. Two Ctrl-Cs went idle in 0.508s. Neither emitted Stop. SIGTERM of the outer `kiro-cli` left the `kiro-cli-chat` child alive and the pane stopped reading working within 0.5s. herdr then reports the pane unknown because the agent process is gone.
-
-A payload with `session_id` stripped counted two SessionStarts as aggregate 2, stayed at 1 after the first Stop, and reached 0 after the second. Two SessionStarts with no Stop cleared once the idle prompt had been up.
-
-Plain chat went working on the first poll and idle at 2.8s.
+A live file-write chooser explained as `workflow_chooser_blocked`. The edit dialog with `requires approval · modify request` was not raised live. `herdr agent explain` on that dialog under a banner returns `tool_approval_edit`. The watcher asks herdr for that decision instead of parsing the toml itself. A failed `reload-agent-manifests` exits nonzero when `herdr` is on `PATH`.

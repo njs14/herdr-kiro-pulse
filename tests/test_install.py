@@ -33,6 +33,7 @@ class InstallTests(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = home
         env.pop("KIRO_HOOKS_DIR", None)
+        env.pop("HERDR_SESSION", None)
         completed = subprocess.run(
             ["sh", os.path.join(weird, "install.sh")],
             env=env,
@@ -162,6 +163,7 @@ class InstallTests(unittest.TestCase):
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
         env["HERDR_KIRO_LEGACY_DIR"] = legacy_dir
         env.pop("KIRO_HOOKS_DIR", None)
+        env.pop("HERDR_SESSION", None)
         completed = subprocess.run(
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
@@ -283,6 +285,36 @@ class InstallTests(unittest.TestCase):
         with open(hook_file + ".herdr-kiro-owned", encoding="utf-8") as handle:
             self.assertIn("sha256 ", handle.read())
 
+    def test_lost_marker_does_not_backup_our_own_hook(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        hook_file = os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")
+        os.remove(hook_file + ".herdr-kiro-owned")
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertFalse(os.path.exists(hook_file + ".user-modified"))
+        with open(hook_file, encoding="utf-8") as handle:
+            self.assertIn("herdr-kiro-SessionStart", handle.read())
+
     def test_failed_reload_is_printed_and_uninstall_uses_the_session(self):
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
@@ -307,7 +339,7 @@ class InstallTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertEqual(completed.returncode, 1, completed.stderr or completed.stdout)
         self.assertIn("reload-agent-manifests failed", completed.stderr)
         with open(log, encoding="utf-8") as handle:
             recorded = handle.read()
@@ -321,7 +353,7 @@ class InstallTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertEqual(completed.returncode, 1, completed.stderr or completed.stdout)
         self.assertIn("reload-agent-manifests failed", completed.stderr)
         with open(log, encoding="utf-8") as handle:
             self.assertIn("--session kiro-repro server reload-agent-manifests", handle.read())

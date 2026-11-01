@@ -54,8 +54,15 @@ def install_owned(dest, payload):
     if os.path.isfile(dest):
         with open(dest, "rb") as handle:
             existing = handle.read()
+    def ours(payload):
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+        return "herdr-kiro-SessionStart" in text or "workflow_banner_working" in text
+
     owned_hash = marker_hash(marker) if os.path.isfile(marker) else None
-    if existing is not None and owned_hash is None:
+    if existing is not None and owned_hash is None and not ours(existing):
         if not os.path.isfile(original):
             write_bytes(original, existing)
         else:
@@ -95,16 +102,21 @@ if rules and os.path.isfile(rules):
 PY
 reload_manifests() {
   if ! command -v herdr >/dev/null 2>&1; then
+    echo "herdr is not on PATH, skipped manifest reload" >&2
     return 0
   fi
+  failed=0
   if [ -n "${HERDR_SESSION:-}" ]; then
     if ! herdr --session "$HERDR_SESSION" server reload-agent-manifests; then
       echo "warning: herdr --session ${HERDR_SESSION} server reload-agent-manifests failed" >&2
+      failed=1
     fi
   fi
   if ! herdr server reload-agent-manifests; then
     echo "warning: herdr server reload-agent-manifests failed" >&2
+    failed=1
   fi
+  return "$failed"
 }
 if [ -f "$RULES" ]; then
   reload_manifests

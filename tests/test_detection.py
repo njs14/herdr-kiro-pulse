@@ -98,6 +98,18 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "blocked")
         self.assertEqual(rule, "workflow_approval_more_options")
 
+    def test_edit_approval_beats_the_banner(self):
+        state, rule = self.explain(
+            "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "────────\n"
+            "shell requires approval · modify request\n"
+            "> printf probe\n"
+            "────────\n"
+            "esc to close\n"
+        )
+        self.assertEqual(state, "blocked")
+        self.assertEqual(rule, "tool_approval_edit")
+
     def test_subagent_widget_beats_the_banner(self):
         state, rule = self.explain(
             " ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor\n"
