@@ -6,6 +6,8 @@ working after that drop is what holds the pane for the grace period.
 """
 import json
 import os
+import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -150,24 +152,26 @@ class GraceTests(unittest.TestCase):
 
     def test_parallel_steps_with_session_ids_stripped(self):
         key = hook.session_of({"cwd": "/work", "hook_event_name": "SessionStart"}, ppid=77)
-        self.assertNotEqual(key, "unknown")
-        self.assertEqual(key, hook.session_of({"cwd": "/work", "hook_event_name": "Stop"}, ppid=77))
-        other = hook.session_of({"cwd": "/work"}, ppid=78)
-        self.assertNotEqual(key, other)
+        self.assertEqual(key, hook.AGGREGATE)
+        self.assertEqual(key, hook.session_of({"cwd": "/work"}, ppid=78))
         state = hook.fresh_state()
-        state = hook.apply_event(state, "SessionStart", key, 1)
-        state = hook.apply_event(state, "SessionStart", key, 1.1)
-        state = hook.apply_event(state, "UserPromptSubmit", key, 1.2)
-        self.assertEqual(len(state["busy"]), 2)
-        state = hook.apply_event(state, "Stop", key, 3)
+        for moment in range(10):
+            state = hook.apply_event(state, "SessionStart", key, moment)
+            state = hook.apply_event(state, "PreToolUse", key, moment + 0.1)
         self.assertEqual(len(state["busy"]), 1)
-        self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], False, 3.2),
-            "working",
-        )
-        state = hook.apply_event(state, "Stop", key, 4)
+        state = hook.apply_event(state, "Stop", key, 20)
         self.assertEqual(state["busy"], {})
-        self.assertEqual(state["grace_until"], 4 + hook.SETTLE_SECS)
+        self.assertEqual(state["grace_until"], 20 + hook.SETTLE_SECS)
+
+    def test_banner_clear_ends_a_stripped_session_without_stop(self):
+        state = hook.apply_event(hook.fresh_state(), "SessionStart", hook.AGGREGATE, 1)
+        state = hook.end_aggregate(state, 5)
+        self.assertEqual(state["busy"], {})
+        self.assertEqual(state["grace_until"], 5 + hook.SETTLE_SECS)
+        self.assertEqual(
+            hook.next_action(len(state["busy"]), state["grace_until"], False, 5 + hook.SETTLE_SECS + 0.1),
+            "idle",
+        )
 
     def test_transcript_path_distinguishes_stripped_payloads(self):
         first = hook.session_of({"transcript_path": "/tmp/one.jsonl", "cwd": "/work"}, ppid=5)
@@ -205,11 +209,9 @@ class GraceTests(unittest.TestCase):
         def report(*_args):
             return True
 
-        with (
-            mock.patch.object(hook, "pane_text", read),
-            mock.patch.object(hook, "send_report", report),
-            mock.patch.object(hook.time, "sleep", sleep),
-        ):
+        with mock.patch.object(hook, "pane_text", read), mock.patch.object(
+            hook, "send_report", report
+        ), mock.patch.object(hook.time, "sleep", sleep):
             hook.watch_loop("w1:p1", path)
         self.assertEqual(reads["n"], 1)
         with open(path, encoding="utf-8") as handle:
@@ -220,7 +222,12 @@ class GraceTests(unittest.TestCase):
         class Proc:
             pid = 4321
 
-        def popen(*args, **kwargs):
+        real_popen = subprocess.Popen
+
+        def popen(args, *extra, **kwargs):
+            command = args[0] if isinstance(args, (list, tuple)) and args else ""
+            if command == "ps":
+                return real_popen(args, *extra, **kwargs)
             spawned["args"] = args
             return Proc()
 
@@ -278,6 +285,55 @@ class GraceTests(unittest.TestCase):
                 os.environ.pop("HERDR_KIRO_LOG", None)
             else:
                 os.environ["HERDR_KIRO_LOG"] = previous
+
+    def test_shell_wrapper_reuses_the_ancestor_key(self):
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "prototype"))
+        code = (
+            "import sys; sys.path.insert(0, %s); import herdr_kiro_state as hook; "
+            "print(hook.session_of({}))"
+        ) % repr(root)
+        quoted = shlex.quote(code)
+
+        def run():
+            completed = subprocess.run(
+                ["sh", "-c", "python3 -c " + quoted],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout.strip()
+
+        first = run()
+        second = run()
+        self.assertEqual(first, second)
+        self.assertEqual(first, hook.AGGREGATE)
+
+    def test_dead_kiro_drops_a_busy_session(self):
+        state = hook.apply_event(
+            hook.fresh_state(),
+            "UserPromptSubmit",
+            "sess",
+            1,
+            owner=424242,
+            owner_started="old",
+        )
+
+        def gone(_pid):
+            return None
+
+        with mock.patch.object(hook, "process_snapshot", gone):
+            later = hook.normalize(state, 10)
+        self.assertEqual(later["busy"], {})
+
+    def test_alive_rejects_a_reused_pid(self):
+        def snap(_pid):
+            return {"ppid": 1, "lstart": "NOW", "comm": "python"}
+
+        with mock.patch.object(hook, "process_snapshot", snap):
+            self.assertFalse(hook.alive(50, started="THEN"))
+            self.assertTrue(hook.alive(50, started="NOW"))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,2 @@
+agent_status=idle seq=283
+The trust-all confirmation is on the parent pane. herdr does not match it to a Kiro approval rule, so the status above is not blocked.

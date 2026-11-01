@@ -38,5 +38,21 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(document, handle, indent=2)
     handle.write("\n")
 PY
+RULES="$ROOT/prototype/kiro-detection.toml"
+if [ -f "$RULES" ]; then
+  CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/agent-detection"
+  mkdir -p "$CONFIG"
+  if [ -f "$CONFIG/kiro.toml" ]; then
+    cp -p "$CONFIG/kiro.toml" "$CONFIG/kiro.toml.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+  cp "$RULES" "$CONFIG/kiro.toml"
+  if command -v herdr >/dev/null 2>&1; then
+    if [ -n "${HERDR_SESSION:-}" ]; then
+      herdr --session "$HERDR_SESSION" server reload-agent-manifests >/dev/null 2>&1 || true
+    fi
+    herdr server reload-agent-manifests >/dev/null 2>&1 || true
+  fi
+  echo "Installed $CONFIG/kiro.toml"
+fi
 echo "Installed $TARGET"
 echo "Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat --v3"

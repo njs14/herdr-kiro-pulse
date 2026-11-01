@@ -37,15 +37,16 @@ State and the hook log live in `$XDG_STATE_HOME/herdr-kiro` or `~/.local/state/h
 ./uninstall.sh
 ```
 
-That removes `~/.kiro/hooks/herdr-kiro.json`, stops `herdr_kiro_state.py --watch` processes, and deletes the state directory files plus the old `/tmp/herdr-kiro-*` files.
+That removes the hook file and restores the newest `herdr-kiro.json.bak.*` if one exists, then deletes the backups. It stops only the watchers recorded for this user under the state directory's `pids` files. It leaves `*.seq` in place so the next install does not restart the sequence at 1. It also removes the Kiro detection override when that file is the one this repo installed.
 
 ## Check
 
 ```bash
-python3 -m unittest tests/test_grace.py
+python3 -m unittest tests.test_grace tests.test_install tests.test_detection
+tests/run_py39.sh
 python3 harness/run_suite.py
 ```
 
 The suite needs a herdr session named `kiro-repro`, a Kiro pane, and `KIRO_API_KEY` in that pane's environment. It runs sequential, parallel, repeat, and watch workflows, plus one workflow Kiro starts from a normal prompt (`solo`). Poll logs land in `logs/`. A run passes when the pane stays working from the first banner sample until the last Stop, then stays idle, and the first of four idle samples in a row is within 3.5 seconds of that Stop and not before 2.5 seconds. After each run the suite checks that no `herdr_kiro_state.py --watch` process is left. Stop lines for the run are copied to `logs/stops-<name>.txt`.
 
-A session that never sends Stop is dropped after 30 minutes. A visible `running` workflow banner keeps the pane working when a watcher is already running and no step session is busy. A command watch started with `/workflow run` does not emit a hook while the banner is up, so that banner stays idle. A watch the model starts with the run-workflow tool is held, aside from a single poll that can land in the footer repaint.
+A named session that never sends Stop is dropped after 30 minutes, or sooner when its Kiro process has exited. A hook payload with no session id shares one slot for the pane. Each Kiro hook is a new process, so a parent pid cannot identify the session. That slot ends on Stop, on the workflow banner clearing, or when `kiro-cli` exits, and then the 3 second grace runs. It does not accumulate one busy entry per event. `install.sh` also writes `~/.config/herdr/agent-detection/kiro.toml`. That file is a local detection override. Herdr 0.9.5 loads it without a rebuild. A visible `▶ name running … ctrl+x … ctrl+g` banner is working, at a higher priority than the idle prompt. The approval chooser footer is a higher priority still, so a banner above `esc to close · to navigate · to select` stays blocked. `herdr server reload-agent-manifests` picks the file up in a running server.

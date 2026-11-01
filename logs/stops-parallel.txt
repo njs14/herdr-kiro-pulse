@@ -1,23 +1,23 @@
-1793522247.672 pid=86769 state event=SessionStart busy=1 grace_until=0.000
-1793522247.683 pid=86771 state event=SessionStart busy=2 grace_until=0.000
-1793522247.711 pid=86780 state event=UserPromptSubmit busy=2 grace_until=0.000
-1793522247.718 pid=86782 state event=UserPromptSubmit busy=2 grace_until=0.000
-1793522250.196 pid=86917 state event=PreToolUse busy=2 grace_until=0.000
-1793522251.628 pid=87008 state event=PreToolUse busy=2 grace_until=0.000
-1793522256.251 pid=87255 state event=PostToolUse busy=2 grace_until=0.000
-1793522257.684 pid=87338 state event=PostToolUse busy=2 grace_until=0.000
-1793522257.888 pid=87349 state event=PreToolUse busy=2 grace_until=0.000
-1793522257.932 pid=87355 state event=PostToolUse busy=2 grace_until=0.000
-1793522259.207 pid=87436 state event=PreToolUse busy=2 grace_until=0.000
-1793522259.248 pid=87447 state event=PostToolUse busy=2 grace_until=0.000
-1793522259.797 pid=87476 event=Stop session=sess_f435b0dc-3fe4-42df-940f-cd4d00930311 pane=w1:p1
-1793522259.797 pid=87476 state event=Stop busy=1 grace_until=0.000
-1793522261.083 pid=87553 event=Stop session=sess_0ad70a80-a679-4fd3-b43f-edc425cf079d pane=w1:p1
-1793522261.083 pid=87553 state event=Stop busy=0 grace_until=1793522264.083
-1793522262.676 pid=87937 state event=UserPromptSubmit busy=1 grace_until=0.000
-1793522264.375 pid=88032 state event=PreToolUse busy=1 grace_until=0.000
-1793522264.416 pid=88037 state event=PostToolUse busy=1 grace_until=0.000
-1793522265.233 pid=88084 state event=PreToolUse busy=1 grace_until=0.000
-1793522265.283 pid=88098 state event=PostToolUse busy=1 grace_until=0.000
-1793522268.728 pid=88290 event=Stop session=sess_5a3d0fd9-36fe-4cf4-be05-4bcb8a5dab8b pane=w1:p1
-1793522268.728 pid=88290 state event=Stop busy=0 grace_until=1793522271.728
+1793525663.106 pid=175300 state event=SessionStart busy=1 grace_until=0.000
+1793525663.128 pid=175302 state event=SessionStart busy=2 grace_until=0.000
+1793525663.374 pid=175375 state event=UserPromptSubmit busy=2 grace_until=0.000
+1793525663.405 pid=175380 state event=UserPromptSubmit busy=2 grace_until=0.000
+1793525665.625 pid=175638 state event=PreToolUse busy=2 grace_until=0.000
+1793525665.744 pid=175654 state event=PreToolUse busy=2 grace_until=0.000
+1793525671.840 pid=176246 state event=PostToolUse busy=2 grace_until=0.000
+1793525671.998 pid=176284 state event=PostToolUse busy=2 grace_until=0.000
+1793525673.722 pid=176486 state event=PreToolUse busy=2 grace_until=0.000
+1793525673.899 pid=176521 state event=PreToolUse busy=2 grace_until=0.000
+1793525673.946 pid=176523 state event=PostToolUse busy=2 grace_until=0.000
+1793525674.147 pid=176617 state event=PostToolUse busy=2 grace_until=0.000
+1793525675.913 pid=176816 event=Stop session=sess_bb89c3ee-f8ab-4e06-9d4f-3eb8a6b197fe pane=w1:p1 chain=176812:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:server
+1793525675.934 pid=176816 state event=Stop busy=1 grace_until=0.000
+1793525676.412 pid=176885 event=Stop session=sess_fd40033c-e5c1-4031-ae30-4f538d461358 pane=w1:p1 chain=176884:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:server
+1793525676.420 pid=176885 state event=Stop busy=0 grace_until=1793525679.356
+1793525676.888 pid=176923 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793525679.172 pid=177059 state event=PreToolUse busy=1 grace_until=0.000
+1793525679.316 pid=177104 state event=PostToolUse busy=1 grace_until=0.000
+1793525679.868 pid=177154 state event=PreToolUse busy=1 grace_until=0.000
+1793525680.026 pid=177191 state event=PostToolUse busy=1 grace_until=0.000
+1793525683.042 pid=177404 event=Stop session=sess_7d379ae7-8285-4c29-ba31-23e8612881dc pane=w1:p1 chain=177403:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:server
+1793525683.052 pid=177404 state event=Stop busy=0 grace_until=1793525685.984

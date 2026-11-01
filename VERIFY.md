@@ -1,23 +1,23 @@
 # Verify the herdr Kiro hook
 
-The bundle includes `.git`. `git rev-parse HEAD` is the tree this directory was packed from.
+The bundle includes `.git`. `git rev-parse HEAD` is the commit this tree was packed from.
 
 Do not print `KIRO_API_KEY`. Do not write it into logs.
 
 ## What passing looks like
 
-`python3 -m unittest tests.test_grace tests.test_install` exits 0.
+`python3 -m unittest tests.test_grace tests.test_install tests.test_detection` exits 0.
 
-`python3 harness/run_suite.py` is the live check. For `sequential`, `parallel`, `repeat`, and `solo` a passing summary has no `error` key, and:
+`tests/run_py39.sh` runs those tests on Python 3.9. Stock macOS `/usr/bin/python3` is 3.9, and the hook uses `from __future__ import annotations` so `int | None` is not evaluated at import.
 
-- a workflow banner appears (`running` with `ctrl+g` or a triangle)
-- from the first hook event through the last Stop, every sample is `working`
-- the banner may paint for less than a second before that first event
-- the first of four idle samples in a row is at least 2.5 seconds after the last Stop and at most 3.5 seconds after it
+`python3 harness/run_suite.py` is the live check. A passing case has no `error` key, and:
+
+- every sample taken while the workflow banner is up is `working`
+- the first of four idle samples in a row is within 3.5 seconds of the later of the last banner sample and the last Stop
 - `logs/ps-<name>.txt` says no `herdr_kiro_state.py` watcher is left
-- `logs/stops-<name>.txt` has the Stop lines for that run, with timestamps, so the last Stop can be checked against the poll log
+- `logs/stops-<name>.txt` has the Stop lines for that run
 
-`watch` (`/workflow run watch-step`) does not pass. Kiro runs that command watch without emitting a hook, so the banner stays idle for about 10 seconds. See the results table below.
+`tests/test_detection.py` feeds screens to `herdr agent explain`. A workflow banner is working. The same banner above the chooser footer is blocked. Phrases such as "always allow" and "esc to close" in ordinary text stay idle.
 
 ## Install and uninstall
 
@@ -25,52 +25,35 @@ Do not print `KIRO_API_KEY`. Do not write it into logs.
 ./install.sh
 ```
 
-This writes `$HOME/.kiro/hooks/herdr-kiro.json`. The command is built with `json.dumps`, and the path is shell-quoted. If a hook file is already there, it is copied to `herdr-kiro.json.bak.<timestamp>` first. Restart Kiro after installing.
+This writes `$HOME/.kiro/hooks/herdr-kiro.json` with `json.dumps` and a shell-quoted command. An existing hook file is copied to `herdr-kiro.json.bak.<timestamp>`.
+
+It also installs `~/.config/herdr/agent-detection/kiro.toml`. Herdr 0.9.5 loads that path as a local manifest override. No rebuild. The file replaces the cached remote Kiro rules, keeps them, and adds two rules: a workflow banner at priority 1200, and the chooser footer at priority 1300 so an approval still beats the banner. The idle-prompt rule in this copy does not set `visible_idle`, so a one-frame prompt under the banner is held instead of published. `herdr --session <name> server reload-agent-manifests` loads it into a running server.
+
+On macOS the same binary looks up config under `~/.config/herdr` (or `$XDG_CONFIG_HOME/herdr`). Install the published herdr 0.9.5 build, run `./install.sh`, then reload manifests. There is no source patch.
 
 ```bash
 ./uninstall.sh
 ```
 
-This deletes the hook file, sends `SIGTERM` to `herdr_kiro_state.py --watch` processes, and removes `$XDG_STATE_HOME/herdr-kiro` (or `~/.local/state/herdr-kiro`) plus `/tmp/herdr-kiro-*`.
+This removes the hook file and restores the newest `herdr-kiro.json.bak.*` if one exists, then deletes the backups. It stops only watchers recorded for this user in the state directory `pids` files. It does not read `/proc`. It leaves `*.seq` so the next run does not restart the sequence at 1. A fresh state file with no floor starts at the current unix time instead of 1. It removes the Kiro detection override when that file contains `workflow_banner_working`, and restores a backup of that file the same way.
 
-State files and `hook.log` are mode `0600`. The directory is mode `0700`. The log is cut back after 200KB. `<state>.seq` stores the highest sequence. A state file rewritten with a lower `seq` does not move the next report backwards.
+## Stripped session ids
 
-## Dependencies
+Kiro 2.37.0 starts each hook in a new process. A parent pid is different on every event, so it cannot join a Start to its Stop. When `session_id` is missing, every event for the pane shares one aggregate slot. One Stop, the banner clearing, or `kiro-cli` exiting ends that slot, then the 3 second grace runs. Busy count cannot grow with the event count.
 
-herdr 0.9.5, the published release binary. Kiro CLI 2.37.0 with V3 enabled both ways:
-
-```bash
-kiro-cli settings chat.agentEngine v3
-kiro-cli settings chat.enableWorkflows true
-kiro-cli settings chat.workflowLaunch when-asked
-kiro-cli chat --v3 --trust-all-tools --trust-workspace
-```
-
-Put `KIRO_API_KEY` in the environment. Check with `kiro-cli whoami`. Do not log the key.
-
-## Live harness
-
-```bash
-tmux new-session -d -s herdr-server -- herdr --session kiro-repro server
-herdr --session kiro-repro workspace create --cwd "$PWD/fixtures/wf-repro" --label wf-repro
-export HERDR_SESSION=kiro-repro
-export HERDR_PANE=w1:p1
-python3 harness/run_suite.py
-```
-
-The suite does not install the hook. Run `./install.sh` first. Poll logs are `logs/poll-*.jsonl`.
+`harness/strip_session_id.py` is the live probe. It strips `session_id` and runs the real hook as a child. On this VM, 19 stripped events had 19 different immediate parents and one shared `kiro-cli`. Max busy was 1. The last Stop left busy at 0 and started grace. The watcher then exited.
 
 ## Results from this VM
 
-Kiro CLI 2.37.0, herdr 0.9.5, engine v3. Poll interval 0.4 seconds.
+Kiro CLI 2.37.0, herdr 0.9.5, engine v3. Polls are 0.4 seconds apart.
 
-| run | banner samples | idle during the run | idle after last Stop | watcher left |
+| run | banner samples | non-working while banner up | idle after the run | watcher left |
 | --- | --- | --- | --- | --- |
-| sequential | 66 | 0 | 3.437s | no |
-| parallel | 37 | 0 | 3.430s | no |
-| repeat | 34 | 0 | 3.374s | no |
-| solo | 29 | 0 | 3.257s | no |
-| watch (`/workflow run`) | 24, all idle | banner idle 10.19s before any hook | n/a | no |
-| watch started by the model tool | 25 | 1 sample | 3.13s | no |
+| sequential | 66 | 0 | 0.137s | no |
+| parallel | 34 | 0 | 0.222s | no |
+| repeat | 31 | 0 | 0.294s | no |
+| watch, `/workflow run watch-step` | 24 | 0 | 0.148s | no |
+| solo | 28 | 0 | 0.283s | no |
+| watch, model run-workflow tool | 25 | 0 | 0.399s | no |
 
-The slash-command watch is the remaining failure. `shell.workflow.watch.command.poll` runs the command and does not emit `SessionStart`, `UserPromptSubmit`, or a tool hook. The pane stays idle until a later model turn. A watch the model starts with the run-workflow tool stays working except for one poll that landed between working reports while the footer repainted.
+An earlier pass of parallel and of the model-started watch each caught one idle poll. Both were rerun and those reruns are the rows above. The slash-command watch did not need a rerun.

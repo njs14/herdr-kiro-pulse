@@ -11,6 +11,8 @@ after Stop, and it remembers the sequence number. A single idle report 3s
 later arrives after the pane is already idle. This process re-sends working
 until the grace ends, then reports idle, releases, and exits.
 """
+from __future__ import annotations
+
 import fcntl
 import json
 import os
@@ -23,12 +25,10 @@ SOURCE = "hook:kiro"
 AGENT = "kiro"
 SETTLE_SECS = 3.0
 STALE_SECS = 1800.0
-TICK_SECS = 0.15
-# The footer repaint was measured at 0.18s, and a later parent repaint landed
-# about 0.6s after Stop. Keep re-sending through that whole window.
-REASSERT_SECS = 1.5
-REASSERT_TICK = 0.02
+TICK_SECS = 0.2
 BUSY_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
+# No session id shares one slot. A per-event pid never matches its own Stop.
+AGGREGATE = "aggregate"
 FILE_MODE = 0o600
 DIR_MODE = 0o700
 LOG_LIMIT = 200_000
@@ -97,20 +97,34 @@ def fresh_state() -> dict:
         "reported": None,
         "watcher": 0,
         "watcher_at": 0.0,
+        "watcher_started": "",
         "grace_started": 0.0,
+        "owners": {},
+        "owner_started": {},
     }
 
 
 def normalize(state: dict, now: float) -> dict:
     busy = state.get("busy") if isinstance(state.get("busy"), dict) else {}
+    owners = state.get("owners") if isinstance(state.get("owners"), dict) else {}
+    owner_started = state.get("owner_started") if isinstance(state.get("owner_started"), dict) else {}
     kept = {}
+    kept_owners = {}
+    kept_started = {}
     for session, stamp in busy.items():
         try:
             seen = float(stamp)
         except (TypeError, ValueError):
             continue
+        key = str(session)
+        if owner_is_dead(owners.get(key), owner_started.get(key)):
+            continue
         if now - seen < STALE_SECS:
-            kept[str(session)] = seen
+            kept[key] = seen
+            if owners.get(key):
+                kept_owners[key] = owners.get(key)
+                if owner_started.get(key):
+                    kept_started[key] = owner_started.get(key)
     try:
         seq = int(state.get("seq") or 0)
     except (TypeError, ValueError):
@@ -138,7 +152,10 @@ def normalize(state: dict, now: float) -> dict:
         "reported": state.get("reported"),
         "watcher": watcher,
         "watcher_at": watcher_at,
+        "watcher_started": state.get("watcher_started") or "",
         "grace_started": grace_started,
+        "owners": kept_owners,
+        "owner_started": kept_started,
     }
 
 
@@ -147,18 +164,53 @@ def members_of(busy: dict, key: str) -> list:
     return [item for item in busy if item == key or item.startswith(prefix)]
 
 
-def apply_event(state: dict, event: str, session: str, now: float) -> dict:
+def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
+    if not owner:
+        return
+    state["owners"][key] = int(owner)
+    if started:
+        state["owner_started"][key] = started
+
+
+def end_aggregate(state: dict, now: float) -> dict:
+    """Drop the no-id slot. Banner clear and a dead Kiro process both end here."""
+    nxt = normalize(state, now)
+    removed = False
+    for key in list(nxt["busy"]):
+        if key == AGGREGATE or str(key).startswith(AGGREGATE + "#"):
+            nxt["busy"].pop(key, None)
+            nxt["owners"].pop(key, None)
+            nxt["owner_started"].pop(key, None)
+            removed = True
+    if removed and not nxt["busy"]:
+        nxt["grace_until"] = now + SETTLE_SECS
+        nxt["grace_started"] = now
+    return nxt
+
+
+def apply_event(state: dict, event: str, session: str, now: float, owner: int = 0, owner_started: str = "") -> dict:
     """Fold one hook event into pane state. Pure aside from the clock passed in."""
     nxt = normalize(state, now)
+    if session == AGGREGATE:
+        if event in BUSY_EVENTS:
+            nxt["busy"][AGGREGATE] = now
+            remember_owner(nxt, AGGREGATE, owner, owner_started)
+            nxt["grace_until"] = 0.0
+        elif event == "Stop":
+            nxt = end_aggregate(nxt, now)
+        return nxt
     if event in BUSY_EVENTS:
         if event == "SessionStart" and session in nxt["busy"]:
             # Two live sessions collapsed onto one key. Keep both until both stop.
             index = 2
             while f"{session}#{index}" in nxt["busy"]:
                 index += 1
-            nxt["busy"][f"{session}#{index}"] = now
+            slot = f"{session}#{index}"
+            nxt["busy"][slot] = now
+            remember_owner(nxt, slot, owner, owner_started)
         elif event == "SessionStart" or not members_of(nxt["busy"], session):
             nxt["busy"][session] = now
+            remember_owner(nxt, session, owner, owner_started)
         else:
             for member in members_of(nxt["busy"], session):
                 nxt["busy"][member] = now
@@ -166,11 +218,15 @@ def apply_event(state: dict, event: str, session: str, now: float) -> dict:
     elif event == "Stop":
         if session in nxt["busy"]:
             nxt["busy"].pop(session, None)
+            nxt["owners"].pop(session, None)
+            nxt["owner_started"].pop(session, None)
         else:
             members = members_of(nxt["busy"], session)
             if members:
                 oldest = min(members, key=lambda item: (nxt["busy"][item], item))
                 nxt["busy"].pop(oldest, None)
+                nxt["owners"].pop(oldest, None)
+                nxt["owner_started"].pop(oldest, None)
         if not nxt["busy"]:
             nxt["grace_until"] = now + SETTLE_SECS
             nxt["grace_started"] = now
@@ -244,6 +300,9 @@ def update(path: str, fn):
         floor = read_seq_floor(path)
         if state["seq"] < floor:
             state["seq"] = floor
+        elif floor == 0 and state["seq"] == 0:
+            # A deleted floor must not restart at seq 1. herdr ignores that.
+            state["seq"] = int(time.time())
         fn(state)
         state = normalize(state, time.time())
         if state["seq"] < floor:
@@ -312,22 +371,10 @@ def send_report(pane: str, path: str, working: bool) -> bool:
     ) and ok
 
 
-def reassert_working(pane: str, path: str) -> None:
-    """Cover the footer repaint. Herdr drops working about 0.18s after Stop."""
-    deadline = time.time() + REASSERT_SECS
-    while True:
-        if not send_report(pane, path, True):
-            return
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            return
-        time.sleep(min(REASSERT_TICK, remaining))
-
-
 def pane_text(pane: str) -> str:
     try:
         return subprocess.check_output(
-            ["herdr", "pane", "read", pane, "--source", "visible", "--lines", "24"],
+            ["herdr", "pane", "read", pane, "--source", "visible", "--lines", "80"],
             text=True,
             timeout=5,
         )
@@ -349,14 +396,125 @@ def workflow_banner(pane: str) -> bool:
     return workflow_banner_from(pane_text(pane))
 
 
-def alive(pid: int) -> bool:
+def process_snapshot(pid: int) -> dict:
+    """Return ppid, lstart, and comm. None if the pid is gone. error if ps fails."""
     if pid <= 0:
+        return None
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "ppid=", "-o", "lstart=", "-o", "comm="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"error": True}
+    text = (completed.stdout or "").strip()
+    if completed.returncode != 0 or not text:
+        return None
+    parts = text.split()
+    if len(parts) < 3:
+        return {"error": True}
+    try:
+        ppid = int(parts[0])
+    except ValueError:
+        return {"error": True}
+    return {"ppid": ppid, "lstart": " ".join(parts[1:-1]), "comm": parts[-1]}
+
+
+def owner_is_dead(owner, started: str) -> bool:
+    if not owner:
         return False
     try:
-        os.kill(pid, 0)
-    except OSError:
+        pid = int(owner)
+    except (TypeError, ValueError):
+        return False
+    snap = process_snapshot(pid)
+    if snap is None:
+        return True
+    if snap.get("error"):
+        return False
+    if started and snap.get("lstart") != started:
+        return True
+    return False
+
+
+def alive(pid: int, started: str = "") -> bool:
+    if pid <= 0:
+        return False
+    snap = process_snapshot(pid)
+    if snap is None:
+        return False
+    if snap.get("error"):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return not started
+    if started and snap.get("lstart") != started:
         return False
     return True
+
+
+def command_name(comm: str) -> str:
+    name = os.path.basename(comm or "").lower()
+    if name.startswith("-"):
+        name = name[1:]
+    return name
+
+
+def kiro_ancestor() -> tuple:
+    """Pid and start time of the kiro-cli process above this hook, if any."""
+    pid = os.getppid()
+    seen = set()
+    while pid > 1 and pid not in seen and len(seen) < 15:
+        seen.add(pid)
+        snap = process_snapshot(pid)
+        if not snap or snap.get("error"):
+            break
+        if "kiro" in command_name(snap.get("comm") or ""):
+            return pid, snap.get("lstart") or ""
+        pid = int(snap.get("ppid") or 0)
+    return 0, ""
+
+
+def process_chain() -> str:
+    """Comms and pids above this process. Comms only, never arguments."""
+    pid = os.getppid()
+    seen = set()
+    parts = []
+    while pid > 1 and pid not in seen and len(parts) < 8:
+        seen.add(pid)
+        snap = process_snapshot(pid)
+        if not snap or snap.get("error"):
+            parts.append("%s:?" % pid)
+            break
+        parts.append("%s:%s" % (pid, command_name(snap.get("comm") or "")))
+        pid = int(snap.get("ppid") or 0)
+    return " ".join(parts)
+
+
+def write_pidfile(state_file: str, pid: int, started: str) -> None:
+    directory = os.path.join(os.path.dirname(state_file), "pids")
+    os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
+    try:
+        os.chmod(directory, DIR_MODE)
+    except OSError:
+        pass
+    path = os.path.join(directory, str(pid))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"{os.getuid()}\n{started}\n")
+
+
+def remove_pidfile(state_file: str, pid: int) -> None:
+    path = os.path.join(os.path.dirname(state_file), "pids", str(pid))
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def ensure_watcher(pane: str, path: str) -> None:
@@ -366,7 +524,7 @@ def ensure_watcher(pane: str, path: str) -> None:
         now = time.time()
         pid = int(state.get("watcher") or 0)
         claimed = pid == -1 and now - float(state.get("watcher_at") or 0) < 2
-        if claimed or alive(pid):
+        if claimed or alive(pid, state.get("watcher_started") or ""):
             return
         state["watcher"] = -1
         state["watcher_at"] = now
@@ -382,7 +540,17 @@ def ensure_watcher(pane: str, path: str) -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    update(path, lambda state: state.__setitem__("watcher", proc.pid))
+    started = ""
+    snap = process_snapshot(proc.pid)
+    if snap and not snap.get("error"):
+        started = snap.get("lstart") or ""
+
+    def record(state: dict) -> None:
+        state["watcher"] = proc.pid
+        state["watcher_started"] = started
+
+    update(path, record)
+    write_pidfile(path, proc.pid, started)
     log(f"watcher spawned pid={proc.pid}")
 
 
@@ -390,25 +558,42 @@ def clear_watcher(path: str) -> None:
     def clear(state: dict) -> None:
         if int(state.get("watcher") or 0) == os.getpid():
             state["watcher"] = 0
+            state["watcher_started"] = ""
 
     update(path, clear)
+    remove_pidfile(path, os.getpid())
 
 
 def watch_loop(pane: str, path: str) -> None:
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    update(path, lambda state: state.__setitem__("watcher", os.getpid()))
+    snap = process_snapshot(os.getpid())
+    started = "" if not snap or snap.get("error") else snap.get("lstart") or ""
+
+    def claim(state: dict) -> None:
+        state["watcher"] = os.getpid()
+        state["watcher_started"] = started
+
+    update(path, claim)
+    write_pidfile(path, os.getpid(), started)
     log(f"watcher loop pane={pane}")
-    sent_idle = False
+    reported = None
     misses = 0
-    delay = TICK_SECS
+    saw_banner = False
     while True:
-        time.sleep(delay)
+        time.sleep(TICK_SECS)
         state = update(path, lambda _state: None)
         screen = pane_text(pane)
         if approval_text(screen):
-            delay = TICK_SECS
             continue
-        banner = False if state["busy"] else workflow_banner_from(screen)
+        banner = workflow_banner_from(screen)
+        if saw_banner and not banner:
+            def clear_aggregate(current: dict) -> None:
+                revised = end_aggregate(current, time.time())
+                current.clear()
+                current.update(revised)
+
+            state = update(path, clear_aggregate)
+        saw_banner = banner or saw_banner
         if banner:
             def extend(current: dict) -> None:
                 revised = note_banner(current, True, time.time())
@@ -421,39 +606,30 @@ def watch_loop(pane: str, path: str) -> None:
             banner,
             time.time(),
         )
-        if action == "working":
-            sent_idle = False
-            started = float(state.get("grace_started") or 0)
-            now = time.time()
-            until = float(state.get("grace_until") or 0)
-            # Fast ticks across the footer repaint, and again at the end of grace
-            # so the idle report is not a 0.15s tick late. A 0.4s poll then still
-            # lands inside 3.5s of Stop.
-            drop_window = (not state["busy"]) and (
-                started <= now < started + 1.5 or until - 0.4 <= now <= until
-            )
-            delay = 0.05 if drop_window else TICK_SECS
+        # Hook idle beats a visible working rule, and one dropped working
+        # report stays idle. Re-send working while the banner is up.
+        if banner:
             ok = send_report(pane, path, True)
-        else:
-            if not sent_idle:
-                ok = send_report(pane, path, False)
-                sent_idle = True
-                log("watcher idle")
+            if ok:
+                reported = "working"
+                misses = 0
             else:
-                ok = True
-
-            def finish(current: dict) -> None:
-                if current["busy"] or time.time() < float(current.get("grace_until") or 0):
+                misses += 1
+                if misses >= 30:
+                    clear_watcher(path)
                     return
-                if int(current.get("watcher") or 0) == os.getpid():
-                    current["watcher"] = 0
-
-            state = update(path, finish)
-            if int(state.get("watcher") or 0) != os.getpid():
+            continue
+        if action == reported:
+            if action == "idle":
+                clear_watcher(path)
                 log("watcher exit")
                 return
-            delay = TICK_SECS
+            continue
+        ok = send_report(pane, path, action == "working")
+        if action == "idle":
+            log("watcher idle")
         if ok:
+            reported = action
             misses = 0
         else:
             misses += 1
@@ -461,18 +637,20 @@ def watch_loop(pane: str, path: str) -> None:
                 log("watcher stopping after herdr failures")
                 clear_watcher(path)
                 return
+        if action == "idle":
+            clear_watcher(path)
+            log("watcher exit")
+            return
 
 
-def session_of(payload: dict, ppid: int | None = None) -> str:
+def session_of(payload: dict, ppid: int = 0) -> str:
     """Stable id for one Kiro session.
 
-    V3's hook builder always sends session_id (plus cwd and hook_event_name).
-    It does not send a transcript path. A Stop with those two fields removed is
-    identical for every parallel step, so hashing the remaining body merges them.
-    A transcript path is used when a caller has one. Otherwise the hook parent
-    pid separates step processes, and a second SessionStart on that same key
-    keeps its own slot until its own Stop.
+    V3 sends session_id. A stripped payload has no per-session field: each hook
+    is a new process, so a parent pid never matches the next event. Those events
+    share one aggregate slot. ppid is accepted and ignored.
     """
+    del ppid
     for key in ("session_id", "sessionId"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
@@ -481,8 +659,7 @@ def session_of(payload: dict, ppid: int | None = None) -> str:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return "transcript:" + value
-    parent = os.getppid() if ppid is None else ppid
-    return f"ppid:{parent}"
+    return AGGREGATE
 
 
 def main() -> int:
@@ -504,10 +681,11 @@ def main() -> int:
     session = session_of(payload)
     if event not in BUSY_EVENTS and event != "Stop":
         return 0
-    log(f"event={event} session={session} pane={pane}")
+    owner, owner_started = kiro_ancestor()
+    log(f"event={event} session={session} pane={pane} chain={process_chain()}")
 
     def fold(state: dict) -> None:
-        revised = apply_event(state, event, session, now)
+        revised = apply_event(state, event, session, now, owner, owner_started)
         state.clear()
         state.update(revised)
 
@@ -517,12 +695,15 @@ def main() -> int:
         f"grace_until={state['grace_until']:.3f}"
     )
     ensure_watcher(pane, path)
-    action = next_action(len(state["busy"]), float(state["grace_until"]), False, time.time())
+    screen = pane_text(pane)
+    action = next_action(
+        len(state["busy"]),
+        float(state["grace_until"]),
+        workflow_banner_from(screen),
+        time.time(),
+    )
     if action == "working":
-        if event == "Stop" and not state["busy"]:
-            reassert_working(pane, path)
-        else:
-            send_report(pane, path, True)
+        send_report(pane, path, True)
     return 0
 
 

@@ -80,11 +80,29 @@ class InstallTests(unittest.TestCase):
         legacy_state = os.path.join(legacy_dir, "herdr-kiro-w1_p1.json")
         with open(legacy_state, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
+        seq_file = os.path.join(state, "w1_p1.json.seq")
+        with open(seq_file, "w", encoding="utf-8") as handle:
+            handle.write("3000000\n")
+        newest = os.path.join(hooks, "herdr-kiro.json.bak.20260102000000")
+        older = os.path.join(hooks, "herdr-kiro.json.bak.20200101000000")
+        with open(newest, "w", encoding="utf-8") as handle:
+            handle.write('{"restored":true}\n')
+        with open(older, "w", encoding="utf-8") as handle:
+            handle.write('{"old":true}\n')
         script = os.path.join(base, "herdr_kiro_state.py")
         with open(script, "w", encoding="utf-8") as handle:
             handle.write("import time\ntime.sleep(60)\n")
         watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file])
+        decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file])
         self.addCleanup(lambda: watcher.poll() is not None or watcher.kill())
+        self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
+        started = subprocess.check_output(
+            ["ps", "-p", str(watcher.pid), "-o", "lstart="], text=True
+        ).strip()
+        pid_dir = os.path.join(state, "pids")
+        os.makedirs(pid_dir)
+        with open(os.path.join(pid_dir, str(watcher.pid)), "w", encoding="utf-8") as handle:
+            handle.write("%s\n%s\n" % (os.getuid(), started))
         env = dict(os.environ)
         env["HOME"] = home
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
@@ -99,12 +117,21 @@ class InstallTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
-        self.assertFalse(os.path.exists(hook_file))
+        with open(os.path.join(ROOT, "uninstall.sh"), encoding="utf-8") as handle:
+            self.assertNotIn("/proc", handle.read())
+        with open(hook_file, encoding="utf-8") as handle:
+            self.assertIn("restored", handle.read())
+        self.assertFalse(os.path.exists(newest))
+        self.assertFalse(os.path.exists(older))
         self.assertFalse(os.path.exists(state_file))
+        self.assertTrue(os.path.exists(seq_file))
         self.assertFalse(os.path.exists(legacy))
         self.assertFalse(os.path.exists(legacy_state))
         watcher.wait(timeout=5)
-        self.assertNotEqual(watcher.returncode, None)
+        self.assertIsNotNone(watcher.returncode)
+        self.assertIsNone(decoy.poll())
+        decoy.kill()
+        decoy.wait(timeout=5)
 
 
 if __name__ == "__main__":

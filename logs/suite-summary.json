@@ -2,52 +2,67 @@
   "sequential": {
     "banner_samples": 66,
     "mid_run_idle": 0,
-    "lead_idle": 0,
-    "idle_gap_s": 3.437,
-    "last_stop": 1793522241.709,
+    "idle_gap_s": 0.137,
+    "anchor": 1793525451.937,
+    "last_stop": 1793525451.937,
     "log": "/workspace/logs/poll-sequential.jsonl",
     "stops": 6,
     "stop_log": "/workspace/logs/stops-sequential.txt",
     "ps": "/workspace/logs/ps-sequential.txt"
   },
   "parallel": {
-    "banner_samples": 37,
+    "banner_samples": 34,
     "mid_run_idle": 0,
-    "lead_idle": 0,
-    "idle_gap_s": 3.43,
-    "last_stop": 1793522268.728,
+    "idle_gap_s": 0.222,
+    "anchor": 1793525683.052,
+    "last_stop": 1793525683.052,
     "log": "/workspace/logs/poll-parallel.jsonl",
     "stops": 6,
     "stop_log": "/workspace/logs/stops-parallel.txt",
     "ps": "/workspace/logs/ps-parallel.txt"
   },
   "repeat": {
-    "banner_samples": 34,
+    "banner_samples": 31,
     "mid_run_idle": 0,
-    "lead_idle": 0,
-    "idle_gap_s": 3.374,
-    "last_stop": 1793522294.383,
+    "idle_gap_s": 0.294,
+    "anchor": 1793525499.009,
+    "last_stop": 1793525499.009,
     "log": "/workspace/logs/poll-repeat.jsonl",
     "stops": 6,
     "stop_log": "/workspace/logs/stops-repeat.txt",
     "ps": "/workspace/logs/ps-repeat.txt"
   },
   "watch": {
-    "error": "watch: banner was idle for 10.19s before the first hook event",
-    "screen": "/workspace/logs/fail-watch.txt"
+    "banner_samples": 24,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.148,
+    "anchor": 1793525516.791,
+    "last_stop": 1793525516.791,
+    "log": "/workspace/logs/poll-watch.jsonl",
+    "stops": 2,
+    "stop_log": "/workspace/logs/stops-watch.txt",
+    "ps": "/workspace/logs/ps-watch.txt"
   },
   "solo": {
-    "banner_samples": 29,
+    "banner_samples": 28,
     "mid_run_idle": 0,
-    "lead_idle": 0,
-    "idle_gap_s": 3.257,
-    "last_stop": 1793522543.812,
+    "idle_gap_s": 0.283,
+    "anchor": 1793525538.499,
+    "last_stop": 1793525538.499,
     "log": "/workspace/logs/poll-solo.jsonl",
     "stops": 6,
     "stop_log": "/workspace/logs/stops-solo.txt",
     "ps": "/workspace/logs/ps-solo.txt"
   },
   "watch-tool": {
-    "error": "watch-tool: 1 non-working samples during the run"
+    "banner_samples": 25,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.399,
+    "anchor": 1793525702.713,
+    "last_stop": 1793525702.713,
+    "log": "/workspace/logs/poll-watch-tool.jsonl",
+    "stops": 4,
+    "stop_log": "/workspace/logs/stops-watch-tool.txt",
+    "ps": "/workspace/logs/ps-watch-tool.txt"
   }
 }

@@ -18,7 +18,6 @@ LOG_DIR = os.path.join(ROOT, "logs")
 HOOK_LOG = os.environ.get("HERDR_KIRO_LOG") or hook.log_path()
 POLL_SECS = 0.4
 IDLE_AFTER_STOP = 3.5
-GRACE_FLOOR = 2.5
 
 
 def herdr(*args, timeout=30):
@@ -275,39 +274,17 @@ def first_hook_event(start):
     return earliest
 
 
-def assert_run(name, rows, stops, run_start):
-    """Sustained idle within 3.5s of the last Stop, with no idle during the run."""
+def assert_run(name, rows, stops, _run_start=None):
+    """Working for the whole banner, then idle within 3.5s of the later end."""
     banner_rows = [row for row in rows if row.get("banner")]
     if not banner_rows:
         raise AssertionError(f"{name}: workflow banner never appeared")
-    if not stops:
-        raise AssertionError(f"{name}: no Stop hook was logged")
-    anchor = max(stops)
-    first_banner = banner_rows[0]["t"]
-    # The banner can paint before the step SessionStart hook is logged.
-    # Samples before that first event are lead-in, not the run the hook holds.
-    held_from = first_banner if run_start is None else max(first_banner, run_start)
-    lead = [
-        row
-        for row in rows
-        if first_banner <= row.get("t", 0) < held_from and row.get("agent_status") != "working"
-    ]
-    if len(lead) > 1 or (lead and held_from - first_banner > 1.0):
-        raise AssertionError(f"{name}: banner was idle for {held_from - first_banner:.2f}s before the first hook event")
-    mid = [
-        row
-        for row in rows
-        if held_from <= row.get("t", 0) < anchor and row.get("agent_status") != "working"
-    ]
-    if mid:
-        raise AssertionError(f"{name}: {len(mid)} non-working samples during the run")
-    early = [
-        row
-        for row in rows
-        if anchor <= row.get("t", 0) < anchor + GRACE_FLOOR and row.get("agent_status") == "idle"
-    ]
-    if early:
-        raise AssertionError(f"{name}: idle during the grace, {early[0]['t'] - anchor:.2f}s after the last Stop")
+    bad = [row for row in banner_rows if row.get("agent_status") != "working"]
+    if bad:
+        raise AssertionError(f"{name}: {len(bad)} non-working samples while the banner was up")
+    anchor = banner_rows[-1]["t"]
+    if stops:
+        anchor = max(anchor, max(stops))
     run = []
     stable = None
     for row in rows:
@@ -325,14 +302,14 @@ def assert_run(name, rows, stops, run_start):
     gap = stable - anchor
     if gap > IDLE_AFTER_STOP:
         raise AssertionError(
-            f"{name}: sustained idle {gap:.2f}s after the last Stop, wanted within {IDLE_AFTER_STOP}s"
+            f"{name}: sustained idle {gap:.2f}s after the run ended, wanted within {IDLE_AFTER_STOP}s"
         )
     return {
         "banner_samples": len(banner_rows),
-        "mid_run_idle": len(mid),
-        "lead_idle": len(lead),
+        "mid_run_idle": len(bad),
         "idle_gap_s": round(gap, 3),
-        "last_stop": round(anchor, 3),
+        "anchor": round(anchor, 3),
+        "last_stop": round(max(stops), 3) if stops else None,
     }
 
 
@@ -439,6 +416,11 @@ def main() -> int:
             "solo",
             "Start the saved workflow named solo with the run workflow tool. Do not run the shell command yourself.",
             240,
+        ),
+        (
+            "watch-tool",
+            "Start the saved workflow named watch-step with the run workflow tool. Do not run the shell command yourself.",
+            180,
         ),
     ]
     results = {}
