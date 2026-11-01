@@ -1,0 +1,23 @@
+1793522209.279 pid=83680 state event=SessionStart busy=1 grace_until=0.000
+1793522209.313 pid=83686 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793522213.862 pid=83944 state event=PreToolUse busy=1 grace_until=0.000
+1793522218.914 pid=84228 state event=PostToolUse busy=1 grace_until=0.000
+1793522220.512 pid=84317 state event=PreToolUse busy=1 grace_until=0.000
+1793522220.575 pid=84328 state event=PostToolUse busy=1 grace_until=0.000
+1793522222.505 pid=84429 event=Stop session=sess_6d33a7b2-b24b-49a5-b766-87e50c87c525 pane=w1:p1
+1793522222.505 pid=84429 state event=Stop busy=0 grace_until=1793522225.505
+1793522224.135 pid=84829 state event=SessionStart busy=1 grace_until=0.000
+1793522224.170 pid=84834 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793522226.071 pid=84935 state event=PreToolUse busy=1 grace_until=0.000
+1793522231.123 pid=85221 state event=PostToolUse busy=1 grace_until=0.000
+1793522232.667 pid=85310 state event=PreToolUse busy=1 grace_until=0.000
+1793522232.712 pid=85315 state event=PostToolUse busy=1 grace_until=0.000
+1793522234.657 pid=85456 event=Stop session=sess_2119af98-773b-4652-b29e-e0ce2c346f6a pane=w1:p1
+1793522234.657 pid=85456 state event=Stop busy=0 grace_until=1793522237.657
+1793522236.226 pid=85851 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793522237.990 pid=85955 state event=PreToolUse busy=1 grace_until=0.000
+1793522238.032 pid=85960 state event=PostToolUse busy=1 grace_until=0.000
+1793522238.782 pid=86001 state event=PreToolUse busy=1 grace_until=0.000
+1793522238.831 pid=86015 state event=PostToolUse busy=1 grace_until=0.000
+1793522241.709 pid=86212 event=Stop session=sess_5a3d0fd9-36fe-4cf4-be05-4bcb8a5dab8b pane=w1:p1
+1793522241.709 pid=86212 state event=Stop busy=0 grace_until=1793522244.709

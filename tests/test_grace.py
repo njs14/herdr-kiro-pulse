@@ -212,7 +212,8 @@ class GraceTests(unittest.TestCase):
         ):
             hook.watch_loop("w1:p1", path)
         self.assertEqual(reads["n"], 1)
-        self.assertEqual(json.load(open(path, encoding="utf-8"))["watcher"], 0)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["watcher"], 0)
 
         spawned = {}
 
@@ -230,7 +231,8 @@ class GraceTests(unittest.TestCase):
         with mock.patch.object(hook.subprocess, "Popen", popen):
             hook.ensure_watcher("w1:p1", path)
         self.assertIn("args", spawned)
-        self.assertEqual(json.load(open(path, encoding="utf-8"))["watcher"], 4321)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["watcher"], 4321)
 
     def test_reset_seq_does_not_fall_below_the_high_water(self):
         directory = tempfile.mkdtemp()
@@ -254,6 +256,28 @@ class GraceTests(unittest.TestCase):
         hook.update(path, lambda state: None)
         mode = os.stat(path).st_mode & 0o777
         self.assertEqual(mode, 0o600)
+
+    def test_log_stays_bounded_and_private(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "hook.log")
+        previous = os.environ.get("HERDR_KIRO_LOG")
+        os.environ["HERDR_KIRO_LOG"] = path
+        limit = hook.LOG_LIMIT
+        keep = hook.LOG_KEEP
+        hook.LOG_LIMIT = 400
+        hook.LOG_KEEP = 180
+        try:
+            for index in range(40):
+                hook.log(f"row {index} " + ("x" * 30))
+            self.assertLess(os.path.getsize(path), 700)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        finally:
+            hook.LOG_LIMIT = limit
+            hook.LOG_KEEP = keep
+            if previous is None:
+                os.environ.pop("HERDR_KIRO_LOG", None)
+            else:
+                os.environ["HERDR_KIRO_LOG"] = previous
 
 
 if __name__ == "__main__":

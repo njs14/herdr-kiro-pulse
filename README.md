@@ -20,7 +20,7 @@ Requires `herdr` and `kiro-cli` on `PATH`.
 ./install.sh
 ```
 
-The script writes `~/.kiro/hooks/herdr-kiro.json`. Restart Kiro after installing it. Start Kiro in V3 mode:
+The script writes `~/.kiro/hooks/herdr-kiro.json`. The command is passed through `json.dumps`, and the path is shell-quoted, so a checkout path can contain spaces, quotes, and backslashes. An existing hook file is copied to `herdr-kiro.json.bak.<timestamp>` first. Restart Kiro after installing it. Start Kiro in V3 mode:
 
 ```bash
 kiro-cli settings chat.agentEngine v3
@@ -31,6 +31,14 @@ kiro-cli chat --v3
 
 Inside a herdr pane the hook sees `HERDR_ENV` and `HERDR_PANE_ID`. Outside herdr it exits without doing anything.
 
+State and the hook log live in `$XDG_STATE_HOME/herdr-kiro` or `~/.local/state/herdr-kiro`, mode `0700` for the directory and `0600` for the files. The log is trimmed after 200KB. A separate `.seq` file keeps the highest sequence. Rewriting the state file with a lower `seq` does not move the next report backwards, which is what made herdr ignore the hook after a reset.
+
+```bash
+./uninstall.sh
+```
+
+That removes `~/.kiro/hooks/herdr-kiro.json`, stops `herdr_kiro_state.py --watch` processes, and deletes the state directory files plus the old `/tmp/herdr-kiro-*` files.
+
 ## Check
 
 ```bash
@@ -38,6 +46,6 @@ python3 -m unittest tests/test_grace.py
 python3 harness/run_suite.py
 ```
 
-The suite needs a herdr session named `kiro-repro`, a Kiro pane, and `KIRO_API_KEY` in that pane's environment. It runs sequential, parallel, repeat, and watch workflows, plus one workflow Kiro starts from a normal prompt. Poll logs land in `logs/`.
+The suite needs a herdr session named `kiro-repro`, a Kiro pane, and `KIRO_API_KEY` in that pane's environment. It runs sequential, parallel, repeat, and watch workflows, plus one workflow Kiro starts from a normal prompt (`solo`). Poll logs land in `logs/`. A run passes when the pane stays working from the first banner sample until the last Stop, then stays idle, and the first of four idle samples in a row is within 3.5 seconds of that Stop and not before 2.5 seconds. After each run the suite checks that no `herdr_kiro_state.py --watch` process is left. Stop lines for the run are copied to `logs/stops-<name>.txt`.
 
-A session that never sends Stop is dropped after 30 minutes. A visible `running` workflow banner keeps the pane working even when no step session is busy, which is how a command watch stays working.
+A session that never sends Stop is dropped after 30 minutes. A visible `running` workflow banner keeps the pane working when a watcher is already running and no step session is busy. A command watch started with `/workflow run` does not emit a hook while the banner is up, so that banner stays idle. A watch the model starts with the run-workflow tool is held, aside from a single poll that can land in the footer repaint.

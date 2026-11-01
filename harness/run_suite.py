@@ -2,16 +2,23 @@
 """Run Kiro V3 workflows in a herdr pane and assert the pane stays working."""
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "prototype"))
+
+import herdr_kiro_state as hook
+
 SESSION = os.environ.get("HERDR_SESSION", "kiro-repro")
 PANE = os.environ.get("HERDR_PANE", "w1:p1")
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_DIR = os.path.join(ROOT, "logs")
-HOOK_LOG = os.environ.get("HERDR_KIRO_LOG", "/tmp/herdr-kiro-hook.log")
+HOOK_LOG = os.environ.get("HERDR_KIRO_LOG") or hook.log_path()
 POLL_SECS = 0.4
+IDLE_AFTER_STOP = 3.5
+GRACE_FLOOR = 2.5
 
 
 def herdr(*args, timeout=30):
@@ -87,24 +94,27 @@ def accept_trust_dialog():
 
 
 def max_used_seq():
-    best = 0
-    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    path = os.path.join(base, f"herdr-kiro-{PANE.replace(':', '_')}.json")
+    best = hook.read_seq_floor(hook.state_path(PANE))
+    path = hook.state_path(PANE)
     try:
-        best = int(json.load(open(path, encoding="utf-8")).get("seq") or 0)
+        with open(path, encoding="utf-8") as handle:
+            best = max(best, int(json.load(handle).get("seq") or 0))
     except (OSError, ValueError, TypeError):
         pass
-    try:
-        for line in open(HOOK_LOG, encoding="utf-8"):
-            marker = "--seq "
-            if marker not in line:
-                continue
-            try:
-                best = max(best, int(line.rsplit(marker, 1)[1].split()[0]))
-            except ValueError:
-                continue
-    except OSError:
-        pass
+    logs = [HOOK_LOG, "/tmp/herdr-kiro-hook.log"]
+    for log_path in logs:
+        try:
+            with open(log_path, encoding="utf-8") as handle:
+                for line in handle:
+                    marker = "--seq "
+                    if marker not in line:
+                        continue
+                    try:
+                        best = max(best, int(line.rsplit(marker, 1)[1].split()[0]))
+                    except ValueError:
+                        continue
+        except OSError:
+            pass
     return best
 
 
@@ -122,21 +132,17 @@ def release_stale_authority():
         str(seq),
         timeout=10,
     )
-    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
-    path = os.path.join(base, f"herdr-kiro-{PANE.replace(':', '_')}.json")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "busy": {},
-                "seq": seq,
-                "grace_until": 0,
-                "grace_started": 0,
-                "reported": None,
-                "watcher": 0,
-                "watcher_at": 0,
-            },
-            handle,
-        )
+
+    def reset(state):
+        state["busy"] = {}
+        state["seq"] = max(seq, int(state.get("seq") or 0))
+        state["grace_until"] = 0
+        state["grace_started"] = 0
+        state["reported"] = None
+        state["watcher"] = 0
+        state["watcher_at"] = 0
+
+    hook.update(hook.state_path(PANE), reset)
 
 
 def tail_text(text, count=14):
@@ -249,53 +255,84 @@ def stop_times_since(start):
     return times
 
 
-def assert_run(name, rows, stops):
+def first_hook_event(start):
+    earliest = None
+    try:
+        with open(HOOK_LOG, encoding="utf-8") as handle:
+            for line in handle:
+                if " event=" not in line or "state event=" in line:
+                    continue
+                try:
+                    stamped = float(line.split()[0])
+                except ValueError:
+                    continue
+                if stamped < start:
+                    continue
+                if earliest is None or stamped < earliest:
+                    earliest = stamped
+    except OSError:
+        return None
+    return earliest
+
+
+def assert_run(name, rows, stops, run_start):
+    """Sustained idle within 3.5s of the last Stop, with no idle during the run."""
     banner_rows = [row for row in rows if row.get("banner")]
     if not banner_rows:
         raise AssertionError(f"{name}: workflow banner never appeared")
-    working = [row for row in banner_rows if row.get("agent_status") == "working"]
-    ratio = len(working) / len(banner_rows)
-    if ratio < 0.85:
-        raise AssertionError(f"{name}: working for {ratio:.2f} of banner samples")
-    streak = 0
-    for row in banner_rows:
-        if row.get("agent_status") != "working":
-            streak += 1
-            if streak >= 3:
-                raise AssertionError(f"{name}: idle streak while the workflow banner was up")
-        else:
-            streak = 0
     if not stops:
         raise AssertionError(f"{name}: no Stop hook was logged")
-    last_banner = banner_rows[-1]["t"]
-    anchor = last_banner
-    later_stops = [stamped for stamped in stops if stamped >= last_banner - 1]
-    if later_stops:
-        anchor = max(later_stops)
+    anchor = max(stops)
+    first_banner = banner_rows[0]["t"]
+    # The banner can paint before the step SessionStart hook is logged.
+    # Samples before that first event are lead-in, not the run the hook holds.
+    held_from = first_banner if run_start is None else max(first_banner, run_start)
+    lead = [
+        row
+        for row in rows
+        if first_banner <= row.get("t", 0) < held_from and row.get("agent_status") != "working"
+    ]
+    if len(lead) > 1 or (lead and held_from - first_banner > 1.0):
+        raise AssertionError(f"{name}: banner was idle for {held_from - first_banner:.2f}s before the first hook event")
+    mid = [
+        row
+        for row in rows
+        if held_from <= row.get("t", 0) < anchor and row.get("agent_status") != "working"
+    ]
+    if mid:
+        raise AssertionError(f"{name}: {len(mid)} non-working samples during the run")
+    early = [
+        row
+        for row in rows
+        if anchor <= row.get("t", 0) < anchor + GRACE_FLOOR and row.get("agent_status") == "idle"
+    ]
+    if early:
+        raise AssertionError(f"{name}: idle during the grace, {early[0]['t'] - anchor:.2f}s after the last Stop")
+    run = []
     stable = None
-    run = 0
     for row in rows:
         if row.get("t", 0) < anchor:
-            run = 0
+            run = []
             continue
         if row.get("agent_status") == "idle":
-            run += 1
-            if run >= 4 and stable is None:
-                stable = row["t"]
+            run.append(row)
+            if len(run) >= 4 and stable is None:
+                stable = run[0]["t"]
         else:
-            run = 0
+            run = []
     if stable is None:
         raise AssertionError(f"{name}: never settled idle")
     gap = stable - anchor
-    if gap < 2.5:
-        raise AssertionError(f"{name}: idle {gap:.2f}s after the run, wanted the 3s grace")
-    if gap > 10:
-        raise AssertionError(f"{name}: idle {gap:.2f}s after the run, grace ran long")
+    if gap > IDLE_AFTER_STOP:
+        raise AssertionError(
+            f"{name}: sustained idle {gap:.2f}s after the last Stop, wanted within {IDLE_AFTER_STOP}s"
+        )
     return {
         "banner_samples": len(banner_rows),
-        "working_ratio": round(ratio, 3),
+        "mid_run_idle": len(mid),
+        "lead_idle": len(lead),
         "idle_gap_s": round(gap, 3),
-        "anchor": round(anchor, 3),
+        "last_stop": round(anchor, 3),
     }
 
 
@@ -308,20 +345,89 @@ def write_log(name, rows):
     return path
 
 
+def watcher_commands():
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            command = open(f"/proc/{name}/cmdline", "rb").read().replace(b"\0", b" ").decode()
+        except OSError:
+            continue
+        if "herdr_kiro_state.py" in command and "--watch" in command:
+            found.append(f"{name} {command.strip()}")
+    return found
+
+
+def stop_watchers():
+    for row in watcher_commands():
+        pid = int(row.split()[0])
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.time() + 2
+    while watcher_commands() and time.time() < deadline:
+        time.sleep(0.1)
+
+
+def save_stops(name, start):
+    path = os.path.join(LOG_DIR, f"stops-{name}.txt")
+    lines = []
+    try:
+        with open(HOOK_LOG, encoding="utf-8") as handle:
+            for line in handle:
+                if "event=Stop" not in line and "grace_until" not in line:
+                    continue
+                try:
+                    stamped = float(line.split()[0])
+                except ValueError:
+                    continue
+                if stamped >= start:
+                    lines.append(line if line.endswith("\n") else line + "\n")
+    except OSError:
+        pass
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+    return path
+
+
+def save_ps(name):
+    path = os.path.join(LOG_DIR, f"ps-{name}.txt")
+    rows = watcher_commands()
+    with open(path, "w", encoding="utf-8") as handle:
+        if rows:
+            handle.write("\n".join(rows) + "\n")
+        else:
+            handle.write("no herdr_kiro_state.py watcher\n")
+    return path, rows
+
+
 def run_case(name, text, seconds):
+    stop_watchers()
     start = time.time()
     prompt(text)
     rows = poll_run(seconds)
     path = write_log(name, rows)
     stops = stop_times_since(start)
-    summary = assert_run(name, rows, stops)
+    stop_path = save_stops(name, start)
+    deadline = time.time() + 2
+    while watcher_commands() and time.time() < deadline:
+        time.sleep(0.1)
+    ps_path, leftover = save_ps(name)
+    summary = assert_run(name, rows, stops, first_hook_event(start))
+    if leftover:
+        raise AssertionError(f"{name}: watcher still running\n" + "\n".join(leftover))
     summary["log"] = path
     summary["stops"] = len(stops)
+    summary["stop_log"] = stop_path
+    summary["ps"] = ps_path
     return summary
 
 
 def main() -> int:
     os.makedirs(LOG_DIR, exist_ok=True)
+    stop_watchers()
     ensure_kiro()
     release_stale_authority()
     cases = [
@@ -330,7 +436,7 @@ def main() -> int:
         ("repeat", "/workflow run repeat-step", 240),
         ("watch", "/workflow run watch-step", 180),
         (
-            "auto",
+            "solo",
             "Start the saved workflow named solo with the run workflow tool. Do not run the shell command yourself.",
             240,
         ),

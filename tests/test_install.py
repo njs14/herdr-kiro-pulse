@@ -1,6 +1,7 @@
 """install.sh writes a hook file the shell can run, including odd paths."""
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -45,8 +46,6 @@ class InstallTests(unittest.TestCase):
             document = json.loads(handle.read())
         commands = [item["action"]["command"] for item in document["hooks"]]
         self.assertEqual(len(commands), 5)
-        import shlex
-
         for event, command in zip(
             ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
             commands,

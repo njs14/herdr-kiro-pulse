@@ -1,0 +1,23 @@
+watch: banner was idle for 10.19s before the first hook event
+
+───────────────────────────────────────────────────────────────────────────────────────────
+• Thought for 1s...
+    ╰ This is the third time this has come up, and I should note I didn't actually launch these in this session.
+• Another watch-step run finished with exit code 0. As in the last two watch-step runs, the notification had no
+  workflow ID or step messages, so I couldn't inspect it or confirm it reached terminal-state. The script writes no
+  files, so there's nothing in the workspace to check.
+
+  That's three watch-step runs in a row where the completion notice came without an ID. Every other recipe here
+  (two-step, parallel-steps, repeat-step, solo) included one every time. That points to this recipe specifically,
+  probably because its only step is a command watch with no agent step to send messages. If you give me a run ID, I can
+  inspect it.
+
+▸ Credits: turn 0.11 • session 3.14 | Time: 4s
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Trust All Tools active, confirmations are off · /quit to exit
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · auto · ◔ 5%                                                             /workspace/fixtures/wf-repro · (main)
+
+›  ask a question or describe a task ↵
+                                                                              /sessions to resume · /copy to clipboard

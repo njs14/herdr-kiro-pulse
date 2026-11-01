@@ -1,42 +1,53 @@
 {
   "sequential": {
-    "banner_samples": 67,
-    "working_ratio": 0.985,
-    "idle_gap_s": 4.636,
-    "anchor": 1793496534.167,
+    "banner_samples": 66,
+    "mid_run_idle": 0,
+    "lead_idle": 0,
+    "idle_gap_s": 3.437,
+    "last_stop": 1793522241.709,
     "log": "/workspace/logs/poll-sequential.jsonl",
-    "stops": 6
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-sequential.txt",
+    "ps": "/workspace/logs/ps-sequential.txt"
   },
   "parallel": {
     "banner_samples": 37,
-    "working_ratio": 1.0,
-    "idle_gap_s": 4.286,
-    "anchor": 1793496561.258,
+    "mid_run_idle": 0,
+    "lead_idle": 0,
+    "idle_gap_s": 3.43,
+    "last_stop": 1793522268.728,
     "log": "/workspace/logs/poll-parallel.jsonl",
-    "stops": 6
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-parallel.txt",
+    "ps": "/workspace/logs/ps-parallel.txt"
   },
   "repeat": {
-    "banner_samples": 27,
-    "working_ratio": 0.963,
-    "idle_gap_s": 4.338,
-    "anchor": 1793496582.993,
+    "banner_samples": 34,
+    "mid_run_idle": 0,
+    "lead_idle": 0,
+    "idle_gap_s": 3.374,
+    "last_stop": 1793522294.383,
     "log": "/workspace/logs/poll-repeat.jsonl",
-    "stops": 6
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-repeat.txt",
+    "ps": "/workspace/logs/ps-repeat.txt"
   },
   "watch": {
-    "banner_samples": 24,
-    "working_ratio": 0.958,
-    "idle_gap_s": 4.45,
-    "anchor": 1793496601.128,
-    "log": "/workspace/logs/poll-watch.jsonl",
-    "stops": 2
+    "error": "watch: banner was idle for 10.19s before the first hook event",
+    "screen": "/workspace/logs/fail-watch.txt"
   },
-  "auto": {
-    "banner_samples": 30,
-    "working_ratio": 1.0,
-    "idle_gap_s": 4.327,
-    "anchor": 1793496626.795,
-    "log": "/workspace/logs/poll-auto.jsonl",
-    "stops": 6
+  "solo": {
+    "banner_samples": 29,
+    "mid_run_idle": 0,
+    "lead_idle": 0,
+    "idle_gap_s": 3.257,
+    "last_stop": 1793522543.812,
+    "log": "/workspace/logs/poll-solo.jsonl",
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-solo.txt",
+    "ps": "/workspace/logs/ps-solo.txt"
+  },
+  "watch-tool": {
+    "error": "watch-tool: 1 non-working samples during the run"
   }
 }

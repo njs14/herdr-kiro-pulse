@@ -1,0 +1,3 @@
+1793522516.054 pid=94807 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793522519.440 pid=94985 event=Stop session=sess_5a3d0fd9-36fe-4cf4-be05-4bcb8a5dab8b pane=w1:p1
+1793522519.440 pid=94985 state event=Stop busy=0 grace_until=1793522522.440
