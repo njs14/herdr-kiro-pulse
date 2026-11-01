@@ -44,7 +44,9 @@ fi
 HERDR="${HERDR_BIN_PATH:-herdr}"
 if [ -f "$MARK" ] && grep -q '^pending_unlink=' "$MARK" && command -v "$HERDR" >/dev/null 2>&1; then
   "$HERDR" plugin unlink herdr-kiro >/dev/null 2>&1 || true
-  if ! "$HERDR" plugin list 2>/dev/null | grep -q herdr-kiro; then
+  list_rc=0
+  list_out=$("$HERDR" plugin list 2>&1) || list_rc=$?
+  if [ "$list_rc" -eq 0 ] && ! printf '%s\n' "$list_out" | grep -q herdr-kiro; then
     grep -v '^pending_unlink=' "$MARK" > "$MARK.next" || true
     mv "$MARK.next" "$MARK"
     chmod 600 "$MARK" || true

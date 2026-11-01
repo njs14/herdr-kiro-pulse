@@ -1,3 +1,9 @@
-1793560858.270 pid=452131 state event=UserPromptSubmit busy=1 grace_until=0.000
-1793560862.152 pid=452331 event=Stop session=sess_0970ea63-b1e3-4102-8eac-998f472f0b17 pane=w1:p1 chain=452330:sh 446639:node 446582:bun 446417:kiro-cli-chat 446398:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
-1793560862.153 pid=452331 state event=Stop busy=0 grace_until=1793560862.644
+1793565025.823 pid=480169 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793565027.541 pid=480255 state event=PreToolUse busy=1 grace_until=0.000
+1793565027.695 pid=480273 state event=PostToolUse busy=1 grace_until=0.000
+1793565031.013 pid=480441 state event=PreToolUse busy=1 grace_until=0.000
+1793565031.164 pid=480457 state event=PostToolUse busy=1 grace_until=0.000
+1793565033.169 pid=480564 state event=PreToolUse busy=1 grace_until=0.000
+1793565033.361 pid=480574 state event=PostToolUse busy=1 grace_until=0.000
+1793565037.790 pid=480788 event=Stop session=sess_e6ebec7d-1af3-4180-aafc-892debc197f0 pane=w1:p1 chain=480787:sh 474093:node 474033:bun 473958:kiro-cli-chat 473946:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
+1793565037.790 pid=480788 state event=Stop busy=0 grace_until=1793565038.283

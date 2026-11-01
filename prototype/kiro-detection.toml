@@ -63,9 +63,10 @@ visible_blocker = true
 contains = [
   "tool approval",
   "approve all pending",
-  "configure individually (agent monitor)",
   "exit (cancel subagents)",
 ]
+# The parenthetical wraps onto the next line in a 40-column pane.
+regex = ['(?is)configure\s+individually\s+\(\s*agent\s+mon\s*itor\s*\)']
 
 [[rules]]
 id = "question_panel"
@@ -117,7 +118,8 @@ state = "blocked"
 priority = 1430
 region = "bottom_non_empty_lines(24)"
 visible_blocker = true
-contains = ["requires approval"]
+# A 69-column "requires approval" row splits inside the word at 54 columns.
+regex = ['(?is)re\s*quires\s+approval']
 line_regex = [
   '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌│┃║]*\s*$|^.*[└├].*│\s*(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌│┃║]*\s*$)',
   '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌│┃║]*\s*$|^.*│\s*(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌│┃║]*\s*$)',
@@ -143,9 +145,13 @@ line_regex = ['(?i)^\s*esc\s+to\s+close\b.*\benter\s+to\s+see\s+more\s+options\b
 id = "workspace_trust"
 state = "blocked"
 priority = 1440
-region = "bottom_non_empty_lines(40)"
+region = "bottom_non_empty_lines(48)"
 visible_blocker = true
-regex = ['''(?is)trust this workspace\?.*?\n[ \t]*[>❯][ \t]*trust, continue[ \t]*\n[ \t]*don't trust, exit[ \t]*\n(?:[^\n]*\n){0,4}?[ \t]*esc to exit[^\n]*to navigate[^\n]*to select[^\n]*(?:\n[ \t]*){0,2}(?:\n[ \t]*revoke later[^\n]*)?\s*\z''']
+# The title and the two option rows stay intact when the revoke hint or the
+# footer wraps. The selected row carries the dialog marker. A workflow banner
+# as the last line of the region is not this dialog.
+regex = ['''(?is)trust this workspace\?.*?\n[ \t]*[>❯][ \t]*trust, continue[ \t]*\n(?:[ \t]*\n){0,3}[ \t]*don't trust, exit[ \t]*(?:\n|$)''']
+not = [{ regex = ['(?is)▶[ \t]+\S+[ \t]+running\b[^\n]*\s*\z'] }]
 
 [[rules]]
 id = "workflow_trust_all"

@@ -1,22 +1,27 @@
 #!/bin/sh
 # Remove the herdr Kiro hook, stop its watchers, and delete its state files.
 set -eu
+ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 DEST="${KIRO_HOOKS_DIR:-$HOME/.kiro/hooks}"
 HERDR="${HERDR_BIN_PATH:-herdr}"
 export HERDR_KIRO_HOME="$HOME"
 export HERDR_KIRO_HOOK_DIR="$DEST"
+export HERDR_KIRO_ROOT="$ROOT"
 python3 - << 'PY'
 import datetime
-import glob
 import hashlib
 import os
 import signal
 import subprocess
+import sys
+
+root = os.environ.get("HERDR_KIRO_ROOT") or ""
+sys.path.insert(0, os.path.join(root, "prototype"))
+from herdr_kiro_state import sweep_owned_temp
 
 MARKER = ".herdr-kiro-owned"
 home = os.environ.get("HERDR_KIRO_HOME") or os.path.expanduser("~")
 hook_dir = os.environ.get("HERDR_KIRO_HOOK_DIR") or os.path.join(home, ".kiro", "hooks")
-legacy = os.environ.get("HERDR_KIRO_LEGACY_DIR") or "/tmp"
 state = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state"),
     "herdr-kiro",
@@ -171,17 +176,7 @@ lifecycle = os.path.join(directory, "lifecycle")
 with open(lifecycle, "w", encoding="utf-8") as handle:
     handle.write("uninstalled\n")
 os.chmod(lifecycle, 0o600)
-for path in glob.glob(os.path.join(legacy, "herdr-kiro-*.json")):
-    try:
-        os.remove(path)
-    except OSError:
-        pass
-legacy_log = os.path.join(legacy, "herdr-kiro-hook.log")
-if os.path.isfile(legacy_log):
-    try:
-        os.remove(legacy_log)
-    except OSError:
-        pass
+sweep_owned_temp()
 PY
 reload_one() {
   shift
@@ -206,14 +201,43 @@ reload_one() {
   rm -f "$err"
   return 1
 }
+herdr_api_socket() {
+  if [ -n "${HERDR_SOCKET_PATH:-}" ]; then
+    printf '%s\n' "$HERDR_SOCKET_PATH"
+    return
+  fi
+  config="${XDG_CONFIG_HOME:-$HOME/.config}/herdr"
+  if [ -n "${HERDR_SESSION:-}" ]; then
+    printf '%s\n' "$config/sessions/$HERDR_SESSION/herdr.sock"
+  else
+    printf '%s\n' "$config/herdr.sock"
+  fi
+}
 pending=0
 if command -v "$HERDR" >/dev/null 2>&1; then
-  list_out=$("$HERDR" plugin list 2>&1) || true
+  list_rc=0
+  list_out=$("$HERDR" plugin list 2>&1) || list_rc=$?
   if printf '%s\n' "$list_out" | grep -q herdr-kiro; then
     "$HERDR" plugin unlink herdr-kiro >/dev/null 2>&1 || true
-    list_out=$("$HERDR" plugin list 2>&1) || true
+    list_rc=0
+    list_out=$("$HERDR" plugin list 2>&1) || list_rc=$?
   fi
-  if printf '%s\n' "$list_out" | grep -q herdr-kiro || printf '%s\n' "$list_out" | grep -q server_not_running; then
+  still=0
+  if printf '%s\n' "$list_out" | grep -q herdr-kiro; then
+    still=1
+  fi
+  missing_text=0
+  if printf '%s\n' "$list_out" | grep -q server_not_running; then
+    missing_text=1
+  fi
+  sock=$(herdr_api_socket)
+  sock_present=0
+  if [ -e "$sock" ]; then
+    sock_present=1
+  fi
+  # A live server is a successful list plus the API socket. A non-zero exit
+  # or a missing socket is pending even when the error text changed.
+  if [ "$still" -eq 1 ] || [ "$missing_text" -eq 1 ] || [ "$list_rc" -ne 0 ] || [ "$sock_present" -eq 0 ]; then
     pending=1
   fi
 fi

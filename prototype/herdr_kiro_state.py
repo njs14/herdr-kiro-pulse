@@ -24,12 +24,13 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -530,14 +531,16 @@ def _rules_dir_ours(path: str):
     return int(matched.group(1))
 
 
-def sweep_stale_rules() -> None:
+def _sweep_rules_in(roots) -> None:
     """Remove rules dirs this package created after their process is gone.
 
     A directory is removed only when its name is herdr-kiro-rules-<pid>-<token>,
     it contains a herdr-kiro-owned marker for this uid, and the directory is
     owned by this uid. EPERM on the pid means the process is alive or foreign.
     """
-    for root in temp_roots():
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
         for path in glob.glob(os.path.join(root, "herdr-kiro-rules-*")):
             pid = _rules_dir_ours(path)
             if pid is None or pid == os.getpid():
@@ -548,6 +551,74 @@ def sweep_stale_rules() -> None:
                 if exc.errno != errno.ESRCH:
                     continue
                 shutil.rmtree(path, True)
+
+
+def sweep_stale_rules() -> None:
+    _sweep_rules_in(temp_roots())
+
+
+_LEGACY_JSON = re.compile(r"^herdr-kiro-.+\.json$")
+
+
+def owned_temp_roots():
+    """HERDR_KIRO_LEGACY_DIR when set, otherwise TMPDIR and /tmp."""
+    override = os.environ.get("HERDR_KIRO_LEGACY_DIR")
+    if override:
+        return [override]
+    return temp_roots()
+
+
+def _legacy_file_ours(path: str) -> bool:
+    """A pre-marker herdr-kiro-*.json or hook log owned by this uid.
+
+    A directory never matches. A sidecar marker must name this uid. EPERM is
+    not used here: the proof is the uid on the inode, same as the rules sweep.
+    """
+    name = os.path.basename(path)
+    if name != "herdr-kiro-hook.log" and _LEGACY_JSON.fullmatch(name) is None:
+        return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return False
+    if info.st_uid != os.getuid():
+        return False
+    marker = path + ".herdr-kiro-owned"
+    if not os.path.isfile(marker):
+        return True
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return False
+    return ("uid %s" % os.getuid()) in lines
+
+
+def sweep_owned_temp() -> None:
+    """Drop our temp dirs and legacy files under TMPDIR and /tmp.
+
+    Rules directories use the sweep's name, uid, and marker proof. User
+    directories such as herdr-kiro-notes are left in place.
+    """
+    roots = owned_temp_roots()
+    _sweep_rules_in(roots)
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(root, name)
+            if not _legacy_file_ours(path):
+                continue
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def sweep_stale_pidfiles() -> None:
@@ -769,6 +840,24 @@ def release_if_current(state: dict, generation: int, keys) -> bool:
         state["grace_started"] = 0.0
     state["retiring"] = True
     return True
+
+
+def slot_holder_gone(state: dict) -> bool:
+    """True when some other pid holds the watcher slot and that pid is gone.
+
+    EPERM means the holder is alive or foreign, so the slot is still taken.
+    """
+    try:
+        holder = int(state.get("watcher") or 0)
+    except (TypeError, ValueError):
+        return False
+    if holder in (os.getpid(), 0, -1):
+        return False
+    try:
+        os.kill(holder, 0)
+    except OSError as exc:
+        return exc.errno == errno.ESRCH
+    return False
 
 
 def _pids_exited(pids) -> bool:
@@ -1204,7 +1293,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
-        if watcher not in (me, 0, -1):
+        if watcher not in (me, 0):
             return
         if int(current.get("generation") or 0) != generation:
             current["retiring"] = False
@@ -1221,7 +1310,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
 
     def confirm(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
-        if watcher not in (me, 0, -1) or int(current.get("generation") or 0) != generation:
+        if watcher not in (me, 0) or int(current.get("generation") or 0) != generation:
             current["retiring"] = False
             return
         if reason == "idle" and current.get("busy"):
@@ -1391,8 +1480,11 @@ def _watch_loop(pane: str, path: str) -> None:
         while True:
             owner_watch.wait(known_owners, TICK_SECS)
             begin_tick()
-            looked = agent_lookup(pane)
             state = update(path, lambda _state: None)
+            if slot_holder_gone(state):
+                log("watcher exit slot holder gone")
+                return
+            looked = agent_lookup(pane)
             now = time.time()
             current_owners = []
             for owner in (state.get("owners") or {}).values():

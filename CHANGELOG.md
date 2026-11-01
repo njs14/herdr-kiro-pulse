@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.0
+
+The workspace-trust rule matches the dialog title and the two option rows when the revoke hint or the footer wraps. A workflow banner as the last line is not that dialog. The approval chooser and the subagent widget still match when a phrase wraps at a narrow width. A watcher whose slot is held by a dead pid exits on that check. Uninstall records `pending_unlink` when `plugin list` exits non-zero or the herdr socket is missing, not only when the error text is `server_not_running`. Legacy cleanup looks in both `$TMPDIR` and `/tmp`. Rules directories use the same uid and marker proof as the sweep.
+
 ## 0.11.0
 
 The temp sweep only removes a `herdr-kiro-rules-<pid>-<token>` directory that contains this uid's owner marker. A user directory such as `herdr-kiro-notes` is left alone. The workspace-trust rule matches the captured dialog, not two quoted option lines under a workflow banner. A watcher whose owner has exited leaves even when another pid holds the slot.

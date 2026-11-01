@@ -954,6 +954,74 @@ class GraceTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 4242)
 
+    def test_slot_holder_gone_is_esrch_only(self):
+        import errno
+
+        state = {"watcher": 4242}
+        with mock.patch.object(hook.os, "kill", side_effect=OSError(errno.EPERM, "no")):
+            self.assertFalse(hook.slot_holder_gone(state))
+        with mock.patch.object(hook.os, "kill", side_effect=OSError(errno.ESRCH, "gone")):
+            self.assertTrue(hook.slot_holder_gone(state))
+        state["watcher"] = os.getpid()
+        self.assertFalse(hook.slot_holder_gone(state))
+        state["watcher"] = -1
+        self.assertFalse(hook.slot_holder_gone(state))
+
+    def test_dead_slot_holder_exits_without_waiting_for_the_owner(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        dead = subprocess.Popen(["sleep", "30"])
+        dead.kill()
+        dead.wait(timeout=5)
+        hook.begin_tick()
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 4
+
+        hook.update(path, seed)
+        calls = []
+        logs = []
+        phase = {"n": 0}
+
+        def staged(_self, _pids, _timeout):
+            phase["n"] += 1
+            if phase["n"] == 1:
+                return False
+            if phase["n"] == 2:
+
+                def steal(state):
+                    state["watcher"] = dead.pid
+
+                hook.update(path, steal)
+                return True
+            raise AssertionError("watcher kept waiting after the holder was gone")
+
+        started = time.time()
+        banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        with mock.patch.object(hook, "pane_text", lambda _pane: banner), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "working"
+        ), mock.patch.object(hook, "send_report", lambda *args, **_kwargs: calls.append(args) or True), mock.patch.object(
+            hook, "herdr", lambda *args: calls.append(args) or True
+        ), mock.patch.object(hook, "log", lambda message: logs.append(message)), mock.patch.object(
+            hook, "screen_view", lambda _text: {"state": "working", "id": "workflow_banner_working", "ok": True}
+        ), mock.patch.object(hook.OwnerExitWatch, "wait", staged):
+            hook.watch_loop("w1:p9", path)
+        elapsed = time.time() - started
+        self.assertLess(elapsed, 1.0)
+        self.assertLess(len(calls), 8)
+        self.assertIn("watcher exit slot holder gone", logs)
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["watcher"], dead.pid)
+        self.assertIn("sess", saved["busy"])
+        owner.kill()
+        owner.wait(timeout=5)
+
     def test_sweep_honors_tmpdir_and_removes_old_rule_dirs(self):
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)

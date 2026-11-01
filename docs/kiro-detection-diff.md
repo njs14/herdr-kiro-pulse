@@ -28,7 +28,7 @@ Herdr 0.9.5 does not merge a local `agent-detection/kiro.toml` with the remote m
 
 | id | state | priority | region |
 | --- | --- | --- | --- |
-| `workspace_trust` | blocked | 1440 | `bottom_non_empty_lines(16)` |
+| `workspace_trust` | blocked | 1440 | `bottom_non_empty_lines(48)` |
 | `workflow_requires_approval` | blocked | 1430 | `bottom_non_empty_lines(24)` |
 | `workflow_chooser_blocked` | blocked | 1420 | `bottom_non_empty_lines(12)` |
 | `workflow_question_esc_cancel` | blocked | 1385 | `bottom_non_empty_lines(12)` |
@@ -36,8 +36,10 @@ Herdr 0.9.5 does not merge a local `agent-detection/kiro.toml` with the remote m
 | `workflow_approval_more_options` | blocked | 1360 | `bottom_non_empty_lines(12)` |
 | `workflow_banner_working` | working | 1200 | `whole_recent` |
 
-`workflow_requires_approval` matches when the bottom of the screen contains `requires approval` and both `Allow once` and `Deny once` are rows. A leading box border, text before a `│` column, and a trailing scrollbar glyph are part of the row. A sentence that mentions the words does not match. A chooser sitting about 60 lines above the prompt does not match, because the region is the bottom 24 non-empty lines.
+`workflow_requires_approval` matches when the bottom of the screen contains `requires approval` and both `Allow once` and `Deny once` are rows. A newline inside `requires` still matches, which is what a 54-column wrap does to that row. A leading box border, text before a `│` column, and a trailing scrollbar glyph are part of the row. A sentence that mentions the words does not match. A chooser sitting about 60 lines above the prompt does not match, because the region is the bottom 24 non-empty lines.
 
-`workspace_trust` matches the workspace dialog whose choices are `Trust, continue` and `Don't trust`.
+`workspace_trust` matches `Trust this workspace?`, then a selected `Trust, continue` row and a `Don't trust, exit` row. Wrapped revoke and footer lines can sit between and after those rows. A workflow banner as the last line suppresses the rule. Two quoted option lines under a banner do not match.
+
+`crew_approval` still requires the subagent phrases. `configure individually (agent monitor)` may split across a newline in a 40-column pane.
 
 `workflow_banner_working` matches a line that starts with `▶`, then a token, then `running`, and also contains `ctrl+x`. `ctrl+g` may be wrapped or clipped. A model line such as `Status: ▶ deploy running` has no `ctrl+x`.

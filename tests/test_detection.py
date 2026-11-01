@@ -4,10 +4,43 @@ import os
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RULES = os.path.join(ROOT, "prototype", "kiro-detection.toml")
+WIDTHS = (40, 54, 70, 80, 100, 133, 200)
+
+
+def _column_width(char):
+    # Box drawing is East Asian Ambiguous. A western terminal column is 1.
+    if unicodedata.east_asian_width(char) in ("W", "F"):
+        return 2
+    return 1
+
+
+def wrap_terminal(text, width):
+    """Character wrap the way a terminal folds a line, not word wrap."""
+    rows = []
+    for line in text.splitlines():
+        if not line:
+            rows.append("")
+            continue
+        current = []
+        column = 0
+        for char in line:
+            wide = _column_width(char)
+            if column + wide > width and current:
+                rows.append("".join(current))
+                current = [char]
+                column = wide
+            else:
+                current.append(char)
+                column += wide
+        rows.append("".join(current))
+    if text.endswith("\n"):
+        return "\n".join(rows) + "\n"
+    return "\n".join(rows)
 
 
 class DetectionTests(unittest.TestCase):
@@ -236,6 +269,85 @@ class DetectionTests(unittest.TestCase):
             "› ask a question or describe a task\n"
         )
         self.assertEqual((state, rule), ("working", "workflow_banner_working"))
+
+    def _capture(self, name):
+        path = os.path.join(ROOT, "logs", name)
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_workspace_trust_width_matrix(self):
+        raw = self._capture("workspace-trust.txt")
+        for width in WIDTHS:
+            state, rule = self.explain(wrap_terminal(raw, width))
+            self.assertEqual((width, state, rule), (width, "blocked", "workspace_trust"))
+
+    def test_workspace_trust_prose_width_matrix(self):
+        prose = (
+            "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "The dialog says Trust, continue or Don't trust, exit. "
+            "Revoke later by removing workspaceTrusted from the permissions file "
+            "after you have read this long note about the workspace.\n"
+            "› ask a question or describe a task\n"
+        )
+        for width in WIDTHS:
+            state, rule = self.explain(wrap_terminal(prose, width))
+            self.assertNotEqual((width, rule), (width, "workspace_trust"))
+            self.assertEqual((width, state), (width, "working"))
+
+    def test_workspace_trust_banner_last_is_not_the_dialog(self):
+        screen = (
+            "Trust this workspace?\n"
+            "❯ Trust, continue\n"
+            "  Don't trust, exit\n"
+            "esc to exit · ↑↓ to navigate · ↵ to select\n"
+            "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+        )
+        state, rule = self.explain(screen)
+        self.assertNotEqual(rule, "workspace_trust")
+        self.assertEqual(state, "working")
+
+    def test_workspace_trust_rows_without_a_marker_do_not_match(self):
+        screen = (
+            "Trust this workspace?\n"
+            "Trust, continue\n"
+            "Don't trust, exit\n"
+            "esc to exit · ↑↓ to navigate · ↵ to select\n"
+        )
+        _state, rule = self.explain(screen)
+        self.assertNotEqual(rule, "workspace_trust")
+
+    def test_chooser_width_matrix(self):
+        raw = self._capture("monitor-v10.txt")
+        prose = (
+            "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "The notes say this step requires approval and Allow once is the default. "
+            "Deny once would stop the write if you picked it from the paragraph.\n"
+            "› ask a question or describe a task\n"
+        )
+        for width in WIDTHS:
+            state, rule = self.explain(wrap_terminal(raw, width))
+            self.assertEqual(
+                (width, state, rule),
+                (width, "blocked", "workflow_requires_approval"),
+            )
+            prose_state, prose_rule = self.explain(wrap_terminal(prose, width))
+            self.assertNotEqual((width, prose_rule), (width, "workflow_requires_approval"))
+            self.assertEqual((width, prose_state), (width, "working"))
+
+    def test_subagent_widget_width_matrix(self):
+        raw = self._capture("widget-v10.txt")
+        prose = (
+            "▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "The model mentioned a tool approval and said the notes can wait. "
+            "Nothing on this screen is the subagent chooser.\n"
+            "› ask a question or describe a task\n"
+        )
+        for width in WIDTHS:
+            state, rule = self.explain(wrap_terminal(raw, width))
+            self.assertEqual((width, state, rule), (width, "blocked", "crew_approval"))
+            prose_state, prose_rule = self.explain(wrap_terminal(prose, width))
+            self.assertNotEqual((width, prose_rule), (width, "crew_approval"))
+            self.assertEqual((width, prose_state), (width, "working"))
 
 
 if __name__ == "__main__":

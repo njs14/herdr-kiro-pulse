@@ -547,6 +547,172 @@ class InstallTests(unittest.TestCase):
         with open(log, encoding="utf-8") as handle:
             self.assertIn("reload-agent-manifests", handle.read())
 
+    def _fake_herdr(self, base, body):
+        bindir = os.path.join(base, "bin")
+        os.makedirs(bindir)
+        path = os.path.join(bindir, "herdr")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(path, 0o755)
+        return bindir
+
+    def test_pending_unlink_uses_exit_code_when_the_text_differs(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        bindir = self._fake_herdr(
+            base,
+            "#!/bin/sh\n"
+            "if [ \"$1\" = plugin ] && [ \"$2\" = list ]; then\n"
+            "  echo connection refused >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n",
+        )
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env.pop("HERDR_SOCKET_PATH", None)
+        env.pop("HERDR_SESSION", None)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        life = os.path.join(home, ".local", "state", "herdr-kiro", "lifecycle")
+        with open(life, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("pending_unlink=herdr-kiro", text)
+        self.assertNotIn("server_not_running", completed.stderr + completed.stdout)
+
+    def test_pending_unlink_when_the_socket_is_missing(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        bindir = self._fake_herdr(base, "#!/bin/sh\nexit 0\n")
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env.pop("HERDR_SOCKET_PATH", None)
+        env.pop("HERDR_SESSION", None)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        life = os.path.join(home, ".local", "state", "herdr-kiro", "lifecycle")
+        with open(life, encoding="utf-8") as handle:
+            self.assertIn("pending_unlink=herdr-kiro", handle.read())
+
+    def test_no_pending_unlink_when_list_succeeds_and_the_socket_exists(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        bindir = self._fake_herdr(base, "#!/bin/sh\nexit 0\n")
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env.pop("HERDR_SESSION", None)
+        sock = os.path.join(base, "herdr.sock")
+        with open(sock, "w", encoding="utf-8") as handle:
+            handle.write("")
+        env["HERDR_SOCKET_PATH"] = sock
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        life = os.path.join(home, ".local", "state", "herdr-kiro", "lifecycle")
+        with open(life, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertNotIn("pending_unlink", text)
+
+    def test_startup_keeps_pending_when_list_fails(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        state = os.path.join(home, ".local", "state", "herdr-kiro")
+        os.makedirs(state)
+        life = os.path.join(state, "lifecycle")
+        with open(life, "w", encoding="utf-8") as handle:
+            handle.write("uninstalled\npending_unlink=herdr-kiro\n")
+        bindir = self._fake_herdr(base, "#!/bin/sh\necho connection refused >&2\nexit 1\n")
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env.pop("HERDR_SOCKET_PATH", None)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "startup.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        with open(life, encoding="utf-8") as handle:
+            self.assertIn("pending_unlink=herdr-kiro", handle.read())
+        self.assertFalse(os.path.exists(os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")))
+
+    def test_uninstall_cleans_tmpdir_and_keeps_a_user_notes_dir(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        tmp = os.path.join(base, "tmp")
+        os.makedirs(tmp)
+        notes = os.path.join(tmp, "herdr-kiro-notes")
+        os.makedirs(notes)
+        with open(os.path.join(notes, "note.txt"), "w", encoding="utf-8") as handle:
+            handle.write("user")
+        unmarked = os.path.join(tmp, "herdr-kiro-rules-999999-left")
+        os.makedirs(unmarked)
+        dead = subprocess.Popen(["sleep", "30"])
+        dead.kill()
+        dead.wait(timeout=5)
+        owned = os.path.join(tmp, "herdr-kiro-rules-%s-ours" % dead.pid)
+        os.makedirs(owned)
+        with open(os.path.join(owned, "herdr-kiro-owned"), "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
+        legacy = os.path.join(tmp, "herdr-kiro-hook.log")
+        with open(legacy, "w", encoding="utf-8") as handle:
+            handle.write("legacy\n")
+        foreign = os.path.join(tmp, "herdr-kiro-w1_p1.json")
+        with open(foreign, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        with open(foreign + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
+            handle.write("herdr-kiro-owned\nuid 0\n")
+        env = self._home_env(home)
+        env["TMPDIR"] = tmp
+        env.pop("HERDR_KIRO_LEGACY_DIR", None)
+        env.pop("HERDR_SOCKET_PATH", None)
+        env.pop("HERDR_SESSION", None)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(notes, "note.txt")))
+        self.assertTrue(os.path.isdir(unmarked))
+        self.assertFalse(os.path.isdir(owned))
+        self.assertFalse(os.path.exists(legacy))
+        self.assertTrue(os.path.isfile(foreign))
+
 
 if __name__ == "__main__":
     unittest.main()

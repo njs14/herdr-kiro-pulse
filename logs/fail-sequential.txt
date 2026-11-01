@@ -1,0 +1,26 @@
+sequential: 1 non-working samples while the banner was up
+
+───────────────────────────────────────────────────────────────────────────────────────────
+• Checked workflow status "wf_546e3cb38489b329"
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Read /workspace/fixtures/wf-repro/one.txt
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+• Read /workspace/fixtures/wf-repro/two.txt
+
+• Thought for 1s...
+    ╰ Step two says it didn't verify its work, so it's worth a quick, cheap check of two.txt and one.txt to confirm.
+
+• Both steps of the "two-step" workflow finished. Step two didn't read its file back, so I opened both files myself:
+
+  - /workspace/fixtures/wf-repro/one.txt contains step-one
+  - /workspace/fixtures/wf-repro/two.txt contains step-two
+
+  Nothing was committed. Should I run another workflow, or is this done?
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Trust All Tools active, confirmations are off · /quit to exit
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · auto · ◔ 4%                                                             /workspace/fixtures/wf-repro · (main)
+
+›  ask a question or describe a task ↵
+                                                                              /sessions to resume · /copy to clipboard
