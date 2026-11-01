@@ -98,6 +98,27 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "blocked")
         self.assertEqual(rule, "workflow_approval_more_options")
 
+    def test_requires_approval_chooser_beats_the_banner(self):
+        state, rule = self.explain(
+            "▶ note running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            " Write File requires approval\n"
+            " fs_write → note.txt\n"
+            "\n"
+            " ❯ Allow once\n"
+            "   Deny once\n"
+            "   Create allow rule to approve future similar actions\n"
+            "   Create deny rule to block future similar actions\n"
+        )
+        self.assertEqual(state, "blocked")
+        self.assertEqual(rule, "workflow_requires_approval")
+        shell_state, shell_rule = self.explain(
+            "▶ two-step running 1/2 · ctrl+x expand · ctrl+g monitor\n"
+            " shell requires approval\n"
+            " ❯ Allow once\n"
+            "   Deny once\n"
+        )
+        self.assertEqual((shell_state, shell_rule), ("blocked", "workflow_requires_approval"))
+
     def test_edit_approval_beats_the_banner(self):
         state, rule = self.explain(
             "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"

@@ -76,7 +76,13 @@ def remove_ours(dest):
     if os.path.isfile(dest):
         changed = bool(owned_hash) and file_digest(dest) != owned_hash
         if changed:
-            os.replace(dest, dest + ".user-modified")
+            stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+            backup = dest + ".user-modified." + stamp
+            index = 0
+            while os.path.exists(backup):
+                index += 1
+                backup = dest + ".user-modified." + stamp + "." + str(index)
+            os.replace(dest, backup)
         else:
             os.remove(dest)
     if os.path.isfile(marker):
@@ -94,6 +100,7 @@ def process_start(pid):
             text=True,
             timeout=2,
             check=False,
+            env=dict(os.environ, LC_ALL="C"),
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -118,9 +125,11 @@ def stop_tracked_watchers(directory):
         recorded_start = start_token(lines[1]) if len(lines) > 1 else ""
         if recorded_uid != str(uid):
             continue
+        if not recorded_start:
+            continue
         pid = int(name)
         current = process_start(pid)
-        if recorded_start and current and recorded_start != current:
+        if current and recorded_start != current:
             continue
         if current:
             try:
@@ -159,16 +168,30 @@ if os.path.isfile(legacy_log):
     except OSError:
         pass
 PY
+reload_one() {
+  err=$(mktemp)
+  if herdr "$@" 2>"$err"; then
+    rm -f "$err"
+    return 0
+  fi
+  if grep -q server_not_running "$err"; then
+    echo "note: no herdr server is running; reload happens on the next herdr start" >&2
+    rm -f "$err"
+    return 0
+  fi
+  cat "$err" >&2
+  echo "warning: herdr $* failed" >&2
+  rm -f "$err"
+  return 1
+}
 if command -v herdr >/dev/null 2>&1; then
   failed=0
   if [ -n "${HERDR_SESSION:-}" ]; then
-    if ! herdr --session "$HERDR_SESSION" server reload-agent-manifests; then
-      echo "warning: herdr --session ${HERDR_SESSION} server reload-agent-manifests failed" >&2
+    if ! reload_one --session "$HERDR_SESSION" server reload-agent-manifests; then
       failed=1
     fi
   fi
-  if ! herdr server reload-agent-manifests; then
-    echo "warning: herdr server reload-agent-manifests failed" >&2
+  if ! reload_one server reload-agent-manifests; then
     failed=1
   fi
   if [ "$failed" -ne 0 ]; then

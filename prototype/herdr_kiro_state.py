@@ -13,11 +13,13 @@ until the grace ends, then reports idle, releases, and exits.
 """
 from __future__ import annotations
 
+import atexit
 import datetime
 import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,6 +37,9 @@ TICK_SECS = 0.2
 # Ctrl-C and a missing Stop leave the idle prompt up with no banner. Clear only
 # after the prompt has stayed that way, so one repaint does not end the slot.
 IDLE_CLEAR_SECS = 2.0
+# One agent_not_found reading is not enough to end a live run.
+GONE_CONFIRM_SECS = 1.5
+GONE_CONFIRM_HITS = 3
 # Releasing the hook the instant the prompt returns makes herdr report unknown
 # for about 3 seconds. Report idle first and release only after this delay, so
 # a run can settle idle before that hand-off.
@@ -116,6 +121,9 @@ def fresh_state() -> dict:
         "owners": {},
         "owner_started": {},
         "aggregate": 0,
+        "generation": 0,
+        "retiring": False,
+        "owners_died": False,
     }
 
 
@@ -126,6 +134,7 @@ def normalize(state: dict, now: float) -> dict:
     kept = {}
     kept_owners = {}
     kept_started = {}
+    dropped_dead = False
     for session, stamp in busy.items():
         try:
             seen = float(stamp)
@@ -133,6 +142,7 @@ def normalize(state: dict, now: float) -> dict:
             continue
         key = str(session)
         if owner_is_dead(owners.get(key), owner_started.get(key)):
+            dropped_dead = True
             continue
         if now - seen < STALE_SECS:
             kept[key] = seen
@@ -178,7 +188,18 @@ def normalize(state: dict, now: float) -> dict:
         "owners": kept_owners,
         "owner_started": kept_started,
         "aggregate": aggregate,
+        "generation": int(state.get("generation") or 0),
+        "retiring": bool(state.get("retiring")),
+        "owners_died": dropped_dead and not kept_owners,
     }
+
+
+def note_generation(previous: dict, nxt: dict) -> dict:
+    changed = set((previous.get("busy") or {})) != set(nxt["busy"]) or int(
+        previous.get("aggregate") or 0
+    ) != int(nxt.get("aggregate") or 0)
+    nxt["generation"] = int(previous.get("generation") or 0) + (1 if changed else 0)
+    return nxt
 
 
 def members_of(busy: dict, key: str) -> list:
@@ -228,7 +249,7 @@ def apply_event(state: dict, event: str, session: str, now: float, owner: int = 
             else:
                 nxt["busy"][AGGREGATE] = now
                 nxt["grace_until"] = 0.0
-        return nxt
+        return note_generation(state, nxt)
     if event in BUSY_EVENTS:
         if event == "SessionStart" and session in nxt["busy"]:
             # Two live sessions collapsed onto one key. Keep both until both stop.
@@ -260,7 +281,7 @@ def apply_event(state: dict, event: str, session: str, now: float, owner: int = 
         if not nxt["busy"]:
             nxt["grace_until"] = now + SETTLE_SECS
             nxt["grace_started"] = now
-    return nxt
+    return note_generation(state, nxt)
 
 
 def note_banner(state: dict, banner: bool, now: float) -> dict:
@@ -441,11 +462,12 @@ def workflow_banner_from(text: str) -> bool:
 
 
 def explain_env() -> dict:
-    """Point herdr at the toml next to this script, not a previously installed copy."""
+    """Point herdr at the toml next to this script. The temp dir is removed on exit."""
     global _EXPLAIN_ENV
     if _EXPLAIN_ENV is not None:
         return _EXPLAIN_ENV
     base = tempfile.mkdtemp(prefix="herdr-kiro-rules-")
+    atexit.register(shutil.rmtree, base, True)
     dest = os.path.join(base, "herdr", "agent-detection")
     os.makedirs(dest, exist_ok=True)
     try:
@@ -460,14 +482,19 @@ def explain_env() -> dict:
     return env
 
 
+def _unknown_screen() -> dict:
+    return {"state": "unknown", "id": None, "ok": False}
+
+
 def screen_view(text: str) -> dict:
-    """Winning herdr rule for this screen. herdr's matcher, not a second copy of it."""
+    """Winning herdr rule for this screen. A failed explain is not cached."""
     cached = _SCREEN_CACHE.get(text)
     if cached is not None:
         return cached
-    view = {"state": "idle", "id": None}
-    fd, path = tempfile.mkstemp(prefix="herdr-kiro-screen-", suffix=".txt")
+    path = None
+    view = _unknown_screen()
     try:
+        fd, path = tempfile.mkstemp(prefix="herdr-kiro-screen-", suffix=".txt")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text or "")
         completed = subprocess.run(
@@ -479,21 +506,25 @@ def screen_view(text: str) -> dict:
             env=explain_env(),
             check=False,
         )
-        if completed.returncode == 0 and completed.stdout:
-            data = json.loads(completed.stdout)
-            rule = data.get("matched_rule") or {}
-            view = {"state": data.get("state") or "idle", "id": rule.get("id")}
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-        if workflow_banner_from(text):
-            view = {"state": "working", "id": "workflow_banner_working"}
-        elif approval_text(text):
-            view = {"state": "blocked", "id": "workflow_chooser_blocked"}
+    except FileNotFoundError:
+        return _unknown_screen()
+    except (OSError, subprocess.SubprocessError):
+        return _unknown_screen()
     finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-    if len(_SCREEN_CACHE) > 4:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    if completed.returncode != 0 or not (completed.stdout or "").strip():
+        return _unknown_screen()
+    try:
+        data = json.loads(completed.stdout)
+    except (ValueError, TypeError):
+        return _unknown_screen()
+    rule = data.get("matched_rule") or {}
+    view = {"state": data.get("state") or "idle", "id": rule.get("id"), "ok": True}
+    if len(_SCREEN_CACHE) > 8:
         _SCREEN_CACHE.clear()
     _SCREEN_CACHE[text] = view
     return view
@@ -574,6 +605,37 @@ def release_stuck(state: dict) -> None:
     state["grace_started"] = 0.0
 
 
+def release_if_current(state: dict, generation: int, keys) -> bool:
+    """Clear only the snapshotted slots when no newer hook event has landed."""
+    if int(state.get("generation") or 0) != int(generation):
+        state["retiring"] = False
+        return False
+    for key in keys:
+        state["busy"].pop(key, None)
+        state["owners"].pop(key, None)
+        state["owner_started"].pop(key, None)
+    if AGGREGATE not in state["busy"]:
+        state["aggregate"] = 0
+    if not state["busy"]:
+        state["grace_until"] = 0.0
+        state["grace_started"] = 0.0
+    state["retiring"] = True
+    return True
+
+
+def should_stop_for_dead_owner(state: dict, pane_kiro: bool) -> bool:
+    """True after normalize recorded that every owned kiro process is gone."""
+    return bool(state.get("owners_died")) and not pane_kiro
+
+
+def gone_confirmed(since, now: float, hits: int, owners_died: bool) -> bool:
+    if owners_died:
+        return True
+    if since is None:
+        return False
+    return hits >= GONE_CONFIRM_HITS and now - since >= GONE_CONFIRM_SECS
+
+
 def workflow_banner(pane: str) -> bool:
     return workflow_banner_from(pane_text(pane))
 
@@ -595,6 +657,8 @@ def process_table():
     if _TABLE is not None:
         return _TABLE
     try:
+        env = dict(os.environ)
+        env["LC_ALL"] = "C"
         completed = subprocess.run(
             ["ps", "-eo", "pid=,ppid=,lstart=,comm="],
             stdout=subprocess.PIPE,
@@ -602,6 +666,7 @@ def process_table():
             text=True,
             timeout=2,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         _TABLE = "error"
@@ -619,6 +684,9 @@ def process_table():
             "lstart": start_token(matched.group(3)),
             "comm": comm_basename(matched.group(4)),
         }
+    if (completed.stdout or "").strip() and not rows:
+        _TABLE = "error"
+        return _TABLE
     _TABLE = rows
     return _TABLE
 
@@ -835,7 +903,10 @@ def ensure_watcher(pane: str, path: str) -> None:
         now = time.time()
         pid = int(state.get("watcher") or 0)
         claimed = pid == -1 and now - float(state.get("watcher_at") or 0) < 2
-        if claimed or alive(pid, state.get("watcher_started") or ""):
+        retiring = bool(state.get("retiring"))
+        if claimed and retiring:
+            return
+        if not retiring and (claimed or alive(pid, state.get("watcher_started") or "")):
             return
         state["watcher"] = -1
         state["watcher_at"] = now
@@ -852,13 +923,20 @@ def ensure_watcher(pane: str, path: str) -> None:
         start_new_session=True,
     )
     started = ""
+    begin_tick()
     snap = process_snapshot(proc.pid)
+    if not snap or snap.get("error"):
+        time.sleep(0.05)
+        begin_tick()
+        snap = process_snapshot(proc.pid)
     if snap and not snap.get("error"):
         started = snap.get("lstart") or ""
 
     def record(state: dict) -> None:
         state["watcher"] = proc.pid
-        state["watcher_started"] = started
+        if started:
+            state["watcher_started"] = started
+        state["retiring"] = False
 
     update(path, record)
     write_pidfile(path, proc.pid, started)
@@ -875,11 +953,22 @@ def clear_watcher(path: str) -> None:
     remove_pidfile(path, os.getpid())
 
 
-def stop_watcher(pane: str, path: str, reason: str) -> None:
-    update(path, release_stuck)
+def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
+    """Exit only when busy has not changed since this snapshot."""
+    generation = int(state.get("generation") or 0)
+    keys = list(state.get("busy") or {})
+    decision = {"ok": False}
+
+    def apply(current: dict) -> None:
+        decision["ok"] = release_if_current(current, generation, keys)
+
+    update(path, apply)
+    if not decision["ok"]:
+        return False
     release_authority(pane, path)
     clear_watcher(path)
     log("watcher exit " + reason)
+    return True
 
 
 def note_report(pane: str, path: str, kind: str, reported, misses: int):
@@ -918,22 +1007,38 @@ def _watch_loop(pane: str, path: str) -> None:
     reported = None
     misses = 0
     quiet_since = None
+    gone_since = None
+    gone_hits = 0
     while True:
         time.sleep(TICK_SECS)
         begin_tick()
         looked = agent_lookup(pane)
         state = update(path, lambda _state: None)
-        owners = owners_status(state)
-        pane_kiro = kiro_in_pane((state.get("owners") or {}).values())
-        # A dead pane can still show the old banner. Do not report working over that.
-        if looked == "gone" or (owners == "dead" and not pane_kiro):
-            stop_watcher(pane, path, "agent gone")
-            return
-        screen = pane_text(pane)
         now = time.time()
+        if looked == "gone":
+            if gone_since is None:
+                gone_since = now
+            gone_hits += 1
+        else:
+            gone_since = None
+            gone_hits = 0
+        pane_kiro = kiro_in_pane((state.get("owners") or {}).values())
+        owner_dead = should_stop_for_dead_owner(state, pane_kiro)
+        confirmed = gone_confirmed(
+            gone_since, now, gone_hits, bool(state.get("owners_died"))
+        )
+        if owner_dead or (looked == "gone" and confirmed):
+            reason = "owner dead" if owner_dead else "agent gone"
+            if finish_if_unchanged(pane, path, state, reason):
+                return
+        screen = pane_text(pane)
         view = screen_view(screen)
-        blocked = view.get("state") == "blocked" or approval_text(screen)
-        banner = view.get("id") == "workflow_banner_working"
+        if not view.get("ok"):
+            blocked = approval_text(screen)
+            banner = False
+        else:
+            blocked = view.get("state") == "blocked" or approval_text(screen)
+            banner = view.get("id") == "workflow_banner_working"
         if blocked:
             quiet_since = None
             if reported != "blocked":
@@ -953,8 +1058,19 @@ def _watch_loop(pane: str, path: str) -> None:
             if quiet_since is None:
                 quiet_since = now
             elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
-                state = update(path, release_stuck)
-                log("screen idle clear")
+                generation = int(state.get("generation") or 0)
+                keys = list(state["busy"])
+                decision = {"ok": False}
+
+                def apply_clear(current: dict) -> None:
+                    decision["ok"] = release_if_current(current, generation, keys)
+
+                update(path, apply_clear)
+                if decision["ok"]:
+                    log("screen idle clear")
+                    state = update(path, lambda _current: None)
+                else:
+                    quiet_since = None
         else:
             quiet_since = None
         action = next_action(
@@ -965,7 +1081,7 @@ def _watch_loop(pane: str, path: str) -> None:
         )
         # Hook idle beats a visible working rule. Re-send working while the banner is up
         # and a kiro process for this pane is still alive.
-        if banner and owners != "dead":
+        if banner and not state.get("owners_died"):
             reported, misses = note_report(pane, path, "working", reported, misses)
             if reported is None and misses >= 30:
                 return
@@ -978,14 +1094,12 @@ def _watch_loop(pane: str, path: str) -> None:
                 log("watcher idle")
             held = quiet_since is not None and now - quiet_since >= RELEASE_DELAY
             if reported == "idle" and not state["busy"] and held:
-                release_authority(pane, path)
-                clear_watcher(path)
-                log("watcher exit")
-                return
+                if finish_if_unchanged(pane, path, state, "idle"):
+                    return
             continue
         if action == reported:
             continue
-        if action != "working" or owners == "dead":
+        if action != "working" or state.get("owners_died"):
             continue
         reported, misses = note_report(pane, path, "working", reported, misses)
         if reported is None and misses >= 30:

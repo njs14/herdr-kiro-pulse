@@ -214,8 +214,13 @@ class InstallTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
-        kept = hook_file + ".user-modified"
-        with open(kept, "rb") as handle:
+        matches = [
+            name
+            for name in os.listdir(os.path.dirname(hook_file))
+            if name.startswith(os.path.basename(hook_file) + ".user-modified.")
+        ]
+        self.assertEqual(len(matches), 1)
+        with open(os.path.join(os.path.dirname(hook_file), matches[0]), "rb") as handle:
             self.assertIn(b"# user edit\n", handle.read())
         self.assertFalse(os.path.exists(hook_file))
         self.assertFalse(os.path.exists(hook_file + ".herdr-kiro-owned"))
@@ -252,7 +257,13 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         with open(hook_file + ".original", "rb") as handle:
             self.assertEqual(handle.read(), b'{"user":"original"}\n')
-        with open(hook_file + ".user-modified", "rb") as handle:
+        matches = [
+            name
+            for name in os.listdir(os.path.dirname(hook_file))
+            if name.startswith("herdr-kiro.json.user-modified.")
+        ]
+        self.assertEqual(len(matches), 1)
+        with open(os.path.join(os.path.dirname(hook_file), matches[0]), "rb") as handle:
             self.assertEqual(handle.read(), b'{"user":"replacement"}\n')
         with open(hook_file, encoding="utf-8") as handle:
             self.assertIn("herdr-kiro-SessionStart", handle.read())
@@ -284,6 +295,39 @@ class InstallTests(unittest.TestCase):
             self.assertIn("herdr-kiro-SessionStart", handle.read())
         with open(hook_file + ".herdr-kiro-owned", encoding="utf-8") as handle:
             self.assertIn("sha256 ", handle.read())
+
+    def test_lost_marker_keeps_a_hand_edit(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        hook_file = os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")
+        os.remove(hook_file + ".herdr-kiro-owned")
+        with open(hook_file, "ab") as handle:
+            handle.write(b"\n# edited\n")
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        with open(hook_file + ".original", "rb") as handle:
+            self.assertIn(b"# edited\n", handle.read())
+        with open(hook_file, encoding="utf-8") as handle:
+            self.assertNotIn("# edited", handle.read())
 
     def test_lost_marker_does_not_backup_our_own_hook(self):
         base = tempfile.mkdtemp()

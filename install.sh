@@ -12,6 +12,7 @@ export HERDR_KIRO_HOOK="$HOOK"
 export HERDR_KIRO_RULES="$RULES"
 export HERDR_KIRO_CONFIG="$CONFIG"
 python3 - "$DEST/herdr-kiro.json" "$CONFIG/kiro.toml" << 'PY'
+import datetime
 import hashlib
 import json
 import os
@@ -43,35 +44,44 @@ def write_bytes(path, payload):
         handle.write(payload)
 
 
+def unique_backup(dest):
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+    candidate = dest + ".user-modified." + stamp
+    index = 0
+    while os.path.exists(candidate):
+        index += 1
+        candidate = dest + ".user-modified." + stamp + "." + str(index)
+    return candidate
+
+
 def install_owned(dest, payload):
     directory = os.path.dirname(dest)
     if directory:
         os.makedirs(directory, exist_ok=True)
     marker = dest + MARKER
     original = dest + ".original"
-    backup = dest + ".user-modified"
     existing = None
     if os.path.isfile(dest):
         with open(dest, "rb") as handle:
             existing = handle.read()
-    def ours(payload):
-        try:
-            text = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            return False
-        return "herdr-kiro-SessionStart" in text or "workflow_banner_working" in text
-
     owned_hash = marker_hash(marker) if os.path.isfile(marker) else None
-    if existing is not None and owned_hash is None and not ours(existing):
+    if existing is not None and owned_hash is None and existing != payload:
         if not os.path.isfile(original):
             write_bytes(original, existing)
         else:
             with open(original, "rb") as handle:
                 previous = handle.read()
             if existing != previous:
-                write_bytes(backup, existing)
+                write_bytes(unique_backup(dest), existing)
+    elif existing is not None and owned_hash == "" and existing != payload:
+        sys.stderr.write(
+            "warning: upgrading %s from a marker with no hash; a hand edit would be replaced\n"
+            % dest
+        )
     elif existing is not None and owned_hash and digest(existing) != owned_hash:
+        backup = unique_backup(dest)
         write_bytes(backup, existing)
+        sys.stderr.write("warning: %s was edited; kept %s\n" % (dest, backup))
     write_bytes(dest, payload)
     with open(marker, "w", encoding="utf-8") as handle:
         handle.write("herdr-kiro-owned\nsha256 %s\n" % digest(payload))
@@ -100,6 +110,22 @@ if rules and os.path.isfile(rules):
     with open(rules, "rb") as handle:
         install_owned(sys.argv[2], handle.read())
 PY
+reload_one() {
+  err=$(mktemp)
+  if herdr "$@" 2>"$err"; then
+    rm -f "$err"
+    return 0
+  fi
+  if grep -q server_not_running "$err"; then
+    echo "note: no herdr server is running; reload happens on the next herdr start" >&2
+    rm -f "$err"
+    return 0
+  fi
+  cat "$err" >&2
+  echo "warning: herdr $* failed" >&2
+  rm -f "$err"
+  return 1
+}
 reload_manifests() {
   if ! command -v herdr >/dev/null 2>&1; then
     echo "herdr is not on PATH, skipped manifest reload" >&2
@@ -107,13 +133,11 @@ reload_manifests() {
   fi
   failed=0
   if [ -n "${HERDR_SESSION:-}" ]; then
-    if ! herdr --session "$HERDR_SESSION" server reload-agent-manifests; then
-      echo "warning: herdr --session ${HERDR_SESSION} server reload-agent-manifests failed" >&2
+    if ! reload_one --session "$HERDR_SESSION" server reload-agent-manifests; then
       failed=1
     fi
   fi
-  if ! herdr server reload-agent-manifests; then
-    echo "warning: herdr server reload-agent-manifests failed" >&2
+  if ! reload_one server reload-agent-manifests; then
     failed=1
   fi
   return "$failed"

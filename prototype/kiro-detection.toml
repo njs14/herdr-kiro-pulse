@@ -112,6 +112,17 @@ visible_working = true
 line_regex = ['(?i)^\s*▶\s+\S+\s+running\b.*\bctrl\+x\b']
 
 [[rules]]
+id = "workflow_requires_approval"
+state = "blocked"
+priority = 1430
+region = "whole_recent"
+visible_blocker = true
+# File, shell, and other tool choosers. The title contains "requires approval"
+# and one choice line is "Allow once". This is not limited to fs_write.
+contains = ["requires approval"]
+line_regex = ['(?i)^\s*(?:[>❯]\s*)?allow once\s*$']
+
+[[rules]]
 id = "workflow_chooser_blocked"
 state = "blocked"
 priority = 1420

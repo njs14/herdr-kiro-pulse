@@ -20,7 +20,7 @@ Requires `herdr` and `kiro-cli` on `PATH`.
 ./install.sh
 ```
 
-The script writes `~/.kiro/hooks/herdr-kiro.json`. The command is passed through `json.dumps`, and the path is shell-quoted, so a checkout path can contain spaces, quotes, and backslashes. The first time it replaces a user file it copies that file to `herdr-kiro.json.original` and records a sha256 of the bytes it wrote in `herdr-kiro.json.herdr-kiro-owned`. A later install does not replace `.original`. If the installed file was edited, or the marker was removed and a different file is in its place, that replacement is copied to `herdr-kiro.json.user-modified` before the new bytes are written. A marker left by an older install with no hash is upgraded in place. Restart Kiro after installing it. Start Kiro in V3 mode with workflows enabled:
+The script writes `~/.kiro/hooks/herdr-kiro.json`. The command is passed through `json.dumps`, and the path is shell-quoted, so a checkout path can contain spaces, quotes, and backslashes. The first time it replaces a user file it copies that file to `herdr-kiro.json.original` and records a sha256 of the bytes it wrote in `herdr-kiro.json.herdr-kiro-owned`. A later install does not replace `.original`. If the installed file was edited, that copy is saved under a new `herdr-kiro.json.user-modified.<timestamp>` name before the new bytes are written. A file is treated as ours only when its bytes match the payload being installed. A marker with no hash prints a warning on upgrade. If no herdr server is running, install still exits 0 and reload happens the next time herdr starts. A failed reload against a running server exits nonzero. Restart Kiro after installing it. Start Kiro in V3 mode with workflows enabled:
 
 ```bash
 kiro-cli settings chat.agentEngine v3
@@ -38,7 +38,7 @@ State and the hook log live in `$XDG_STATE_HOME/herdr-kiro` or `~/.local/state/h
 ./uninstall.sh
 ```
 
-That removes a hook file this repo still owns and moves `.original` back. A file whose bytes no longer match the stored hash is renamed to `.user-modified` instead of being deleted. It stops only the watchers recorded for this user under the state directory's `pids` files. It leaves `*.seq` in place so the next install does not restart the sequence at 1. It also removes the Kiro detection override when that file is the one this repo installed. When `HERDR_SESSION` is set, the reload goes to that session.
+That removes a hook file this repo still owns and moves `.original` back. A file whose bytes no longer match the stored hash is renamed to a new `.user-modified.<timestamp>` file instead of being deleted. Uninstall does not signal a watcher whose start time was never recorded. It stops only the watchers recorded for this user under the state directory's `pids` files. It leaves `*.seq` in place so the next install does not restart the sequence at 1. It also removes the Kiro detection override when that file is the one this repo installed. When `HERDR_SESSION` is set, the reload goes to that session.
 
 ## Check
 

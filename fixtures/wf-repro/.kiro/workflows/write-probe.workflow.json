@@ -1,0 +1,13 @@
+{
+  "name": "write-probe",
+  "description": "One write step that should raise a tool approval while trust-all is off.",
+  "effortLevel": "low",
+  "steps": [
+    {
+      "type": "step",
+      "id": "write",
+      "agent": "wf-coder",
+      "prompt": "Create note.txt containing the single word note, using the file write tool and no shell command. After it is written, call send_message with severity success and the single word done."
+    }
+  ]
+}

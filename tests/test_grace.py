@@ -393,30 +393,126 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "release-agent")
         self.assertIn("w1:p9", calls[0])
 
-    def test_watcher_exits_when_the_agent_is_gone(self):
+    def test_one_missing_agent_does_not_count_as_confirmed(self):
+        self.assertFalse(hook.gone_confirmed(10.0, 10.2, 1, False))
+        self.assertTrue(hook.gone_confirmed(10.0, 12.0, 3, False))
+        self.assertTrue(hook.gone_confirmed(None, 0.0, 0, True))
+
+    def test_watcher_waits_before_a_missing_agent_ends_the_run(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
         hook.update(path, lambda state: None)
-        reports = []
+        clock = {"t": 1000.0}
 
-        def report(*args, **kwargs):
-            reports.append(args)
-            return True
+        def sleep(_delay):
+            clock["t"] += 0.5
+            if clock["t"] > 1008:
+                raise AssertionError("watcher did not exit")
 
-        def banner(_pane):
-            return "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        def now():
+            return clock["t"]
 
-        with mock.patch.object(hook, "pane_text", banner), mock.patch.object(
+        with mock.patch.object(hook, "pane_text", lambda _pane: "hello\n"), mock.patch.object(
             hook, "agent_lookup", lambda _pane: "gone"
-        ), mock.patch.object(hook, "send_report", report), mock.patch.object(
+        ), mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True), mock.patch.object(
             hook, "herdr", lambda *_args: True
-        ), mock.patch.object(hook.time, "sleep", lambda _delay: None):
+        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}), mock.patch.object(
+            hook.time, "sleep", sleep
+        ), mock.patch.object(hook.time, "time", now):
             hook.watch_loop("w1:p9", path)
-        self.assertEqual(reports, [])
+        self.assertGreaterEqual(clock["t"] - 1000.0, hook.GONE_CONFIRM_SECS)
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
-        pidfile = os.path.join(directory, "pids", str(os.getpid()))
-        self.assertFalse(os.path.exists(pidfile))
+
+    def test_newer_session_survives_a_stale_clear(self):
+        state = hook.fresh_state()
+        state = hook.apply_event(state, "SessionStart", "older", 1.0)
+        seen = state["generation"]
+        state = hook.apply_event(state, "SessionStart", "newer", 2.0)
+        self.assertNotEqual(state["generation"], seen)
+        self.assertFalse(hook.release_if_current(state, seen, ["older"]))
+        self.assertIn("older", state["busy"])
+        self.assertIn("newer", state["busy"])
+        self.assertFalse(state["retiring"])
+
+    def test_retiring_watcher_does_not_block_the_next_one(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+
+        def mark(state):
+            state["watcher"] = os.getpid()
+            state["watcher_started"] = "alive"
+            state["retiring"] = True
+
+        hook.update(path, mark)
+        spawned = {}
+
+        class Proc:
+            pid = 777
+
+        def popen(*_args, **_kwargs):
+            spawned["yes"] = True
+            return Proc()
+
+        with mock.patch.object(hook, "alive", lambda *_args, **_kwargs: True), mock.patch.object(
+            hook.subprocess, "Popen", popen
+        ), mock.patch.object(
+            hook, "process_snapshot", lambda _pid: {"ppid": 1, "lstart": "9", "comm": "python"}
+        ):
+            hook.ensure_watcher("w1:p1", path)
+        self.assertTrue(spawned.get("yes"))
+
+    def test_owner_death_is_visible_after_normalize(self):
+        state = hook.apply_event(
+            hook.fresh_state(), "UserPromptSubmit", "sess", 1.0, owner=424242, owner_started="old"
+        )
+
+        def gone(_pid):
+            return None
+
+        with mock.patch.object(hook, "process_snapshot", gone):
+            later = hook.normalize(state, 10)
+        self.assertEqual(later["busy"], {})
+        self.assertTrue(later["owners_died"])
+        self.assertTrue(hook.should_stop_for_dead_owner(later, False))
+        self.assertFalse(hook.should_stop_for_dead_owner(later, True))
+
+    def test_failed_explain_is_not_cached_as_idle(self):
+        hook._SCREEN_CACHE.clear()
+        calls = {"n": 0}
+
+        class Completed:
+            returncode = 1
+            stdout = ""
+
+        def run(*_args, **_kwargs):
+            calls["n"] += 1
+            return Completed()
+
+        with mock.patch.object(hook.subprocess, "run", run):
+            first = hook.screen_view("same screen")
+            second = hook.screen_view("same screen")
+        self.assertEqual(first["state"], "unknown")
+        self.assertFalse(first["ok"])
+        self.assertEqual(second["state"], "unknown")
+        self.assertEqual(calls["n"], 2)
+
+    def test_ps_uses_the_c_locale_and_rejects_an_unparsed_table(self):
+        hook.begin_tick()
+        seen = {}
+
+        class Completed:
+            returncode = 0
+            stdout = "not a process row\n"
+
+        def run(cmd, **kwargs):
+            seen["env"] = kwargs.get("env") or {}
+            return Completed()
+
+        with mock.patch.object(hook.subprocess, "run", run):
+            table = hook.process_table()
+        self.assertEqual(seen["env"].get("LC_ALL"), "C")
+        self.assertEqual(table, "error")
 
     def test_model_text_does_not_arm_the_idle_clear(self):
         text = "The step is still thinking about the file list.\n"
