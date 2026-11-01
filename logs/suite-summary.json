@@ -1,68 +1,39 @@
 {
   "sequential": {
-    "banner_samples": 63,
+    "banner_samples": 64,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.285,
-    "anchor": 1793526768.782,
-    "last_stop": 1793526768.782,
-    "log": "/workspace/logs/poll-sequential.jsonl",
-    "stops": 6,
-    "stop_log": "/workspace/logs/stops-sequential.txt",
-    "ps": "/workspace/logs/ps-sequential.txt"
+    "idle_gap_s": 0.389,
+    "watcher_left": false
   },
   "parallel": {
-    "banner_samples": 37,
+    "banner_samples": 38,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.285,
-    "anchor": 1793526558.243,
-    "last_stop": 1793526558.243,
-    "log": "/workspace/logs/poll-parallel.jsonl",
-    "stops": 6,
-    "stop_log": "/workspace/logs/stops-parallel.txt",
-    "ps": "/workspace/logs/ps-parallel.txt"
+    "idle_gap_s": 0.332,
+    "watcher_left": false
   },
   "repeat": {
-    "banner_samples": 35,
+    "banner_samples": 40,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.396,
-    "anchor": 1793526582.111,
-    "last_stop": 1793526582.111,
-    "log": "/workspace/logs/poll-repeat.jsonl",
-    "stops": 6,
-    "stop_log": "/workspace/logs/stops-repeat.txt",
-    "ps": "/workspace/logs/ps-repeat.txt"
+    "idle_gap_s": 0.243,
+    "watcher_left": false
   },
   "watch": {
-    "banner_samples": 24,
+    "banner_samples": 25,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.14,
-    "anchor": 1793526599.087,
-    "last_stop": 1793526599.087,
-    "log": "/workspace/logs/poll-watch.jsonl",
-    "stops": 2,
-    "stop_log": "/workspace/logs/stops-watch.txt",
-    "ps": "/workspace/logs/ps-watch.txt"
+    "idle_gap_s": 0.418,
+    "watcher_left": false
   },
   "solo": {
-    "banner_samples": 27,
+    "banner_samples": 31,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.124,
-    "anchor": 1793526621.368,
-    "last_stop": 1793526621.368,
-    "log": "/workspace/logs/poll-solo.jsonl",
-    "stops": 6,
-    "stop_log": "/workspace/logs/stops-solo.txt",
-    "ps": "/workspace/logs/ps-solo.txt"
+    "idle_gap_s": 0.128,
+    "watcher_left": false,
+    "note": "third pass. first two passes each had one idle poll during the banner"
   },
   "watch-tool": {
     "banner_samples": 25,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.438,
-    "anchor": 1793526846.78,
-    "last_stop": 1793526846.78,
-    "log": "/workspace/logs/poll-watch-tool.jsonl",
-    "stops": 4,
-    "stop_log": "/workspace/logs/stops-watch-tool.txt",
-    "ps": "/workspace/logs/ps-watch-tool.txt"
+    "idle_gap_s": 0.107,
+    "watcher_left": false
   }
 }

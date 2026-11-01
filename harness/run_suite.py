@@ -380,8 +380,23 @@ def save_ps(name):
     return path, rows
 
 
+def wait_until_settled():
+    """Don't start a workflow while a release has left the pane unknown."""
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        try:
+            status, _seq = agent_status()
+        except (subprocess.SubprocessError, json.JSONDecodeError, KeyError, OSError):
+            time.sleep(0.2)
+            continue
+        if status == "idle" and "ask a question" in visible_text():
+            return
+        time.sleep(0.2)
+
+
 def run_case(name, text, seconds):
     stop_watchers()
+    wait_until_settled()
     start = time.time()
     prompt(text)
     rows = poll_run(seconds)

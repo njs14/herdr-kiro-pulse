@@ -7,6 +7,7 @@ export HERDR_KIRO_HOOK_DIR="$DEST"
 python3 - << 'PY'
 import datetime
 import glob
+import hashlib
 import os
 import signal
 import subprocess
@@ -38,23 +39,49 @@ def start_token(text):
     return str(int(parsed.timestamp()))
 
 
+def marker_hash(path):
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+    if not text.startswith("herdr-kiro-owned"):
+        return None
+    for line in text.splitlines():
+        if line.startswith("sha256 "):
+            return line.split(" ", 1)[1].strip()
+    return ""
+
+
+def file_digest(path):
+    hashed = hashlib.sha256()
+    with open(path, "rb") as handle:
+        hashed.update(handle.read())
+    return hashed.hexdigest()
+
+
 def remove_ours(dest):
     marker = dest + MARKER
     original = dest + ".original"
-    owned = os.path.isfile(marker)
+    owned_hash = marker_hash(marker) if os.path.isfile(marker) else None
+    owned = owned_hash is not None
     if not owned and os.path.isfile(dest):
         try:
             body = open(dest, encoding="utf-8").read()
         except OSError:
             body = ""
         owned = "workflow_banner_working" in body or "herdr-kiro-SessionStart" in body
+        owned_hash = "" if owned else None
     if not owned:
         return
     if os.path.isfile(dest):
-        os.remove(dest)
+        changed = bool(owned_hash) and file_digest(dest) != owned_hash
+        if changed:
+            os.replace(dest, dest + ".user-modified")
+        else:
+            os.remove(dest)
     if os.path.isfile(marker):
         os.remove(marker)
-    if os.path.isfile(original):
+    if os.path.isfile(original) and not os.path.exists(dest):
         os.replace(original, dest)
 
 
@@ -133,6 +160,13 @@ if os.path.isfile(legacy_log):
         pass
 PY
 if command -v herdr >/dev/null 2>&1; then
-  herdr server reload-agent-manifests >/dev/null 2>&1 || true
+  if [ -n "${HERDR_SESSION:-}" ]; then
+    if ! herdr --session "$HERDR_SESSION" server reload-agent-manifests; then
+      echo "warning: herdr --session ${HERDR_SESSION} server reload-agent-manifests failed" >&2
+    fi
+  fi
+  if ! herdr server reload-agent-manifests; then
+    echo "warning: herdr server reload-agent-manifests failed" >&2
+  fi
 fi
 echo "Removed $DEST/herdr-kiro.json"

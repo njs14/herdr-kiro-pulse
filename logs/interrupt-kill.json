@@ -1,0 +1,97 @@
+{
+  "rows": [
+    {
+      "t": 0.0,
+      "get": "blocked",
+      "list": "blocked"
+    },
+    {
+      "t": 0.404,
+      "get": "idle",
+      "list": "idle"
+    },
+    {
+      "t": 0.809,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 1.214,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 1.618,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 2.023,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 2.429,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 2.834,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 3.239,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 3.645,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 4.05,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 4.457,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 4.862,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 5.267,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 5.671,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 6.075,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 6.481,
+      "get": "missing",
+      "list": "unknown"
+    },
+    {
+      "t": 6.886,
+      "get": "missing",
+      "list": "unknown"
+    }
+  ],
+  "chat_alive": true,
+  "watchers": [],
+  "busy": {}
+}

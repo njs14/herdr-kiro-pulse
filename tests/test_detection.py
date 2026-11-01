@@ -98,6 +98,23 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "blocked")
         self.assertEqual(rule, "workflow_approval_more_options")
 
+    def test_subagent_widget_beats_the_banner(self):
+        state, rule = self.explain(
+            " ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            " ⚠ 1 tool approval pending\n"
+            " ❯ (a) Approve all pending\n"
+            "   (f) Approve all pending and auto-approve future subagent requests\n"
+            "   (c) Configure individually (agent monitor)\n"
+            "   (x) Exit (cancel subagents)\n"
+        )
+        self.assertEqual(state, "blocked")
+        self.assertEqual(rule, "crew_approval")
+
+    def test_truncated_banner_is_working(self):
+        full = "▶ parallel-steps running 0/2 · ctrl+x expand · ctrl+g monitor"
+        state, rule = self.explain(full[:54] + "\n› ask a question or describe a task\n")
+        self.assertEqual((state, rule), ("working", "workflow_banner_working"))
+
     def test_repaint_gap_stays_working_while_the_banner_is_up(self):
         # The idle prompt is on the bottom lines. The banner is still on screen.
         state, rule = self.explain(

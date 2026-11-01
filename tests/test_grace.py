@@ -72,11 +72,11 @@ class GraceTests(unittest.TestCase):
 
     def test_reassert_holds_working_until_grace_ends(self):
         reports, drop_at = simulate(new_policy)
-        self.assertEqual(effective(reports, drop_at, 2.0), "working")
-        self.assertEqual(effective(reports, drop_at, 3.4), "working")
-        self.assertEqual(effective(reports, drop_at, 4.2), "idle")
+        grace_end = 1.0 + hook.SETTLE_SECS
+        self.assertEqual(effective(reports, drop_at, grace_end - 0.05), "working")
+        self.assertEqual(effective(reports, drop_at, grace_end + 0.25), "idle")
         idle_at = next(stamped for stamped, kind in reports if kind == "idle")
-        self.assertGreaterEqual(idle_at, 4.0)
+        self.assertGreaterEqual(idle_at, grace_end - 0.01)
 
     def test_parallel_sessions_stay_busy_until_both_stop(self):
         state = hook.fresh_state()
@@ -92,11 +92,11 @@ class GraceTests(unittest.TestCase):
         state = hook.apply_event(state, "Stop", "b", 4)
         self.assertEqual(state["grace_until"], 4 + hook.SETTLE_SECS)
         self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], False, 6.9),
+            hook.next_action(len(state["busy"]), state["grace_until"], False, state["grace_until"] - 0.05),
             "working",
         )
         self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], False, 7.1),
+            hook.next_action(len(state["busy"]), state["grace_until"], False, state["grace_until"] + 0.05),
             "idle",
         )
 
@@ -111,11 +111,11 @@ class GraceTests(unittest.TestCase):
         self.assertGreater(state["grace_until"], 20)
         quiet = hook.note_banner(state, False, 21)
         self.assertEqual(
-            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, 22.9),
+            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, quiet["grace_until"] - 0.05),
             "working",
         )
         self.assertEqual(
-            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, 23.1),
+            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, quiet["grace_until"] + 0.05),
             "idle",
         )
 
@@ -242,13 +242,20 @@ class GraceTests(unittest.TestCase):
             if reads["n"] > 2:
                 raise AssertionError("watcher kept polling after idle")
 
-        def report(*_args):
+        def report(*_args, **_kwargs):
             return True
 
-        with mock.patch.object(hook, "pane_text", read), mock.patch.object(
-            hook, "send_report", report
-        ), mock.patch.object(hook.time, "sleep", sleep):
-            hook.watch_loop("w1:p1", path)
+        previous_delay = hook.RELEASE_DELAY
+        hook.RELEASE_DELAY = 0
+        try:
+            with mock.patch.object(hook, "pane_text", read), mock.patch.object(
+                hook, "send_report", report
+            ), mock.patch.object(hook, "release_authority", report), mock.patch.object(
+                hook.time, "sleep", sleep
+            ):
+                hook.watch_loop("w1:p1", path)
+        finally:
+            hook.RELEASE_DELAY = previous_delay
         self.assertEqual(reads["n"], 1)
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
@@ -370,6 +377,80 @@ class GraceTests(unittest.TestCase):
         with mock.patch.object(hook, "process_snapshot", snap):
             self.assertFalse(hook.alive(50, started="THEN"))
             self.assertTrue(hook.alive(50, started="NOW"))
+
+    def test_shell_after_exit_counts_as_settled(self):
+        shell = "ubuntu@host:/workspace$\n"
+        self.assertTrue(hook.screen_is_settled(shell))
+        self.assertFalse(hook.screen_is_quiet(shell))
+        footer = "› Kiro is working · 1s · Type to steer · Ctrl+S to queue\n"
+        self.assertFalse(hook.screen_is_settled(footer))
+
+    def test_quiet_prompt_does_not_report_working(self):
+        quiet = "› ask a question or describe a task\n"
+        self.assertIsNone(hook.report_for(quiet, "working"))
+        self.assertEqual(hook.report_for(quiet, "idle"), None)
+
+    def test_widget_screen_is_blocked_and_not_reported_working(self):
+        screen = (
+            " ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            " ⚠ 1 tool approval pending\n"
+            " ❯ (a) Approve all pending\n"
+            "   (f) Approve all pending and auto-approve future subagent requests\n"
+            "   (c) Configure individually (agent monitor)\n"
+            "   (x) Exit (cancel subagents)\n"
+        )
+        self.assertTrue(hook.blocker_visible(screen))
+        self.assertTrue(hook.workflow_banner_from(screen))
+        winner = hook.highest_rule(screen)
+        self.assertEqual(winner["state"], "blocked")
+        self.assertEqual(winner["id"], "crew_approval")
+        self.assertEqual(hook.report_for(screen, "working"), "blocked")
+
+    def test_duplicate_start_clears_when_the_screen_stays_idle(self):
+        state = hook.fresh_state()
+        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 1)
+        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 2)
+        self.assertEqual(state["aggregate"], 2)
+        quiet = "› ask a question or describe a task\n"
+        self.assertTrue(hook.screen_is_quiet(quiet))
+        hook.release_stuck(state)
+        self.assertEqual(state["aggregate"], 0)
+        self.assertEqual(state["busy"], {})
+        self.assertEqual(hook.next_action(0, state["grace_until"], False, 3), "idle")
+
+    def test_quiet_screen_waits_before_clearing_a_live_slot(self):
+        state = hook.fresh_state()
+        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 1)
+        quiet = "› ask a question or describe a task\n"
+        self.assertFalse(hook.workflow_banner_from(quiet))
+        self.assertGreater(hook.IDLE_CLEAR_SECS, 0)
+        self.assertEqual(
+            hook.next_action(len(state["busy"]), state["grace_until"], False, 1 + hook.IDLE_CLEAR_SECS - 0.1),
+            "working",
+        )
+
+    def test_narrow_banner_matches_and_model_text_does_not(self):
+        full = "▶ parallel-steps running 0/2 · ctrl+x expand · ctrl+g monitor"
+        self.assertEqual(len(full), 61)
+        self.assertTrue(hook.workflow_banner_from(full[:54] + "\n"))
+        wrapped = "▶ parallel-steps running 0/2 · ctrl+x expand · ctrl+\ng monitor\n"
+        self.assertTrue(hook.workflow_banner_from(wrapped))
+        self.assertFalse(hook.workflow_banner_from("Status: ▶ deploy running\n"))
+
+    def test_outer_kiro_cli_is_the_owner_not_the_chat_child(self):
+        chain = {
+            10: {"ppid": 9, "lstart": "chat", "comm": "kiro-cli-chat"},
+            9: {"ppid": 8, "lstart": "outer", "comm": "kiro-cli"},
+            8: {"ppid": 1, "lstart": "sh", "comm": "bash"},
+        }
+
+        def snap(pid):
+            return chain.get(pid)
+
+        with mock.patch.object(hook.os, "getppid", return_value=10), mock.patch.object(
+            hook, "process_snapshot", snap
+        ):
+            self.assertEqual(hook.kiro_ancestor(), (9, "outer"))
 
 
 if __name__ == "__main__":

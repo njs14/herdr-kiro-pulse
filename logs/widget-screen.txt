@@ -1,0 +1,15 @@
+  › Run this shell command and nothing else: printf approval-probe
+
+• Workflow started "approve-probe"
+  ctrl+g to monitor
+• Cancelled printf approval-probe
+
+▸ Credits: turn 0.11 • session 0.11 | Time: 27s
+
+ ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ⚠ 1 tool approval pending
+ ❯ (a) Approve all pending
+   (f) Approve all pending and auto-approve future subagent requests
+   (c) Configure individually (agent monitor)
+   (x) Exit (cancel subagents)

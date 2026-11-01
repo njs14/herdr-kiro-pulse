@@ -1,0 +1,14 @@
+  › Run this shell command and nothing else: printf approval-probe
+
+• Workflow started "approve-probe"
+  ctrl+g to monitor
+• Cancelled printf approval-probe
+
+▸ Credits: turn 0.11 • session 0.11 | Time: 27s
+
+ ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · auto · ◔ 3%                                                           /workspace/fixtures/wf-repro · (main)
+
+›  ask a question or describe a task ↵
+                                                                            /sessions to resume · /copy to clipboard
