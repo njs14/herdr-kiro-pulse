@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import atexit
 import datetime
+import errno
 import fcntl
+import glob
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -26,6 +29,7 @@ import sys
 import tempfile
 import time
 
+__version__ = "0.8.0"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -46,6 +50,8 @@ GONE_CONFIRM_HITS = 3
 RELEASE_DELAY = 2.0
 TAIL_LINES = 30
 BUSY_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
+# Stop fires after a turn. SessionEnd fires when that loaded session is torn down.
+END_EVENTS = {"Stop", "SessionEnd"}
 # No session id shares one slot. A per-event pid never matches its own Stop.
 AGGREGATE = "aggregate"
 FILE_MODE = 0o600
@@ -176,6 +182,12 @@ def normalize(state: dict, now: float) -> dict:
         aggregate = 0
     if AGGREGATE not in kept:
         aggregate = 0
+    # The second normalize in update() sees an already-empty busy map, so a
+    # death noticed on the first pass would otherwise disappear. Keep the
+    # flag until a live owner is stored again.
+    owners_died = (dropped_dead and not kept_owners) or (
+        bool(state.get("owners_died")) and not kept and not kept_owners
+    )
     return {
         "busy": kept,
         "seq": seq,
@@ -190,15 +202,13 @@ def normalize(state: dict, now: float) -> dict:
         "aggregate": aggregate,
         "generation": int(state.get("generation") or 0),
         "retiring": bool(state.get("retiring")),
-        "owners_died": dropped_dead and not kept_owners,
+        "owners_died": owners_died,
     }
 
 
 def note_generation(previous: dict, nxt: dict) -> dict:
-    changed = set((previous.get("busy") or {})) != set(nxt["busy"]) or int(
-        previous.get("aggregate") or 0
-    ) != int(nxt.get("aggregate") or 0)
-    nxt["generation"] = int(previous.get("generation") or 0) + (1 if changed else 0)
+    """Every hook event is a new generation, including a same-session prompt."""
+    nxt["generation"] = int(previous.get("generation") or 0) + 1
     return nxt
 
 
@@ -237,7 +247,7 @@ def apply_event(state: dict, event: str, session: str, now: float, owner: int = 
             nxt["busy"][AGGREGATE] = now
             remember_owner(nxt, AGGREGATE, owner, owner_started)
             nxt["grace_until"] = 0.0
-        elif event == "Stop":
+        elif event in END_EVENTS:
             if count > 0:
                 count -= 1
             nxt["aggregate"] = count
@@ -266,7 +276,7 @@ def apply_event(state: dict, event: str, session: str, now: float, owner: int = 
             for member in members_of(nxt["busy"], session):
                 nxt["busy"][member] = now
         nxt["grace_until"] = 0.0
-    elif event == "Stop":
+    elif event in END_EVENTS:
         if session in nxt["busy"]:
             nxt["busy"].pop(session, None)
             nxt["owners"].pop(session, None)
@@ -355,7 +365,10 @@ def update(path: str, fn):
             # A deleted floor must not restart at seq 1. herdr ignores that.
             state["seq"] = int(time.time())
         fn(state)
+        died = bool(state.get("owners_died")) and not state.get("busy")
         state = normalize(state, time.time())
+        if died and not state["busy"]:
+            state["owners_died"] = True
         if state["seq"] < floor:
             state["seq"] = floor
         handle.seek(0)
@@ -453,6 +466,7 @@ BANNER_LINE = re.compile(r"(?i)^\s*▶\s+\S+\s+running\b.*\bctrl\+x\b")
 IDLE_PROMPT = re.compile(r"(?i)ask a question or describe a task")
 RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kiro-detection.toml")
 _EXPLAIN_ENV = None
+_RULES_DIR = None
 _SCREEN_CACHE = {}
 
 
@@ -461,12 +475,42 @@ def workflow_banner_from(text: str) -> bool:
     return any(BANNER_LINE.search(line) for line in tail_text(text).splitlines())
 
 
+def sweep_stale_rules() -> None:
+    """Remove rule dirs left by processes that SIGKILL prevented from exiting cleanly."""
+    for path in glob.glob("/tmp/herdr-kiro-rules-*"):
+        name = os.path.basename(path)
+        matched = re.match(r"herdr-kiro-rules-(\d+)-", name)
+        if not matched:
+            continue
+        pid = int(matched.group(1))
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            shutil.rmtree(path, True)
+
+
+def cleanup_rules() -> None:
+    if _RULES_DIR and os.path.isdir(_RULES_DIR):
+        shutil.rmtree(_RULES_DIR, True)
+    sweep_stale_rules()
+
+
+def _on_term(signum, _frame):
+    cleanup_rules()
+    raise SystemExit(128 + signum)
+
+
 def explain_env() -> dict:
     """Point herdr at the toml next to this script. The temp dir is removed on exit."""
     global _EXPLAIN_ENV
     if _EXPLAIN_ENV is not None:
         return _EXPLAIN_ENV
-    base = tempfile.mkdtemp(prefix="herdr-kiro-rules-")
+    global _RULES_DIR
+    sweep_stale_rules()
+    base = tempfile.mkdtemp(prefix="herdr-kiro-rules-%s-" % os.getpid())
+    _RULES_DIR = base
     atexit.register(shutil.rmtree, base, True)
     dest = os.path.join(base, "herdr", "agent-detection")
     os.makedirs(dest, exist_ok=True)
@@ -954,16 +998,35 @@ def clear_watcher(path: str) -> None:
 
 
 def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
-    """Exit only when busy has not changed since this snapshot."""
+    """Release only while this process still owns the watcher slot."""
+    me = os.getpid()
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
 
     def apply(current: dict) -> None:
+        watcher = int(current.get("watcher") or 0)
+        if watcher not in (me, 0, -1):
+            return
+        if int(current.get("generation") or 0) != generation:
+            current["retiring"] = False
+            return
         decision["ok"] = release_if_current(current, generation, keys)
 
     update(path, apply)
     if not decision["ok"]:
+        return False
+    still = {"ok": False}
+
+    def confirm(current: dict) -> None:
+        watcher = int(current.get("watcher") or 0)
+        if watcher not in (me, 0, -1) or int(current.get("generation") or 0) != generation:
+            current["retiring"] = False
+            return
+        still["ok"] = True
+
+    update(path, confirm)
+    if not still["ok"]:
         return False
     release_authority(pane, path)
     clear_watcher(path)
@@ -983,6 +1046,109 @@ def note_report(pane: str, path: str, kind: str, reported, misses: int):
     return reported, misses
 
 
+class OwnerExitWatch:
+    """Wake when an owner pid exits. kqueue on macOS, pidfd on Linux, kill -0 otherwise."""
+
+    def __init__(self):
+        self._fds = {}
+        self._kq = None
+
+    def close(self) -> None:
+        for fd in self._fds.values():
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds.clear()
+        if self._kq is not None:
+            try:
+                self._kq.close()
+            except OSError:
+                pass
+            self._kq = None
+
+    def wait(self, pids, timeout: float) -> bool:
+        wanted = []
+        for pid in pids:
+            try:
+                number = int(pid)
+            except (TypeError, ValueError):
+                continue
+            if number > 1:
+                wanted.append(number)
+        if not wanted:
+            time.sleep(timeout)
+            return False
+        if hasattr(select, "kqueue") and hasattr(select, "KQ_FILTER_PROC") and hasattr(select, "KQ_NOTE_EXIT"):
+            return self._wait_kqueue(wanted, timeout)
+        if hasattr(os, "pidfd_open"):
+            try:
+                return self._wait_pidfd(wanted, timeout)
+            except OSError:
+                pass
+        return self._wait_kill(wanted, timeout)
+
+    def _wait_pidfd(self, pids, timeout: float) -> bool:
+        for pid in list(self._fds):
+            if pid not in pids:
+                try:
+                    os.close(self._fds.pop(pid))
+                except OSError:
+                    self._fds.pop(pid, None)
+        for pid in pids:
+            if pid in self._fds:
+                continue
+            try:
+                self._fds[pid] = os.pidfd_open(pid)
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    return True
+                raise
+        poller = select.poll()
+        for fd in self._fds.values():
+            poller.register(fd, select.POLLIN)
+        return bool(poller.poll(max(0, int(timeout * 1000))))
+
+    def _wait_kqueue(self, pids, timeout: float) -> bool:
+        if self._kq is None:
+            self._kq = select.kqueue()
+        changes = []
+        for pid in pids:
+            try:
+                changes.append(
+                    select.kevent(
+                        pid,
+                        select.KQ_FILTER_PROC,
+                        select.KQ_EV_ADD | select.KQ_EV_ENABLE,
+                        select.KQ_NOTE_EXIT,
+                    )
+                )
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    return True
+                raise
+        try:
+            events = self._kq.control(changes, 1, timeout)
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return True
+            raise
+        return bool(events)
+
+    def _wait_kill(self, pids, timeout: float) -> bool:
+        deadline = time.time() + timeout
+        while True:
+            for pid in pids:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return True
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+
+
 def watch_loop(pane: str, path: str) -> None:
     try:
         _watch_loop(pane, path)
@@ -993,6 +1159,7 @@ def watch_loop(pane: str, path: str) -> None:
 
 def _watch_loop(pane: str, path: str) -> None:
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, _on_term)
     begin_tick()
     snap = process_snapshot(os.getpid())
     started = "" if not snap or snap.get("error") else snap.get("lstart") or ""
@@ -1007,103 +1174,117 @@ def _watch_loop(pane: str, path: str) -> None:
     reported = None
     misses = 0
     quiet_since = None
-    gone_since = None
-    gone_hits = 0
-    while True:
-        time.sleep(TICK_SECS)
-        begin_tick()
-        looked = agent_lookup(pane)
-        state = update(path, lambda _state: None)
-        now = time.time()
-        if looked == "gone":
-            if gone_since is None:
-                gone_since = now
-            gone_hits += 1
-        else:
-            gone_since = None
-            gone_hits = 0
-        pane_kiro = kiro_in_pane((state.get("owners") or {}).values())
-        owner_dead = should_stop_for_dead_owner(state, pane_kiro)
-        confirmed = gone_confirmed(
-            gone_since, now, gone_hits, bool(state.get("owners_died"))
-        )
-        if owner_dead or (looked == "gone" and confirmed):
-            reason = "owner dead" if owner_dead else "agent gone"
-            if finish_if_unchanged(pane, path, state, reason):
-                return
-        screen = pane_text(pane)
-        view = screen_view(screen)
-        if not view.get("ok"):
-            blocked = approval_text(screen)
-            banner = False
-        else:
-            blocked = view.get("state") == "blocked" or approval_text(screen)
-            banner = view.get("id") == "workflow_banner_working"
-        if blocked:
-            quiet_since = None
-            if reported != "blocked":
-                reported, misses = note_report(pane, path, "blocked", reported, misses)
+    owner_watch = OwnerExitWatch()
+    # SessionEnd drops the owner from the state file before the process exits.
+    # Keep the last pid so that exit still wakes the watcher.
+    known_owners = []
+    try:
+        while True:
+            exited = owner_watch.wait(known_owners, TICK_SECS)
+            begin_tick()
+            looked = agent_lookup(pane)
+            state = update(path, lambda _state: None)
+            now = time.time()
+            current_owners = []
+            for owner in (state.get("owners") or {}).values():
+                try:
+                    current_owners.append(int(owner))
+                except (TypeError, ValueError):
+                    continue
+            if current_owners:
+                known_owners = current_owners
+            owner_alive = False
+            for owner in known_owners:
+                try:
+                    os.kill(owner, 0)
+                except OSError:
+                    continue
+                owner_alive = True
+                break
+            if known_owners and not owner_alive:
+                exited = True
+            elif owner_alive:
+                exited = False
+            pane_kiro = kiro_in_pane(known_owners)
+            owner_dead = exited or should_stop_for_dead_owner(state, pane_kiro)
+            if owner_dead or (looked == "gone" and not owner_alive and known_owners):
+                reason = "owner exit" if exited or owner_dead else "agent gone"
+                if finish_if_unchanged(pane, path, state, reason):
+                    return
+            screen = pane_text(pane)
+            view = screen_view(screen)
+            if not view.get("ok"):
+                blocked = approval_text(screen)
+                banner = False
+            else:
+                blocked = view.get("state") == "blocked" or approval_text(screen)
+                banner = view.get("id") == "workflow_banner_working"
+            if blocked:
+                quiet_since = None
+                if reported != "blocked":
+                    reported, misses = note_report(pane, path, "blocked", reported, misses)
+                    if reported is None and misses >= 30:
+                        return
+                continue
+            if banner:
+                quiet_since = None
+
+                def extend(current: dict) -> None:
+                    revised = note_banner(current, True, time.time())
+                    current["grace_until"] = revised["grace_until"]
+
+                state = update(path, extend)
+            elif prompt_visible(screen) and screen_is_settled(screen):
+                if quiet_since is None:
+                    quiet_since = now
+                elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
+                    generation = int(state.get("generation") or 0)
+                    keys = list(state["busy"])
+                    decision = {"ok": False}
+
+                    def apply_clear(current: dict) -> None:
+                        decision["ok"] = release_if_current(current, generation, keys)
+
+                    update(path, apply_clear)
+                    if decision["ok"]:
+                        log("screen idle clear")
+                        state = update(path, lambda _current: None)
+                    else:
+                        quiet_since = None
+            else:
+                quiet_since = None
+            action = next_action(
+                len(state["busy"]),
+                float(state["grace_until"]),
+                banner,
+                time.time(),
+            )
+            owners_gone = bool(known_owners) and not owner_alive
+            if banner and not state.get("owners_died") and not owners_gone:
+                reported, misses = note_report(pane, path, "working", reported, misses)
                 if reported is None and misses >= 30:
                     return
-            continue
-        if banner:
-            quiet_since = None
-
-            def extend(current: dict) -> None:
-                revised = note_banner(current, True, time.time())
-                current["grace_until"] = revised["grace_until"]
-
-            state = update(path, extend)
-        elif prompt_visible(screen) and screen_is_settled(screen):
-            if quiet_since is None:
-                quiet_since = now
-            elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
-                generation = int(state.get("generation") or 0)
-                keys = list(state["busy"])
-                decision = {"ok": False}
-
-                def apply_clear(current: dict) -> None:
-                    decision["ok"] = release_if_current(current, generation, keys)
-
-                update(path, apply_clear)
-                if decision["ok"]:
-                    log("screen idle clear")
-                    state = update(path, lambda _current: None)
-                else:
-                    quiet_since = None
-        else:
-            quiet_since = None
-        action = next_action(
-            len(state["busy"]),
-            float(state["grace_until"]),
-            banner,
-            time.time(),
-        )
-        # Hook idle beats a visible working rule. Re-send working while the banner is up
-        # and a kiro process for this pane is still alive.
-        if banner and not state.get("owners_died"):
+                continue
+            if action == "idle" and screen_is_quiet(screen):
+                if reported != "idle":
+                    reported, misses = note_report(pane, path, "idle", reported, misses)
+                    if reported is None and misses >= 30:
+                        return
+                    log("watcher idle")
+                held = quiet_since is not None and now - quiet_since >= RELEASE_DELAY
+                if reported == "idle" and not state["busy"] and held:
+                    if finish_if_unchanged(pane, path, state, "idle"):
+                        return
+                continue
+            if action == reported:
+                continue
+            if action != "working" or state.get("owners_died") or owners_gone:
+                continue
             reported, misses = note_report(pane, path, "working", reported, misses)
             if reported is None and misses >= 30:
                 return
-            continue
-        if action == "idle" and screen_is_quiet(screen):
-            if reported != "idle":
-                reported, misses = note_report(pane, path, "idle", reported, misses)
-                if reported is None and misses >= 30:
-                    return
-                log("watcher idle")
-            held = quiet_since is not None and now - quiet_since >= RELEASE_DELAY
-            if reported == "idle" and not state["busy"] and held:
-                if finish_if_unchanged(pane, path, state, "idle"):
-                    return
-            continue
-        if action == reported:
-            continue
-        if action != "working" or state.get("owners_died"):
-            continue
-        reported, misses = note_report(pane, path, "working", reported, misses)
-        if reported is None and misses >= 30:
-            return
+    finally:
+        owner_watch.close()
 
 
 def session_of(payload: dict, ppid: int = 0) -> str:
@@ -1142,7 +1323,7 @@ def main() -> int:
     path = state_path(pane)
     now = time.time()
     session = session_of(payload)
-    if event not in BUSY_EVENTS and event != "Stop":
+    if event not in BUSY_EVENTS and event not in END_EVENTS:
         return 0
     begin_tick()
     owner, owner_started = kiro_ancestor()

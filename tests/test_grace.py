@@ -7,6 +7,8 @@ working after that drop is what holds the pane for the grace period.
 import json
 import os
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -398,31 +400,185 @@ class GraceTests(unittest.TestCase):
         self.assertTrue(hook.gone_confirmed(10.0, 12.0, 3, False))
         self.assertTrue(hook.gone_confirmed(None, 0.0, 0, True))
 
-    def test_watcher_waits_before_a_missing_agent_ends_the_run(self):
+    def test_missing_agent_is_a_blip_while_the_owner_lives(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
-        hook.update(path, lambda state: None)
-        clock = {"t": 1000.0}
+        holder = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: holder.poll() is not None or holder.kill())
+        hook.begin_tick()
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": holder.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 3
+
+        hook.update(path, seed)
+        sleeps = {"n": 0}
 
         def sleep(_delay):
-            clock["t"] += 0.5
-            if clock["t"] > 1008:
-                raise AssertionError("watcher did not exit")
+            sleeps["n"] += 1
+            if sleeps["n"] > 2:
+                raise SystemExit("stop")
 
-        def now():
-            return clock["t"]
+        def fake_wait(_self, _pids, timeout):
+            sleep(timeout)
+            return False
 
-        with mock.patch.object(hook, "pane_text", lambda _pane: "hello\n"), mock.patch.object(
+        with mock.patch.object(hook, "pane_text", lambda _pane: "› ask a question or describe a task\n"), mock.patch.object(
             hook, "agent_lookup", lambda _pane: "gone"
         ), mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True), mock.patch.object(
             hook, "herdr", lambda *_args: True
-        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}), mock.patch.object(
-            hook.time, "sleep", sleep
-        ), mock.patch.object(hook.time, "time", now):
-            hook.watch_loop("w1:p9", path)
-        self.assertGreaterEqual(clock["t"] - 1000.0, hook.GONE_CONFIRM_SECS)
+        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "blocked", "id": "crew_approval", "ok": True}), mock.patch.object(
+            hook.OwnerExitWatch, "wait", fake_wait
+        ):
+            with self.assertRaises(SystemExit):
+                hook.watch_loop("w1:p9", path)
+        holder.kill()
+        holder.wait(timeout=5)
         with open(path, encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)["watcher"], 0)
+            self.assertIn("sess", json.load(handle)["busy"])
+
+    def test_dead_owner_with_banner_stops_the_watcher(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        owner = subprocess.Popen(["sleep", "30"])
+        reports = []
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 1
+
+        hook.update(path, seed)
+        owner.kill()
+        owner.wait(timeout=5)
+
+        def report(*args, **_kwargs):
+            reports.append(args)
+            return True
+
+        banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        waits = {"n": 0}
+        real_wait = hook.OwnerExitWatch.wait
+
+        def limited(self, pids, timeout):
+            waits["n"] += 1
+            if waits["n"] > 4:
+                raise AssertionError("watcher kept reporting after the owner died")
+            return real_wait(self, pids, min(timeout, 0.05))
+
+        with mock.patch.object(hook, "pane_text", lambda _pane: banner), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "working"
+        ), mock.patch.object(hook, "send_report", report), mock.patch.object(
+            hook, "herdr", lambda *_args: True
+        ), mock.patch.object(
+            hook, "screen_view", lambda _text: {"state": "working", "id": "workflow_banner_working", "ok": True}
+        ), mock.patch.object(hook.OwnerExitWatch, "wait", limited):
+            hook.watch_loop("w1:p9", path)
+        self.assertFalse(any(len(args) >= 3 and args[2] == "working" for args in reports))
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["watcher"], 0)
+        self.assertEqual(saved["busy"], {})
+
+    def test_session_end_then_process_exit_stops_the_watcher(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        hook.begin_tick()
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 2
+
+        hook.update(path, seed)
+        reports = []
+        phase = {"n": 0}
+        real_wait = hook.OwnerExitWatch.wait
+
+        def staged(self, pids, timeout):
+            phase["n"] += 1
+            if phase["n"] == 2:
+                def clear(state):
+                    state["busy"] = {}
+                    state["owners"] = {}
+                    state["owner_started"] = {}
+                    state["grace_until"] = 0.0
+
+                hook.update(path, clear)
+                return False
+            if phase["n"] == 3:
+                owner.kill()
+                owner.wait(timeout=5)
+                return real_wait(self, pids, min(timeout, 0.3))
+            if phase["n"] > 3:
+                raise AssertionError("watcher kept reporting after the process exited")
+            return False
+
+        banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        with mock.patch.object(hook, "pane_text", lambda _pane: banner), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "working"
+        ), mock.patch.object(hook, "send_report", lambda *args, **_kwargs: reports.append(args) or True), mock.patch.object(
+            hook, "herdr", lambda *_args: True
+        ), mock.patch.object(
+            hook, "screen_view", lambda _text: {"state": "working", "id": "workflow_banner_working", "ok": True}
+        ), mock.patch.object(hook.OwnerExitWatch, "wait", staged):
+            hook.watch_loop("w1:p9", path)
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["watcher"], 0)
+        self.assertLessEqual(sum(1 for args in reports if len(args) >= 3 and args[2] == "working"), 2)
+
+    def test_owner_exit_watch_wakes_when_the_process_dies(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        watch = hook.OwnerExitWatch()
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+            started = time.time()
+            woke = watch.wait([proc.pid], 2.0)
+            elapsed = time.time() - started
+        finally:
+            watch.close()
+            if proc.poll() is None:
+                proc.kill()
+        self.assertTrue(woke)
+        self.assertLess(elapsed, 1.0)
+
+    def test_same_session_prompt_bumps_generation(self):
+        state = hook.apply_event(hook.fresh_state(), "SessionStart", "sess", 1.0)
+        seen = state["generation"]
+        state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0)
+        self.assertNotEqual(state["generation"], seen)
+        self.assertIn("sess", state["busy"])
+        self.assertFalse(hook.release_if_current(state, seen, ["sess"]))
+        self.assertIn("sess", state["busy"])
+
+    def test_late_release_does_not_fire_after_the_slot_moves(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+
+        def seed(state):
+            state["watcher"] = 4242
+            state["generation"] = 4
+            state["busy"] = {"sess": time.time()}
+
+        hook.update(path, seed)
+        calls = []
+        with mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True), mock.patch.object(
+            hook.os, "getpid", lambda: 111
+        ):
+            self.assertFalse(
+                hook.finish_if_unchanged("w1:p9", path, {"generation": 4, "busy": {"sess": 1.0}}, "idle")
+            )
+        self.assertEqual(calls, [])
+        with open(path, encoding="utf-8") as handle:
+            self.assertIn("sess", json.load(handle)["busy"])
 
     def test_newer_session_survives_a_stale_clear(self):
         state = hook.fresh_state()
@@ -476,6 +632,19 @@ class GraceTests(unittest.TestCase):
         self.assertTrue(later["owners_died"])
         self.assertTrue(hook.should_stop_for_dead_owner(later, False))
         self.assertFalse(hook.should_stop_for_dead_owner(later, True))
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+
+        def seed(current):
+            current.clear()
+            current.update(state)
+
+        with mock.patch.object(hook, "process_snapshot", gone):
+            first = hook.update(path, seed)
+            second = hook.update(path, lambda _current: None)
+        self.assertTrue(first["owners_died"])
+        self.assertTrue(second["owners_died"])
+        self.assertEqual(second["busy"], {})
 
     def test_failed_explain_is_not_cached_as_idle(self):
         hook._SCREEN_CACHE.clear()
@@ -531,6 +700,8 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(hook.report_for(quiet, "idle"), None)
 
     def test_widget_screen_is_blocked_and_not_reported_working(self):
+        if shutil.which("herdr") is None:
+            self.skipTest("herdr is not on PATH")
         screen = (
             " ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor\n"
             " ⚠ 1 tool approval pending\n"
@@ -591,6 +762,41 @@ class GraceTests(unittest.TestCase):
             hook, "process_snapshot", snap
         ):
             self.assertEqual(hook.kiro_ancestor(), (9, "outer"))
+
+    def test_session_end_clears_the_slot_like_stop(self):
+        state = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "sess", 1.0)
+        self.assertIn("sess", state["busy"])
+        state = hook.apply_event(state, "SessionEnd", "sess", 2.0)
+        self.assertNotIn("sess", state["busy"])
+        self.assertEqual(state["grace_until"], 2.0 + hook.SETTLE_SECS)
+
+    def test_sigterm_removes_the_rules_dir_and_a_dead_pid_leftover(self):
+        dead = 4_000_000
+        try:
+            os.kill(dead, 0)
+        except OSError:
+            pass
+        else:
+            self.skipTest("pid %s is alive" % dead)
+        stale = "/tmp/herdr-kiro-rules-%s-leftover" % dead
+        os.makedirs(stale, exist_ok=True)
+        previous_env = hook._EXPLAIN_ENV
+        previous_dir = hook._RULES_DIR
+        hook._EXPLAIN_ENV = None
+        hook._RULES_DIR = None
+        try:
+            hook.explain_env()
+            rules = hook._RULES_DIR
+            self.assertTrue(os.path.isdir(rules))
+            self.assertFalse(os.path.isdir(stale))
+            with self.assertRaises(SystemExit):
+                hook._on_term(signal.SIGTERM, None)
+            self.assertFalse(os.path.isdir(rules))
+        finally:
+            if hook._RULES_DIR and os.path.isdir(hook._RULES_DIR):
+                shutil.rmtree(hook._RULES_DIR, True)
+            hook._EXPLAIN_ENV = previous_env
+            hook._RULES_DIR = previous_dir
 
 
 if __name__ == "__main__":

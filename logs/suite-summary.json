@@ -1,14 +1,68 @@
 {
-  "sequential": {"banner_samples": 63, "mid_run_idle": 0, "idle_gap_s": 0.103, "watcher_left": false},
-  "parallel": {"banner_samples": 35, "mid_run_idle": 0, "idle_gap_s": 0.035, "watcher_left": false},
-  "repeat": {"banner_samples": 33, "mid_run_idle": 0, "idle_gap_s": 0.424, "watcher_left": false},
-  "watch": {"banner_samples": 24, "mid_run_idle": 0, "idle_gap_s": 0.209, "watcher_left": false},
-  "solo": {"banner_samples": 29, "mid_run_idle": 0, "idle_gap_s": 0.517, "watcher_left": false},
+  "sequential": {
+    "banner_samples": 65,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.188,
+    "anchor": 1793550769.575,
+    "last_stop": 1793550769.575,
+    "log": "/workspace/logs/poll-sequential.jsonl",
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-sequential.txt",
+    "ps": "/workspace/logs/ps-sequential.txt"
+  },
+  "parallel": {
+    "banner_samples": 33,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.395,
+    "anchor": 1793550790.341,
+    "last_stop": 1793550790.341,
+    "log": "/workspace/logs/poll-parallel.jsonl",
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-parallel.txt",
+    "ps": "/workspace/logs/ps-parallel.txt"
+  },
+  "repeat": {
+    "banner_samples": 34,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.371,
+    "anchor": 1793550812.737,
+    "last_stop": 1793550812.737,
+    "log": "/workspace/logs/poll-repeat.jsonl",
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-repeat.txt",
+    "ps": "/workspace/logs/ps-repeat.txt"
+  },
+  "watch": {
+    "banner_samples": 25,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.468,
+    "anchor": 1793550830.779,
+    "last_stop": 1793550830.779,
+    "log": "/workspace/logs/poll-watch.jsonl",
+    "stops": 2,
+    "stop_log": "/workspace/logs/stops-watch.txt",
+    "ps": "/workspace/logs/ps-watch.txt"
+  },
+  "solo": {
+    "banner_samples": 32,
+    "mid_run_idle": 0,
+    "idle_gap_s": 0.121,
+    "anchor": 1793550853.719,
+    "last_stop": 1793550853.719,
+    "log": "/workspace/logs/poll-solo.jsonl",
+    "stops": 6,
+    "stop_log": "/workspace/logs/stops-solo.txt",
+    "ps": "/workspace/logs/ps-solo.txt"
+  },
   "watch-tool": {
     "banner_samples": 25,
     "mid_run_idle": 0,
-    "idle_gap_s": 0.353,
-    "watcher_left": false,
-    "note": "third pass. first two passes each had one idle poll during the banner"
+    "idle_gap_s": 0.628,
+    "anchor": 1793550874.504,
+    "last_stop": 1793550874.504,
+    "log": "/workspace/logs/poll-watch-tool.jsonl",
+    "stops": 4,
+    "stop_log": "/workspace/logs/stops-watch-tool.txt",
+    "ps": "/workspace/logs/ps-watch-tool.txt"
   }
 }

@@ -12,6 +12,8 @@ RULES = os.path.join(ROOT, "prototype", "kiro-detection.toml")
 
 class DetectionTests(unittest.TestCase):
     def setUp(self):
+        if shutil.which("herdr") is None:
+            self.skipTest("herdr is not on PATH")
         self.base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.base, True)
         config = os.path.join(self.base, "herdr", "agent-detection")
@@ -97,6 +99,36 @@ class DetectionTests(unittest.TestCase):
         )
         self.assertEqual(state, "blocked")
         self.assertEqual(rule, "workflow_approval_more_options")
+
+    def test_monitor_border_chooser_beats_the_banner(self):
+        state, rule = self.explain(
+            "│ write-probe - running\n"
+            "│ Write File requires approval\n"
+            "│ fs_write -> note.txt\n"
+            "│ ❯ Allow once\n"
+            "│   Deny once\n"
+            "│   Create allow rule\n"
+        )
+        self.assertEqual((state, rule), ("blocked", "workflow_requires_approval"))
+
+    def test_requires_approval_prose_does_not_block(self):
+        state, rule = self.explain(
+            "The step requires approval and the notes say Allow once is the default.\n"
+            "› ask a question or describe a task\n"
+        )
+        self.assertNotEqual(rule, "workflow_requires_approval")
+        self.assertEqual(state, "idle")
+
+    def test_chooser_scrolled_off_the_bottom_does_not_block(self):
+        filler = "\n".join(["older log line %s" % index for index in range(70)])
+        state, rule = self.explain(
+            "│ Write File requires approval\n"
+            "│ ❯ Allow once\n"
+            "│   Deny once\n"
+            + filler
+            + "\n› ask a question or describe a task\n"
+        )
+        self.assertNotEqual(rule, "workflow_requires_approval")
 
     def test_requires_approval_chooser_beats_the_banner(self):
         state, rule = self.explain(

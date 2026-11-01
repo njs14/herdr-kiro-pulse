@@ -46,9 +46,9 @@ class InstallTests(unittest.TestCase):
         with open(previous, encoding="utf-8") as handle:
             document = json.loads(handle.read())
         commands = [item["action"]["command"] for item in document["hooks"]]
-        self.assertEqual(len(commands), 5)
+        self.assertEqual(len(commands), 6)
         for event, command in zip(
-            ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
+            ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"],
             commands,
         ):
             parts = shlex.split(command)
@@ -289,12 +289,15 @@ class InstallTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
-        self.assertFalse(os.path.exists(hook_file + ".user-modified"))
-        self.assertFalse(os.path.exists(hook_file + ".original"))
-        with open(hook_file, encoding="utf-8") as handle:
-            self.assertIn("herdr-kiro-SessionStart", handle.read())
-        with open(hook_file + ".herdr-kiro-owned", encoding="utf-8") as handle:
-            self.assertIn("sha256 ", handle.read())
+        self.assertIn("no content hash", completed.stderr)
+        with open(hook_file, "rb") as handle:
+            self.assertEqual(handle.read(), b'{"version":"v4"}\n')
+        backups = [
+            name
+            for name in os.listdir(hook_dir)
+            if name.startswith("herdr-kiro.json.user-modified.")
+        ]
+        self.assertEqual(len(backups), 1)
 
     def test_lost_marker_keeps_a_hand_edit(self):
         base = tempfile.mkdtemp()
@@ -358,6 +361,64 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(os.path.exists(hook_file + ".user-modified"))
         with open(hook_file, encoding="utf-8") as handle:
             self.assertIn("herdr-kiro-SessionStart", handle.read())
+
+    def test_no_server_is_a_successful_install(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        bindir = os.path.join(base, "bin")
+        os.makedirs(bindir)
+        fake = os.path.join(bindir, "herdr")
+        with open(fake, "w", encoding="utf-8") as handle:
+            handle.write(
+                "#!/bin/sh\n"
+                "echo '{\"error\":{\"code\":\"server_not_running\"}}' >&2\n"
+                "exit 1\n"
+            )
+        os.chmod(fake, 0o755)
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertIn("next herdr start", completed.stderr)
+
+    def test_unknown_session_is_not_a_missing_server(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        bindir = os.path.join(base, "bin")
+        os.makedirs(bindir)
+        fake = os.path.join(bindir, "herdr")
+        with open(fake, "w", encoding="utf-8") as handle:
+            handle.write(
+                "#!/bin/sh\n"
+                "echo '{\"error\":{\"code\":\"server_not_running\"}}' >&2\n"
+                "exit 1\n"
+            )
+        os.chmod(fake, 0o755)
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env["HERDR_SESSION"] = "not-a-session"
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("not-a-session", completed.stderr)
+        self.assertIn("not a running herdr server", completed.stderr)
 
     def test_failed_reload_is_printed_and_uninstall_uses_the_session(self):
         base = tempfile.mkdtemp()

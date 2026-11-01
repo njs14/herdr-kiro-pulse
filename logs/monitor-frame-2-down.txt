@@ -1,0 +1,18 @@
+ WORKFLOW(S)                                                                                              ● MOUSE ON
+ │ ▶ write-probe - running │ 0/1 │ 2m 48s │ Tab agent monitor
+ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Steps                                 │ Output
+ ❯ └── ⚠ write  needs approval  low    │
+                                       │ WORKFLOW OUTPUT [write]
+                                       │     1+  note                                                               ▲
+                                       │  esc to cancel                                                             █
+                                       │ Write File requires approval
+                                       │ fs_write → note.txt
+                                       │
+                                       │   Allow once
+                                       │ ❯ Deny once
+                                       │   Create allow rule to approve future similar actions
+                                       │   Create deny rule to block future similar actions
+
+ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ctrl+x stop

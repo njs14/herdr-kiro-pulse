@@ -169,12 +169,19 @@ if os.path.isfile(legacy_log):
         pass
 PY
 reload_one() {
+  shift
   err=$(mktemp)
   if herdr "$@" 2>"$err"; then
     rm -f "$err"
     return 0
   fi
   if grep -q server_not_running "$err"; then
+    if [ "$1" = "--session" ]; then
+      echo "warning: HERDR_SESSION=${HERDR_SESSION:-} is not a running herdr server" >&2
+      cat "$err" >&2
+      rm -f "$err"
+      return 2
+    fi
     echo "note: no herdr server is running; reload happens on the next herdr start" >&2
     rm -f "$err"
     return 0
@@ -185,17 +192,10 @@ reload_one() {
   return 1
 }
 if command -v herdr >/dev/null 2>&1; then
-  failed=0
   if [ -n "${HERDR_SESSION:-}" ]; then
-    if ! reload_one --session "$HERDR_SESSION" server reload-agent-manifests; then
-      failed=1
-    fi
-  fi
-  if ! reload_one server reload-agent-manifests; then
-    failed=1
-  fi
-  if [ "$failed" -ne 0 ]; then
-    exit 1
+    reload_one session --session "$HERDR_SESSION" server reload-agent-manifests || exit $?
+  else
+    reload_one default server reload-agent-manifests || exit $?
   fi
 fi
 echo "Removed $DEST/herdr-kiro.json"

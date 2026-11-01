@@ -74,10 +74,13 @@ def install_owned(dest, payload):
             if existing != previous:
                 write_bytes(unique_backup(dest), existing)
     elif existing is not None and owned_hash == "" and existing != payload:
+        kept = unique_backup(dest)
+        write_bytes(kept, existing)
         sys.stderr.write(
-            "warning: upgrading %s from a marker with no hash; a hand edit would be replaced\n"
-            % dest
+            "warning: %s has no content hash and differs from this install; left in place as %s\n"
+            % (dest, kept)
         )
+        return
     elif existing is not None and owned_hash and digest(existing) != owned_hash:
         backup = unique_backup(dest)
         write_bytes(backup, existing)
@@ -88,7 +91,7 @@ def install_owned(dest, payload):
 
 
 hook = os.environ["HERDR_KIRO_HOOK"]
-events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]
 document = {
     "version": "v1",
     "hooks": [
@@ -111,12 +114,20 @@ if rules and os.path.isfile(rules):
         install_owned(sys.argv[2], handle.read())
 PY
 reload_one() {
+  # $1 is "session" or "default"
+  shift
   err=$(mktemp)
   if herdr "$@" 2>"$err"; then
     rm -f "$err"
     return 0
   fi
   if grep -q server_not_running "$err"; then
+    if [ "$1" = "--session" ]; then
+      echo "warning: HERDR_SESSION=${HERDR_SESSION:-} is not a running herdr server" >&2
+      cat "$err" >&2
+      rm -f "$err"
+      return 2
+    fi
     echo "note: no herdr server is running; reload happens on the next herdr start" >&2
     rm -f "$err"
     return 0
@@ -131,16 +142,12 @@ reload_manifests() {
     echo "herdr is not on PATH, skipped manifest reload" >&2
     return 0
   fi
-  failed=0
   if [ -n "${HERDR_SESSION:-}" ]; then
-    if ! reload_one --session "$HERDR_SESSION" server reload-agent-manifests; then
-      failed=1
-    fi
+    reload_one session --session "$HERDR_SESSION" server reload-agent-manifests
+    return $?
   fi
-  if ! reload_one server reload-agent-manifests; then
-    failed=1
-  fi
-  return "$failed"
+  reload_one default server reload-agent-manifests
+  return $?
 }
 if [ -f "$RULES" ]; then
   reload_manifests

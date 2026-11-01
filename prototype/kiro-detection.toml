@@ -115,12 +115,16 @@ line_regex = ['(?i)^\s*▶\s+\S+\s+running\b.*\bctrl\+x\b']
 id = "workflow_requires_approval"
 state = "blocked"
 priority = 1430
-region = "whole_recent"
+region = "bottom_non_empty_lines(24)"
 visible_blocker = true
-# File, shell, and other tool choosers. The title contains "requires approval"
-# and one choice line is "Allow once". This is not limited to fs_write.
+# Live workflow-monitor rows are prefixed with │. Both choice lines have to be
+# their own rows in the bottom of the screen, so a paragraph that mentions the
+# words, or a chooser sitting ~60 lines up the scrollback, does not match.
 contains = ["requires approval"]
-line_regex = ['(?i)^\s*(?:[>❯]\s*)?allow once\s*$']
+line_regex = [
+  '(?i)^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*$',
+  '(?i)^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*$',
+]
 
 [[rules]]
 id = "workflow_chooser_blocked"

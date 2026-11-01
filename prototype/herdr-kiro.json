@@ -45,6 +45,15 @@
         "type": "command",
         "command": "/workspace/prototype/herdr_kiro_state.py Stop"
       }
+    },
+    {
+      "name": "herdr-kiro-SessionEnd",
+      "trigger": "SessionEnd",
+      "timeout": 10,
+      "action": {
+        "type": "command",
+        "command": "/workspace/prototype/herdr_kiro_state.py SessionEnd"
+      }
     }
   ]
 }
