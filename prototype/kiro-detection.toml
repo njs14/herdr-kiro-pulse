@@ -18,7 +18,7 @@ line_regex = ['(?i)^\s*[>›]\s*ask a question or describe a task(?:\s+(?:enter|
 [[rules]]
 id = "tool_approval"
 state = "blocked"
-priority = 1050
+priority = 1410
 region = "bottom_non_empty_lines(8)"
 visible_blocker = true
 any = [
@@ -49,7 +49,7 @@ any = [
 [[rules]]
 id = "tool_approval_edit"
 state = "blocked"
-priority = 1045
+priority = 1400
 region = "whole_recent"
 visible_blocker = true
 regex = ['(?im)(?:^|\n)[ \t]*[-─]+[ \t]*\n[^\n]*requires\s+approval\s*[·.]\s*modify\s+request[ \t]*\n(?:[ \t]*\n|[^\n]*[^\s─-][^\n]*\n)*?[ \t]*[>›][ \t]*[^\n]*\n(?:[ \t]*\n|[^\n]*[^\s─-][^\n]*\n)*[ \t]*[-─]+[ \t]*\n[ \t]*esc[ \t]+to[ \t]+close[ \t]*\n?\z']
@@ -57,7 +57,7 @@ regex = ['(?im)(?:^|\n)[ \t]*[-─]+[ \t]*\n[^\n]*requires\s+approval\s*[·.]\s*
 [[rules]]
 id = "crew_approval"
 state = "blocked"
-priority = 1040
+priority = 1390
 region = "bottom_non_empty_lines(8)"
 visible_blocker = true
 contains = [
@@ -70,7 +70,7 @@ contains = [
 [[rules]]
 id = "question_panel"
 state = "blocked"
-priority = 1030
+priority = 1380
 region = "bottom_non_empty_lines(8)"
 visible_blocker = true
 contains = ["to navigate", "to submit", "esc to cancel"]
@@ -111,7 +111,31 @@ line_regex = ['(?i)^\s*▶\s+\S+\s+running\b.*ctrl\+x\b.*ctrl\+g\b']
 [[rules]]
 id = "workflow_chooser_blocked"
 state = "blocked"
-priority = 1300
+priority = 1420
 region = "bottom_non_empty_lines(12)"
 visible_blocker = true
 line_regex = ['(?i)^\s*esc\s+to\s+close\b.*\bto\s+navigate\b.*\bto\s+select\b']
+
+[[rules]]
+id = "workflow_approval_more_options"
+state = "blocked"
+priority = 1360
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+line_regex = ['(?i)^\s*esc\s+to\s+close\b.*\benter\s+to\s+see\s+more\s+options\b']
+
+[[rules]]
+id = "workflow_trust_all"
+state = "blocked"
+priority = 1370
+region = "bottom_non_empty_lines(16)"
+visible_blocker = true
+line_regex = ['(?i)^\s*esc\s+to\s+cancel\b.*\bto\s+navigate\b.*\bto\s+select\b']
+
+[[rules]]
+id = "workflow_question_esc_cancel"
+state = "blocked"
+priority = 1385
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+contains = ["esc to cancel", "to navigate", "to submit"]

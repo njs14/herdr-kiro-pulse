@@ -2,16 +2,16 @@
 # Remove the herdr Kiro hook, stop its watchers, and delete its state files.
 set -eu
 DEST="${KIRO_HOOKS_DIR:-$HOME/.kiro/hooks}"
-rm -f "$DEST/herdr-kiro.json"
 export HERDR_KIRO_HOME="$HOME"
 export HERDR_KIRO_HOOK_DIR="$DEST"
 python3 - << 'PY'
+import datetime
 import glob
 import os
-import shutil
 import signal
 import subprocess
 
+MARKER = ".herdr-kiro-owned"
 home = os.environ.get("HERDR_KIRO_HOME") or os.path.expanduser("~")
 hook_dir = os.environ.get("HERDR_KIRO_HOOK_DIR") or os.path.join(home, ".kiro", "hooks")
 legacy = os.environ.get("HERDR_KIRO_LEGACY_DIR") or "/tmp"
@@ -27,19 +27,35 @@ config = os.path.join(
 uid = os.getuid()
 
 
-def restore_newest_backup(directory, name):
-    pattern = os.path.join(directory, name + ".bak.*")
-    backups = sorted(glob.glob(pattern))
-    if not backups:
-        return
-    newest = backups[-1]
-    target = os.path.join(directory, name)
-    shutil.copy(newest, target)
-    for path in backups:
+def start_token(text):
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return ""
+    try:
+        parsed = datetime.datetime.strptime(cleaned, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return cleaned
+    return str(int(parsed.timestamp()))
+
+
+def remove_ours(dest):
+    marker = dest + MARKER
+    original = dest + ".original"
+    owned = os.path.isfile(marker)
+    if not owned and os.path.isfile(dest):
         try:
-            os.remove(path)
+            body = open(dest, encoding="utf-8").read()
         except OSError:
-            pass
+            body = ""
+        owned = "workflow_banner_working" in body or "herdr-kiro-SessionStart" in body
+    if not owned:
+        return
+    if os.path.isfile(dest):
+        os.remove(dest)
+    if os.path.isfile(marker):
+        os.remove(marker)
+    if os.path.isfile(original):
+        os.replace(original, dest)
 
 
 def process_start(pid):
@@ -56,7 +72,7 @@ def process_start(pid):
         return ""
     if completed.returncode != 0:
         return ""
-    return (completed.stdout or "").strip()
+    return start_token(completed.stdout or "")
 
 
 def stop_tracked_watchers(directory):
@@ -72,12 +88,12 @@ def stop_tracked_watchers(directory):
         except OSError:
             continue
         recorded_uid = lines[0].strip() if lines else ""
-        recorded_start = lines[1].strip() if len(lines) > 1 else ""
+        recorded_start = start_token(lines[1]) if len(lines) > 1 else ""
         if recorded_uid != str(uid):
             continue
         pid = int(name)
         current = process_start(pid)
-        if recorded_start and current and current != recorded_start:
+        if recorded_start and current and recorded_start != current:
             continue
         if current:
             try:
@@ -90,7 +106,8 @@ def stop_tracked_watchers(directory):
             pass
 
 
-restore_newest_backup(hook_dir, "herdr-kiro.json")
+remove_ours(os.path.join(hook_dir, "herdr-kiro.json"))
+remove_ours(os.path.join(config, "kiro.toml"))
 stop_tracked_watchers(state)
 if os.path.isdir(state):
     for name in os.listdir(state):
@@ -114,18 +131,6 @@ if os.path.isfile(legacy_log):
         os.remove(legacy_log)
     except OSError:
         pass
-override = os.path.join(config, "kiro.toml")
-if os.path.isfile(override):
-    try:
-        text = open(override, encoding="utf-8").read()
-    except OSError:
-        text = ""
-    if "workflow_banner_working" in text:
-        try:
-            os.remove(override)
-        except OSError:
-            pass
-        restore_newest_backup(config, "kiro.toml")
 PY
 if command -v herdr >/dev/null 2>&1; then
   herdr server reload-agent-manifests >/dev/null 2>&1 || true

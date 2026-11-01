@@ -1,10 +1,10 @@
-1793525686.632 pid=177543 state event=UserPromptSubmit busy=1 grace_until=0.000
-1793525688.571 pid=177657 state event=PreToolUse busy=1 grace_until=0.000
-1793525688.727 pid=177696 state event=PostToolUse busy=1 grace_until=0.000
-1793525691.902 pid=177943 event=Stop session=sess_7d379ae7-8285-4c29-ba31-23e8612881dc pane=w1:p1 chain=177942:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:server
-1793525691.913 pid=177943 state event=Stop busy=0 grace_until=1793525694.845
-1793525698.824 pid=178275 state event=UserPromptSubmit busy=1 grace_until=0.000
-1793525700.524 pid=178386 state event=PreToolUse busy=1 grace_until=0.000
-1793525700.668 pid=178422 state event=PostToolUse busy=1 grace_until=0.000
-1793525702.702 pid=178553 event=Stop session=sess_7d379ae7-8285-4c29-ba31-23e8612881dc pane=w1:p1 chain=178552:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:server
-1793525702.713 pid=178553 state event=Stop busy=0 grace_until=1793525705.647
+1793526829.647 pid=205163 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793526831.825 pid=205365 state event=PreToolUse busy=1 grace_until=0.000
+1793526832.142 pid=205448 state event=PostToolUse busy=1 grace_until=0.000
+1793526834.706 pid=205805 event=Stop session=sess_7d379ae7-8285-4c29-ba31-23e8612881dc pane=w1:p1 chain=205801:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
+1793526834.727 pid=205805 state event=Stop busy=0 grace_until=1793526837.573
+1793526842.262 pid=206215 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793526844.269 pid=206382 state event=PreToolUse busy=1 grace_until=0.000
+1793526844.542 pid=206461 state event=PostToolUse busy=1 grace_until=0.000
+1793526846.756 pid=206653 event=Stop session=sess_7d379ae7-8285-4c29-ba31-23e8612881dc pane=w1:p1 chain=206652:sh 148949:node 148895:bun 148755:kiro-cli-chat 148743:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
+1793526846.780 pid=206653 state event=Stop busy=0 grace_until=1793526849.614

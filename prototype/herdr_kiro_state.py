@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import datetime
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -101,6 +103,7 @@ def fresh_state() -> dict:
         "grace_started": 0.0,
         "owners": {},
         "owner_started": {},
+        "aggregate": 0,
     }
 
 
@@ -145,6 +148,12 @@ def normalize(state: dict, now: float) -> dict:
         grace_started = float(state.get("grace_started") or 0)
     except (TypeError, ValueError):
         grace_started = 0.0
+    try:
+        aggregate = int(state.get("aggregate") or 0)
+    except (TypeError, ValueError):
+        aggregate = 0
+    if AGGREGATE not in kept:
+        aggregate = 0
     return {
         "busy": kept,
         "seq": seq,
@@ -156,6 +165,7 @@ def normalize(state: dict, now: float) -> dict:
         "grace_started": grace_started,
         "owners": kept_owners,
         "owner_started": kept_started,
+        "aggregate": aggregate,
     }
 
 
@@ -172,32 +182,40 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
         state["owner_started"][key] = started
 
 
-def end_aggregate(state: dict, now: float) -> dict:
-    """Drop the no-id slot. Banner clear and a dead Kiro process both end here."""
-    nxt = normalize(state, now)
-    removed = False
-    for key in list(nxt["busy"]):
-        if key == AGGREGATE or str(key).startswith(AGGREGATE + "#"):
-            nxt["busy"].pop(key, None)
-            nxt["owners"].pop(key, None)
-            nxt["owner_started"].pop(key, None)
-            removed = True
-    if removed and not nxt["busy"]:
-        nxt["grace_until"] = now + SETTLE_SECS
-        nxt["grace_started"] = now
-    return nxt
+def finish_if_idle(state: dict, now: float) -> None:
+    if state["busy"]:
+        return
+    state["grace_until"] = now + SETTLE_SECS
+    state["grace_started"] = now
 
 
 def apply_event(state: dict, event: str, session: str, now: float, owner: int = 0, owner_started: str = "") -> dict:
     """Fold one hook event into pane state. Pure aside from the clock passed in."""
     nxt = normalize(state, now)
     if session == AGGREGATE:
-        if event in BUSY_EVENTS:
+        count = int(nxt.get("aggregate") or 0)
+        if event == "SessionStart":
+            count += 1
+            nxt["aggregate"] = count
+            nxt["busy"][AGGREGATE] = now
+            remember_owner(nxt, AGGREGATE, owner, owner_started)
+            nxt["grace_until"] = 0.0
+        elif event in BUSY_EVENTS:
             nxt["busy"][AGGREGATE] = now
             remember_owner(nxt, AGGREGATE, owner, owner_started)
             nxt["grace_until"] = 0.0
         elif event == "Stop":
-            nxt = end_aggregate(nxt, now)
+            if count > 0:
+                count -= 1
+            nxt["aggregate"] = count
+            if count == 0:
+                nxt["busy"].pop(AGGREGATE, None)
+                nxt["owners"].pop(AGGREGATE, None)
+                nxt["owner_started"].pop(AGGREGATE, None)
+                finish_if_idle(nxt, now)
+            else:
+                nxt["busy"][AGGREGATE] = now
+                nxt["grace_until"] = 0.0
         return nxt
     if event in BUSY_EVENTS:
         if event == "SessionStart" and session in nxt["busy"]:
@@ -382,27 +400,22 @@ def pane_text(pane: str) -> str:
         return ""
 
 
+BANNER_LINE = re.compile(r"(?i)^\s*▶\s+\S+\s+running\b.*ctrl\+x\b.*ctrl\+g\b")
+
+
 def workflow_banner_from(text: str) -> bool:
-    for line in text.splitlines():
-        lowered = line.lower()
-        if "running" not in lowered:
-            continue
-        if "▶" in line or "ctrl+g" in lowered:
-            return True
-    return False
+    """The Kiro status line, not a mention of a running step in model text."""
+    return any(BANNER_LINE.search(line) for line in text.splitlines())
 
 
 def workflow_banner(pane: str) -> bool:
     return workflow_banner_from(pane_text(pane))
 
 
-def process_snapshot(pid: int) -> dict:
-    """Return ppid, lstart, and comm. None if the pid is gone. error if ps fails."""
-    if pid <= 0:
-        return None
+def ps_column(pid: int, column: str):
     try:
         completed = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "ppid=", "-o", "lstart=", "-o", "comm="],
+            ["ps", "-p", str(pid), "-o", column + "="],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -411,17 +424,50 @@ def process_snapshot(pid: int) -> dict:
         )
     except (OSError, subprocess.SubprocessError):
         return {"error": True}
-    text = (completed.stdout or "").strip()
-    if completed.returncode != 0 or not text:
+    if completed.returncode != 0:
         return None
-    parts = text.split()
-    if len(parts) < 3:
+    return (completed.stdout or "").strip()
+
+
+def comm_basename(text: str) -> str:
+    """macOS ps prints the full path. A path with spaces must stay one field."""
+    return os.path.basename((text or "").strip())
+
+
+def start_token(text: str) -> str:
+    """Epoch seconds for a ps lstart value. Day 1-9 may be padded with a space."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return ""
+    try:
+        parsed = datetime.datetime.strptime(cleaned, "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return cleaned
+    return str(int(parsed.timestamp()))
+
+
+def process_snapshot(pid: int) -> dict:
+    """Return ppid, lstart, and comm basename. None if the pid is gone."""
+    if pid <= 0:
+        return None
+    ppid_text = ps_column(pid, "ppid")
+    if isinstance(ppid_text, dict):
+        return ppid_text
+    if ppid_text is None:
+        return None
+    lstart = ps_column(pid, "lstart")
+    comm = ps_column(pid, "comm")
+    if isinstance(lstart, dict) or isinstance(comm, dict):
         return {"error": True}
     try:
-        ppid = int(parts[0])
+        ppid = int(str(ppid_text).strip())
     except ValueError:
         return {"error": True}
-    return {"ppid": ppid, "lstart": " ".join(parts[1:-1]), "comm": parts[-1]}
+    return {
+        "ppid": ppid,
+        "lstart": start_token(lstart or ""),
+        "comm": comm_basename(comm or ""),
+    }
 
 
 def owner_is_dead(owner, started: str) -> bool:
@@ -578,7 +624,6 @@ def watch_loop(pane: str, path: str) -> None:
     log(f"watcher loop pane={pane}")
     reported = None
     misses = 0
-    saw_banner = False
     while True:
         time.sleep(TICK_SECS)
         state = update(path, lambda _state: None)
@@ -586,14 +631,6 @@ def watch_loop(pane: str, path: str) -> None:
         if approval_text(screen):
             continue
         banner = workflow_banner_from(screen)
-        if saw_banner and not banner:
-            def clear_aggregate(current: dict) -> None:
-                revised = end_aggregate(current, time.time())
-                current.clear()
-                current.update(revised)
-
-            state = update(path, clear_aggregate)
-        saw_banner = banner or saw_banner
         if banner:
             def extend(current: dict) -> None:
                 revised = note_banner(current, True, time.time())

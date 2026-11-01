@@ -63,6 +63,41 @@ class DetectionTests(unittest.TestCase):
         )
         self.assertEqual(state, "idle")
 
+    def test_model_status_line_is_not_the_banner(self):
+        state, rule = self.explain(
+            "Status: ▶ deploy running\n"
+            "› ask a question or describe a task\n"
+        )
+        self.assertEqual(state, "idle")
+        self.assertNotEqual(rule, "workflow_banner_working")
+
+    def test_question_panel_beats_the_banner(self):
+        state, _rule = self.explain(
+            "▶ two-step running 1/2 · ctrl+x expand · ctrl+g monitor\n"
+            "Pick one\n"
+            "esc to cancel · ↑↓ to navigate · enter to submit\n"
+        )
+        self.assertEqual(state, "blocked")
+
+    def test_trust_all_beats_the_banner(self):
+        state, rule = self.explain(
+            "▶ solo running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "❯ No, exit\n"
+            "  Yes, I accept\n"
+            "esc to cancel · ↑↓ to navigate · ↵ to select\n"
+        )
+        self.assertEqual(state, "blocked")
+        self.assertEqual(rule, "workflow_trust_all")
+
+    def test_more_options_footer_beats_the_banner(self):
+        state, rule = self.explain(
+            "▶ two-step running 1/2 · ctrl+x expand · ctrl+g monitor\n"
+            "❯ Allow\n"
+            "esc to close · enter to see more options\n"
+        )
+        self.assertEqual(state, "blocked")
+        self.assertEqual(rule, "workflow_approval_more_options")
+
     def test_repaint_gap_stays_working_while_the_banner_is_up(self):
         # The idle prompt is on the bottom lines. The banner is still on screen.
         state, rule = self.explain(

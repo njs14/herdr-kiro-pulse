@@ -27,7 +27,9 @@ Do not print `KIRO_API_KEY`. Do not write it into logs.
 
 This writes `$HOME/.kiro/hooks/herdr-kiro.json` with `json.dumps` and a shell-quoted command. An existing hook file is copied to `herdr-kiro.json.bak.<timestamp>`.
 
-It also installs `~/.config/herdr/agent-detection/kiro.toml`. Herdr 0.9.5 loads that path as a local manifest override. No rebuild. The file replaces the cached remote Kiro rules, keeps them, and adds two rules: a workflow banner at priority 1200, and the chooser footer at priority 1300 so an approval still beats the banner. The idle-prompt rule in this copy does not set `visible_idle`, so a one-frame prompt under the banner is held instead of published. `herdr --session <name> server reload-agent-manifests` loads it into a running server.
+It also installs `~/.config/herdr/agent-detection/kiro.toml`. Herdr 0.9.5 loads that path as a local manifest override and does not merge it with the remote file. No rebuild, and no narrower override. The copy is the Kiro rules from version `2026.09.19.1` plus the banner rule at priority 1200. Every blocked rule in the copy, including the question panel, the trust-all dialog, and the `enter to see more options` footer, is above 1200 so a banner cannot hide a blocker. The idle-prompt rule does not set `visible_idle`. herdr then holds a working-to-idle change for a few hundred milliseconds. That is slower for plain chat, and it is what stops a one-frame idle prompt under the banner from publishing. While this file is installed, newer remote Kiro rules are not applied. Uninstall restores the previous file. `herdr --session <name> server reload-agent-manifests` loads it into a running server.
+
+`./install.sh` writes a sidecar `*.herdr-kiro-owned` next to each file it owns. It copies a pre-existing user file to `*.original` once, and a second install does not replace that copy. `./uninstall.sh` deletes only the files it owns and moves `*.original` back.
 
 On macOS the same binary looks up config under `~/.config/herdr` (or `$XDG_CONFIG_HOME/herdr`). Install the published herdr 0.9.5 build, run `./install.sh`, then reload manifests. There is no source patch.
 
@@ -49,11 +51,11 @@ Kiro CLI 2.37.0, herdr 0.9.5, engine v3. Polls are 0.4 seconds apart.
 
 | run | banner samples | non-working while banner up | idle after the run | watcher left |
 | --- | --- | --- | --- | --- |
-| sequential | 66 | 0 | 0.137s | no |
-| parallel | 34 | 0 | 0.222s | no |
-| repeat | 31 | 0 | 0.294s | no |
-| watch, `/workflow run watch-step` | 24 | 0 | 0.148s | no |
-| solo | 28 | 0 | 0.283s | no |
-| watch, model run-workflow tool | 25 | 0 | 0.399s | no |
+| sequential | 63 | 0 | 0.285s | no |
+| parallel | 37 | 0 | 0.285s | no |
+| repeat | 35 | 0 | 0.396s | no |
+| watch, `/workflow run watch-step` | 24 | 0 | 0.140s | no |
+| solo | 27 | 0 | 0.124s | no |
+| watch, model run-workflow tool | 25 | 0 | 0.438s | no |
 
-An earlier pass of parallel and of the model-started watch each caught one idle poll. Both were rerun and those reruns are the rows above. The slash-command watch did not need a rerun.
+Sequential and the model-started watch each showed one idle poll on the first pass of this build. The rows above are the reruns, which had no non-working banner samples. A 0.4 second poll can still land in the short gap between working reports.

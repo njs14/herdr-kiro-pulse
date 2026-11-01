@@ -52,11 +52,70 @@ class InstallTests(unittest.TestCase):
         ):
             parts = shlex.split(command)
             self.assertEqual(parts, [hook_path, event])
-        backups = [name for name in os.listdir(existing) if name.startswith("herdr-kiro.json.bak")]
-        self.assertEqual(len(backups), 1)
-        with open(os.path.join(existing, backups[0]), encoding="utf-8") as handle:
-            saved = handle.read()
-        self.assertIn('"hooks":[]', saved.replace(" ", ""))
+        with open(previous + ".original", "rb") as handle:
+            self.assertEqual(handle.read(), b'{"version":"v1","hooks":[]}\n')
+
+    def _home_env(self, home):
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
+        env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
+        env.pop("KIRO_HOOKS_DIR", None)
+        env.pop("HERDR_SESSION", None)
+        return env
+
+    def _files(self, home):
+        found = {}
+        for dirpath, _dirs, names in os.walk(home):
+            for name in names:
+                path = os.path.join(dirpath, name)
+                with open(path, "rb") as handle:
+                    found[os.path.relpath(path, home)] = handle.read()
+        return found
+
+    def _round_trip(self, seed):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        for relative, payload in seed.items():
+            path = os.path.join(home, relative)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(payload)
+        before = self._files(home)
+        env = self._home_env(home)
+        for _ in range(2):
+            completed = subprocess.run(
+                ["sh", os.path.join(ROOT, "install.sh")],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertEqual(self._files(home), before)
+
+    def test_install_twice_then_uninstall_on_a_fresh_home(self):
+        self._round_trip({})
+
+    def test_install_twice_then_uninstall_restores_user_originals(self):
+        self._round_trip(
+            {
+                os.path.join(".kiro", "hooks", "herdr-kiro.json"): b'{"user":"hook"}\n',
+                os.path.join(".config", "herdr", "agent-detection", "kiro.toml"): b'id = "kiro"\n# user rules\n',
+            }
+        )
 
     def test_uninstall_removes_hook_kills_watcher_and_cleans_state(self):
         base = tempfile.mkdtemp()
@@ -83,12 +142,6 @@ class InstallTests(unittest.TestCase):
         seq_file = os.path.join(state, "w1_p1.json.seq")
         with open(seq_file, "w", encoding="utf-8") as handle:
             handle.write("3000000\n")
-        newest = os.path.join(hooks, "herdr-kiro.json.bak.20260102000000")
-        older = os.path.join(hooks, "herdr-kiro.json.bak.20200101000000")
-        with open(newest, "w", encoding="utf-8") as handle:
-            handle.write('{"restored":true}\n')
-        with open(older, "w", encoding="utf-8") as handle:
-            handle.write('{"old":true}\n')
         script = os.path.join(base, "herdr_kiro_state.py")
         with open(script, "w", encoding="utf-8") as handle:
             handle.write("import time\ntime.sleep(60)\n")
@@ -98,11 +151,12 @@ class InstallTests(unittest.TestCase):
         self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
         started = subprocess.check_output(
             ["ps", "-p", str(watcher.pid), "-o", "lstart="], text=True
-        ).strip()
+        )
+        collapsed = " ".join(started.split())
         pid_dir = os.path.join(state, "pids")
         os.makedirs(pid_dir)
         with open(os.path.join(pid_dir, str(watcher.pid)), "w", encoding="utf-8") as handle:
-            handle.write("%s\n%s\n" % (os.getuid(), started))
+            handle.write("%s\n%s\n" % (os.getuid(), collapsed))
         env = dict(os.environ)
         env["HOME"] = home
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
@@ -120,9 +174,7 @@ class InstallTests(unittest.TestCase):
         with open(os.path.join(ROOT, "uninstall.sh"), encoding="utf-8") as handle:
             self.assertNotIn("/proc", handle.read())
         with open(hook_file, encoding="utf-8") as handle:
-            self.assertIn("restored", handle.read())
-        self.assertFalse(os.path.exists(newest))
-        self.assertFalse(os.path.exists(older))
+            self.assertEqual(handle.read(), "{}\n")
         self.assertFalse(os.path.exists(state_file))
         self.assertTrue(os.path.exists(seq_file))
         self.assertFalse(os.path.exists(legacy))

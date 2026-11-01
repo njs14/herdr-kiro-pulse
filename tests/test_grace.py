@@ -158,19 +158,55 @@ class GraceTests(unittest.TestCase):
         for moment in range(10):
             state = hook.apply_event(state, "SessionStart", key, moment)
             state = hook.apply_event(state, "PreToolUse", key, moment + 0.1)
+        self.assertEqual(state["aggregate"], 10)
         self.assertEqual(len(state["busy"]), 1)
         state = hook.apply_event(state, "Stop", key, 20)
+        self.assertEqual(state["aggregate"], 9)
+        self.assertIn(hook.AGGREGATE, state["busy"])
+        for moment in range(9):
+            state = hook.apply_event(state, "Stop", key, 21 + moment)
+        self.assertEqual(state["aggregate"], 0)
         self.assertEqual(state["busy"], {})
-        self.assertEqual(state["grace_until"], 20 + hook.SETTLE_SECS)
+        self.assertEqual(state["grace_until"], 29 + hook.SETTLE_SECS)
 
-    def test_banner_clear_ends_a_stripped_session_without_stop(self):
-        state = hook.apply_event(hook.fresh_state(), "SessionStart", hook.AGGREGATE, 1)
-        state = hook.end_aggregate(state, 5)
-        self.assertEqual(state["busy"], {})
-        self.assertEqual(state["grace_until"], 5 + hook.SETTLE_SECS)
+    def test_stripped_parallel_stays_busy_until_both_stop(self):
+        state = hook.fresh_state()
+        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 1)
+        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 1.1)
+        state = hook.apply_event(state, "PreToolUse", hook.AGGREGATE, 1.2)
+        self.assertEqual(state["aggregate"], 2)
+        self.assertEqual(len(state["busy"]), 1)
+        state = hook.apply_event(state, "Stop", hook.AGGREGATE, 3)
+        self.assertEqual(state["aggregate"], 1)
+        self.assertIn(hook.AGGREGATE, state["busy"])
         self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], False, 5 + hook.SETTLE_SECS + 0.1),
-            "idle",
+            hook.next_action(len(state["busy"]), state["grace_until"], False, 3.2),
+            "working",
+        )
+        state = hook.apply_event(state, "Stop", hook.AGGREGATE, 4)
+        self.assertEqual(state["aggregate"], 0)
+        self.assertEqual(state["busy"], {})
+        self.assertEqual(state["grace_until"], 4 + hook.SETTLE_SECS)
+
+    def test_banner_line_ignores_model_text(self):
+        self.assertTrue(
+            hook.workflow_banner_from(
+                "▶ watch-step running 0/0 · ctrl+x expand · ctrl+g monitor\n"
+            )
+        )
+        self.assertFalse(hook.workflow_banner_from("Status: ▶ deploy running\n"))
+        self.assertFalse(hook.workflow_banner_from("▶ name running without the hints\n"))
+
+    def test_day_of_month_lstart_matches(self):
+        padded = "Sun Nov  1 01:02:03 2026"
+        plain = "Sun Nov 1 01:02:03 2026"
+        self.assertEqual(hook.start_token(padded), hook.start_token(plain))
+        self.assertTrue(hook.start_token(padded).isdigit())
+
+    def test_comm_basename_keeps_a_path_with_spaces(self):
+        self.assertEqual(
+            hook.comm_basename("/Users/Jane Doe/Applications/kiro-cli"),
+            "kiro-cli",
         )
 
     def test_transcript_path_distinguishes_stripped_payloads(self):
