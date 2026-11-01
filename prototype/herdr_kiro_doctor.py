@@ -185,33 +185,6 @@ def dead_pidfiles(directory):
     return found
 
 
-def clear_pending_unlink():
-    path = lifecycle_path()
-    try:
-        lines = open(path, encoding="utf-8").read().splitlines()
-    except OSError:
-        return
-    kept = [line for line in lines if not line.startswith("pending_unlink=")]
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(kept) + ("\n" if kept else ""))
-
-
-def finish_pending_unlink(pending, state_name):
-    """Try the unlink that could not run while herdr had no server."""
-    registered = plugin_registered()
-    if not pending and not (state_name == "uninstalled" and registered):
-        return registered, False
-    if registered is True:
-        run([herdr_bin(), "plugin", "unlink", "herdr-kiro"], 5)
-        registered = plugin_registered()
-    if registered is False:
-        clear_pending_unlink()
-        return False, False
-    if registered is True:
-        return True, True
-    return None, False
-
-
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--warn-upstream":
         return warn_upstream()
@@ -266,14 +239,11 @@ def main() -> int:
     if state_name == "uninstalled" and owned_paths:
         problems.append("lifecycle is uninstalled but our files remain: %s" % ", ".join(owned_paths))
     registered = plugin_registered() if herdr_code == 0 else None
-    still_registered, unlink_failed = finish_pending_unlink(pending, state_name)
-    if unlink_failed:
+    if pending or (state_name == "uninstalled" and registered is True):
         problems.append(
-            "herdr-kiro is still registered. Unlink could not finish while no server was running. "
-            "doctor retries it. herdr plugin unlink herdr-kiro removes the registration, not your files."
+            "herdr-kiro is still registered. startup.sh finishes that unlink when a server is up. "
+            "doctor does not change the registration or the files."
         )
-    elif still_registered is False and (pending or state_name == "uninstalled"):
-        registered = False
     if state_name == "installed" and via == "plugin" and registered is False and owned_paths:
         problems.append(
             "herdr plugin unlink does not delete files. Our files are still present: %s. Run ./uninstall.sh"

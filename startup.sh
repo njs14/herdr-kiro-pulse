@@ -47,6 +47,7 @@ if [ -f "$MARK" ] && grep -q '^pending_unlink=' "$MARK" && command -v "$HERDR" >
   if ! "$HERDR" plugin list 2>/dev/null | grep -q herdr-kiro; then
     grep -v '^pending_unlink=' "$MARK" > "$MARK.next" || true
     mv "$MARK.next" "$MARK"
+    chmod 600 "$MARK" || true
   fi
 fi
 if [ -f "$MARK" ] && [ "$(head -n 1 "$MARK")" = "installed" ]; then

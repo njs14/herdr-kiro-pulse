@@ -119,8 +119,8 @@ region = "bottom_non_empty_lines(24)"
 visible_blocker = true
 contains = ["requires approval"]
 line_regex = [
-  '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌]*\s*$|^.*[└├].*│\s*(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌]*\s*$)',
-  '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌]*\s*$|^.*│\s*(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌]*\s*$)',
+  '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌│┃║]*\s*$|^.*[└├].*│\s*(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌│┃║]*\s*$)',
+  '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌│┃║]*\s*$|^.*│\s*(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌│┃║]*\s*$)',
 ]
 
 [[rules]]
@@ -143,12 +143,9 @@ line_regex = ['(?i)^\s*esc\s+to\s+close\b.*\benter\s+to\s+see\s+more\s+options\b
 id = "workspace_trust"
 state = "blocked"
 priority = 1440
-region = "bottom_non_empty_lines(16)"
+region = "bottom_non_empty_lines(40)"
 visible_blocker = true
-line_regex = [
-  '(?i)^[\s│┃║]*?(?:[>❯]\s*)?trust,\s*continue\s*$',
-  "(?i)^[\\s│┃║]*?(?:[>❯]\\s*)?don't trust,\\s*exit\\s*$",
-]
+regex = ['''(?is)trust this workspace\?.*?\n[ \t]*[>❯][ \t]*trust, continue[ \t]*\n[ \t]*don't trust, exit[ \t]*\n(?:[^\n]*\n){0,4}?[ \t]*esc to exit[^\n]*to navigate[^\n]*to select[^\n]*(?:\n[ \t]*){0,2}(?:\n[ \t]*revoke later[^\n]*)?\s*\z''']
 
 [[rules]]
 id = "workflow_trust_all"

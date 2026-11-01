@@ -957,17 +957,19 @@ class GraceTests(unittest.TestCase):
     def test_sweep_honors_tmpdir_and_removes_old_rule_dirs(self):
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
-        old = os.path.join(base, "herdr-kiro-rules-legacy")
-        os.makedirs(old)
-        old_stamp = time.time() - 120
-        os.utime(old, (old_stamp, old_stamp))
-        numbered = os.path.join(base, "herdr-kiro-424242")
-        os.makedirs(numbered)
-        dead = os.path.join(base, "herdr-kiro-rules-999999-left")
-        os.makedirs(dead)
-        random_old = os.path.join(base, "herdr-kiro-rules-0ekm2u31")
-        os.makedirs(random_old)
-        os.utime(random_old, (old_stamp, old_stamp))
+        notes = os.path.join(base, "herdr-kiro-notes")
+        os.makedirs(notes)
+        kept = os.path.join(notes, "note.txt")
+        with open(kept, "w", encoding="utf-8") as handle:
+            handle.write("user")
+        old_stamp = time.time() - 180
+        os.utime(notes, (old_stamp, old_stamp))
+        similar = os.path.join(base, "herdr-kiro-rules-999999-left")
+        os.makedirs(similar)
+        owned = os.path.join(base, "herdr-kiro-rules-999999-ours")
+        os.makedirs(owned)
+        with open(os.path.join(owned, "herdr-kiro-owned"), "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
         previous = tempfile.tempdir
         tempfile.tempdir = None
         try:
@@ -975,10 +977,31 @@ class GraceTests(unittest.TestCase):
                 hook.sweep_stale_rules()
         finally:
             tempfile.tempdir = previous
-        self.assertFalse(os.path.isdir(old))
-        self.assertFalse(os.path.isdir(dead))
-        self.assertFalse(os.path.isdir(numbered))
-        self.assertFalse(os.path.isdir(random_old))
+        self.assertTrue(os.path.isfile(kept))
+        self.assertTrue(os.path.isdir(similar))
+        self.assertFalse(os.path.isdir(owned))
+
+    def test_sweep_keeps_a_dir_when_the_pid_check_is_eperm(self):
+        import errno
+
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        owned = os.path.join(base, "herdr-kiro-rules-999999-ours")
+        os.makedirs(owned)
+        with open(os.path.join(owned, "herdr-kiro-owned"), "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
+
+        def kill(_pid, _sig):
+            raise OSError(errno.EPERM, "not permitted")
+
+        previous = tempfile.tempdir
+        tempfile.tempdir = None
+        try:
+            with mock.patch.dict(os.environ, {"TMPDIR": base}), mock.patch.object(hook.os, "kill", kill):
+                hook.sweep_stale_rules()
+        finally:
+            tempfile.tempdir = previous
+        self.assertTrue(os.path.isdir(owned))
 
     def test_session_end_clears_the_slot_like_stop(self):
         state = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "sess", 1.0)
@@ -997,6 +1020,8 @@ class GraceTests(unittest.TestCase):
             self.skipTest("pid %s is alive" % dead)
         stale = "/tmp/herdr-kiro-rules-%s-leftover" % dead
         os.makedirs(stale, exist_ok=True)
+        with open(os.path.join(stale, "herdr-kiro-owned"), "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
         previous_env = hook._EXPLAIN_ENV
         previous_dir = hook._RULES_DIR
         hook._EXPLAIN_ENV = None

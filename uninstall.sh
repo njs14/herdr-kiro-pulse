@@ -218,7 +218,7 @@ if command -v "$HERDR" >/dev/null 2>&1; then
   fi
 fi
 LIFE="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-kiro/lifecycle"
-if [ "$pending" = 1 ] && [ -f "$LIFE" ]; then
+if [ "$pending" = 1 ] && [ -f "$LIFE" ] && ! grep -qx 'pending_unlink=herdr-kiro' "$LIFE"; then
   printf 'pending_unlink=herdr-kiro\n' >> "$LIFE"
 fi
 if command -v "$HERDR" >/dev/null 2>&1; then

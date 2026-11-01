@@ -82,14 +82,19 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "blocked")
 
     def test_workspace_trust_dialog_is_blocked(self):
-        state, rule = self.explain(
-            "Trust this workspace?\n"
-            "This folder can contain hooks, agents, MCP servers and workflows that run commands on your machine.\n"
-            "❯ Trust, continue\n"
-            "  Don't trust, exit\n"
-            "esc to exit · ↑↓ to navigate · ↵ to select\n"
-        )
+        capture = os.path.join(ROOT, "logs", "workspace-trust.txt")
+        with open(capture, encoding="utf-8") as handle:
+            text = handle.read()
+        state, rule = self.explain(text)
         self.assertEqual((state, rule), ("blocked", "workspace_trust"))
+
+    def test_chooser_right_border_stays_blocked(self):
+        state, rule = self.explain(
+            "│ Write File requires approval\n"
+            "│ ❯ Allow once  │\n"
+            "│   Deny once  │\n"
+        )
+        self.assertEqual((state, rule), ("blocked", "workflow_requires_approval"))
 
     def test_chooser_scrollbar_glyph_stays_blocked(self):
         state, rule = self.explain(

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0
+
+The temp sweep only removes a `herdr-kiro-rules-<pid>-<token>` directory that contains this uid's owner marker. A user directory such as `herdr-kiro-notes` is left alone. The workspace-trust rule matches the captured dialog, not two quoted option lines under a workflow banner. A watcher whose owner has exited leaves even when another pid holds the slot.
+
 ## 0.10.0
 
 Uninstall no longer treats herdr's plugin lock or a restored user file as ours. A unlink that cannot run until herdr has a server is finished by startup or doctor. The watcher leaves only when the recorded kiro-cli or kiro-cli-chat process has exited. The workspace-trust rule matches the two option rows, not a quotation of them.

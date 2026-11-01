@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -504,30 +504,49 @@ def temp_roots():
     return roots
 
 
+_OWNED_RULES = re.compile(r"^herdr-kiro-rules-(\d+)-")
+
+
+def _rules_dir_ours(path: str):
+    """Pid from a rules dir this uid created, or None when we must not touch it."""
+    name = os.path.basename(path)
+    matched = _OWNED_RULES.match(name)
+    if not matched or not os.path.isdir(path):
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    if info.st_uid != os.getuid():
+        return None
+    marker = os.path.join(path, "herdr-kiro-owned")
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    if ("uid %s" % os.getuid()) not in lines:
+        return None
+    return int(matched.group(1))
+
+
 def sweep_stale_rules() -> None:
-    """Remove rule dirs left behind, including ones from older builds."""
+    """Remove rules dirs this package created after their process is gone.
+
+    A directory is removed only when its name is herdr-kiro-rules-<pid>-<token>,
+    it contains a herdr-kiro-owned marker for this uid, and the directory is
+    owned by this uid. EPERM on the pid means the process is alive or foreign.
+    """
     for root in temp_roots():
-        paths = glob.glob(os.path.join(root, "herdr-kiro-rules*"))
-        paths.extend(glob.glob(os.path.join(root, "herdr-kiro-*")))
-        for path in paths:
-            name = os.path.basename(path)
-            matched = re.match(r"herdr-kiro-rules-(\d+)-", name) or re.fullmatch(
-                r"herdr-kiro-(\d+)", name
-            )
-            if matched:
-                pid = int(matched.group(1))
-                if pid == os.getpid():
-                    continue
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    shutil.rmtree(path, True)
+        for path in glob.glob(os.path.join(root, "herdr-kiro-rules-*")):
+            pid = _rules_dir_ours(path)
+            if pid is None or pid == os.getpid():
                 continue
             try:
-                age = time.time() - os.path.getmtime(path)
-            except OSError:
-                continue
-            if age > 60:
+                os.kill(pid, 0)
+            except OSError as exc:
+                if exc.errno != errno.ESRCH:
+                    continue
                 shutil.rmtree(path, True)
 
 
@@ -589,6 +608,13 @@ def explain_env() -> dict:
     sweep_stale_pidfiles()
     base = tempfile.mkdtemp(prefix="herdr-kiro-rules-%s-" % os.getpid())
     _RULES_DIR = base
+    marker = os.path.join(base, "herdr-kiro-owned")
+    with open(marker, "w", encoding="utf-8") as handle:
+        handle.write("uid %s\n" % os.getuid())
+    try:
+        os.chmod(marker, FILE_MODE)
+    except OSError:
+        pass
     atexit.register(shutil.rmtree, base, True)
     dest = os.path.join(base, "herdr", "agent-detection")
     os.makedirs(dest, exist_ok=True)
@@ -743,6 +769,27 @@ def release_if_current(state: dict, generation: int, keys) -> bool:
         state["grace_started"] = 0.0
     state["retiring"] = True
     return True
+
+
+def _pids_exited(pids) -> bool:
+    """True when every pid is gone. EPERM means alive or foreign, so not exited."""
+    saw = False
+    for pid in pids:
+        try:
+            number = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if number <= 1:
+            continue
+        saw = True
+        try:
+            os.kill(number, 0)
+        except OSError as exc:
+            if exc.errno != errno.ESRCH:
+                return False
+        else:
+            return False
+    return saw
 
 
 def tracked_exit(state: dict, chat_hits: int):
@@ -1162,6 +1209,9 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
         if int(current.get("generation") or 0) != generation:
             current["retiring"] = False
             return
+        if reason == "idle" and current.get("busy"):
+            current["retiring"] = False
+            return
         decision["ok"] = release_if_current(current, generation, keys)
 
     update(path, apply)
@@ -1172,6 +1222,9 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     def confirm(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
         if watcher not in (me, 0, -1) or int(current.get("generation") or 0) != generation:
+            current["retiring"] = False
+            return
+        if reason == "idle" and current.get("busy"):
             current["retiring"] = False
             return
         still["ok"] = True
@@ -1330,6 +1383,7 @@ def _watch_loop(pane: str, path: str) -> None:
     # SessionEnd drops the owner from the state file before the process exits.
     # Keep the last pid so that exit still wakes the watcher.
     known_owners = []
+    known_outers = []
     chat_hits = 0
     gone_since = None
     gone_hits = 0
@@ -1349,16 +1403,30 @@ def _watch_loop(pane: str, path: str) -> None:
             chat_pid = int(state.get("chat_pid") or 0)
             if chat_pid:
                 current_owners.append(chat_pid)
+            outers_now = []
+            for owner in (state.get("owners") or {}).values():
+                try:
+                    outers_now.append(int(owner))
+                except (TypeError, ValueError):
+                    continue
+            if outers_now:
+                known_outers = outers_now
             if current_owners:
                 known_owners = current_owners
             kind, chat_hits = tracked_exit(state, chat_hits)
             owner_alive = False
+            started_by_pid = {}
+            for key, owner in (state.get("owners") or {}).items():
+                try:
+                    started_by_pid[int(owner)] = (state.get("owner_started") or {}).get(key) or ""
+                except (TypeError, ValueError):
+                    continue
             for owner in (state.get("owners") or {}).values():
                 try:
                     pid = int(owner)
                 except (TypeError, ValueError):
                     continue
-                if alive(pid, ""):
+                if alive(pid, started_by_pid.get(pid) or ""):
                     owner_alive = True
                     break
             if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
@@ -1375,12 +1443,10 @@ def _watch_loop(pane: str, path: str) -> None:
             else:
                 gone_since = None
                 gone_hits = 0
-            if owner_dead:
-                if finish_if_unchanged(pane, path, state, "owner exit"):
-                    return
-                if kind is not None and not owner_alive:
+            if owner_dead or kind is not None or _pids_exited(known_outers):
+                if not finish_if_unchanged(pane, path, state, "owner exit"):
                     log("watcher exit slot held")
-                    return
+                return
             screen = pane_text(pane)
             view = screen_view(screen)
             if not view.get("ok"):
