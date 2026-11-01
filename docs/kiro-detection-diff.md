@@ -28,6 +28,7 @@ Herdr 0.9.5 does not merge a local `agent-detection/kiro.toml` with the remote m
 
 | id | state | priority | region |
 | --- | --- | --- | --- |
+| `workspace_trust` | blocked | 1440 | `bottom_non_empty_lines(16)` |
 | `workflow_requires_approval` | blocked | 1430 | `bottom_non_empty_lines(24)` |
 | `workflow_chooser_blocked` | blocked | 1420 | `bottom_non_empty_lines(12)` |
 | `workflow_question_esc_cancel` | blocked | 1385 | `bottom_non_empty_lines(12)` |
@@ -35,6 +36,8 @@ Herdr 0.9.5 does not merge a local `agent-detection/kiro.toml` with the remote m
 | `workflow_approval_more_options` | blocked | 1360 | `bottom_non_empty_lines(12)` |
 | `workflow_banner_working` | working | 1200 | `whole_recent` |
 
-`workflow_requires_approval` matches when the bottom of the screen contains `requires approval` and both `Allow once` and `Deny once` are their own rows. Leading spaces and box-drawing characters (`│` and the other frame marks the workflow monitor draws) are allowed on those rows. A sentence that mentions the words does not match. A chooser sitting about 60 lines above the prompt does not match, because the region is the bottom 24 non-empty lines.
+`workflow_requires_approval` matches when the bottom of the screen contains `requires approval` and both `Allow once` and `Deny once` are rows. A leading box border, text before a `│` column, and a trailing scrollbar glyph are part of the row. A sentence that mentions the words does not match. A chooser sitting about 60 lines above the prompt does not match, because the region is the bottom 24 non-empty lines.
+
+`workspace_trust` matches the workspace dialog whose choices are `Trust, continue` and `Don't trust`.
 
 `workflow_banner_working` matches a line that starts with `▶`, then a token, then `running`, and also contains `ctrl+x`. `ctrl+g` may be wrapped or clipped. A model line such as `Status: ▶ deploy running` has no `ctrl+x`.

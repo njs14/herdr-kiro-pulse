@@ -1,23 +1,23 @@
-1793550772.612 pid=376528 state event=SessionStart busy=1 grace_until=0.000
-1793550772.622 pid=376530 state event=SessionStart busy=2 grace_until=0.000
-1793550772.798 pid=376548 state event=UserPromptSubmit busy=2 grace_until=0.000
-1793550772.873 pid=376564 state event=UserPromptSubmit busy=2 grace_until=0.000
-1793550775.128 pid=376708 state event=PreToolUse busy=2 grace_until=0.000
-1793550776.480 pid=376809 state event=PreToolUse busy=2 grace_until=0.000
-1793550781.376 pid=377119 state event=PostToolUse busy=2 grace_until=0.000
-1793550782.689 pid=377221 state event=PostToolUse busy=2 grace_until=0.000
-1793550783.190 pid=377257 state event=PreToolUse busy=2 grace_until=0.000
-1793550783.340 pid=377278 state event=PostToolUse busy=2 grace_until=0.000
-1793550784.471 pid=377356 state event=PreToolUse busy=2 grace_until=0.000
-1793550784.621 pid=377382 state event=PostToolUse busy=2 grace_until=0.000
-1793550784.811 pid=377402 event=Stop session=sess_f101428f-3fd3-4df1-8ac8-cab15ab81a6c pane=w1:p1 chain=377401:sh 373757:node 373697:bun 373526:kiro-cli-chat 373514:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
-1793550784.811 pid=377402 state event=Stop busy=1 grace_until=0.000
-1793550784.962 pid=377412 state event=SessionEnd busy=1 grace_until=0.000
-1793550786.011 pid=377492 event=Stop session=sess_01163ce5-dced-422b-9d25-a9d5c0686b40 pane=w1:p1 chain=377491:sh 373757:node 373697:bun 373526:kiro-cli-chat 373514:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
-1793550786.011 pid=377492 state event=Stop busy=0 grace_until=1793550786.504
-1793550786.162 pid=377502 state event=SessionEnd busy=0 grace_until=1793550786.654
-1793550786.211 pid=377515 state event=UserPromptSubmit busy=1 grace_until=0.000
-1793550787.852 pid=377594 state event=PreToolUse busy=1 grace_until=0.000
-1793550788.007 pid=377614 state event=PostToolUse busy=1 grace_until=0.000
-1793550790.341 pid=377714 event=Stop session=sess_b84f51ee-c383-47f2-b4f9-14819d9774b7 pane=w1:p1 chain=377713:sh 373757:node 373697:bun 373526:kiro-cli-chat 373514:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
-1793550790.341 pid=377714 state event=Stop busy=0 grace_until=1793550790.834
+1793554781.500 pid=392458 state event=SessionStart busy=1 grace_until=0.000
+1793554781.512 pid=392460 state event=SessionStart busy=2 grace_until=0.000
+1793554781.778 pid=392488 state event=UserPromptSubmit busy=2 grace_until=0.000
+1793554781.786 pid=392490 state event=UserPromptSubmit busy=2 grace_until=0.000
+1793554784.080 pid=392663 state event=PreToolUse busy=2 grace_until=0.000
+1793554784.192 pid=392670 state event=PreToolUse busy=2 grace_until=0.000
+1793554790.357 pid=393074 state event=PostToolUse busy=2 grace_until=0.000
+1793554790.379 pid=393076 state event=PostToolUse busy=2 grace_until=0.000
+1793554792.167 pid=393201 state event=PreToolUse busy=2 grace_until=0.000
+1793554792.246 pid=393212 state event=PreToolUse busy=2 grace_until=0.000
+1793554792.323 pid=393232 state event=PostToolUse busy=2 grace_until=0.000
+1793554792.404 pid=393245 state event=PostToolUse busy=2 grace_until=0.000
+1793554794.276 pid=393372 event=Stop session=sess_43ff67e1-5522-4bc7-93b6-c45917bba0ff pane=w1:p1 chain=393368:sh 373757:node 373697:bun 373526:kiro-cli-chat 373514:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
+1793554794.276 pid=393372 state event=Stop busy=1 grace_until=0.000
+1793554794.294 pid=393374 event=Stop session=sess_f0e14131-8b6e-429f-ad12-c9f7bacd7bf8 pane=w1:p1 chain=393373:sh 373757:node 373697:bun 373526:kiro-cli-chat 373514:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
+1793554794.295 pid=393374 state event=Stop busy=0 grace_until=1793554794.787
+1793554794.432 pid=393398 state event=SessionEnd busy=0 grace_until=1793554794.924
+1793554794.458 pid=393400 state event=SessionEnd busy=0 grace_until=1793554794.951
+1793554794.802 pid=393428 state event=UserPromptSubmit busy=1 grace_until=0.000
+1793554796.453 pid=393515 state event=PreToolUse busy=1 grace_until=0.000
+1793554796.614 pid=393525 state event=PostToolUse busy=1 grace_until=0.000
+1793554799.859 pid=393672 event=Stop session=sess_b84f51ee-c383-47f2-b4f9-14819d9774b7 pane=w1:p1 chain=393671:sh 373757:node 373697:bun 373526:kiro-cli-chat 373514:kiro-cli 4475:bash 4458:herdr 4457:tmux: server
+1793554799.859 pid=393672 state event=Stop busy=0 grace_until=1793554800.351

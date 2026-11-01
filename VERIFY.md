@@ -94,3 +94,24 @@ Kiro CLI 2.37.0's documented hook list includes `Stop` and does not list `Sessio
 | watch-tool | 25 | 0 | 0.628s | no |
 
 `herdr plugin link` of this tree registered `herdr-kiro` 0.8.0. `herdr plugin install` was not used. It only clones GitHub, and this package is not published.
+
+## v9 on this VM
+
+Python 3.12 and 3.9 with herdr: 91 tests, 0 failures. The same suites with `herdr` removed from `PATH`: 91 ran, 19 skipped, 0 failures, on both interpreters.
+
+`herdr plugin link` accepted `herdr-plugin.toml` 0.9.0, including `startup.sh`. `herdr plugin action invoke herdr-kiro.install` wrote the lifecycle marker `installed` / `via=plugin`. doctor exited 0. `herdr plugin unlink` left both files in place. doctor then exited 1 and named them. `./uninstall.sh` removed the files this install owned and wrote `uninstalled`. On this machine an older `.original` was restored, because that file was here before this install. A home with no `.original` keeps nothing but the lifecycle marker. `startup.sh` with that marker printed that it was leaving the files alone and did not recreate the hook.
+
+A single Ctrl-C that only cancels the turn leaves `kiro-cli` running. The watcher then takes the idle path. Measured here, `watcher exit idle` was 2.30 seconds after the prompt event. That is the same path as the 2.38 to 2.40 second result. The 0.078 second figure from v8 was a later Ctrl-C that actually exited the process. Repeating that here, three Ctrl-C presses that ended `kiro-cli` logged `watcher exit owner exit` 0.092 seconds after the last press and 0.547 seconds after the first. A `SessionEnd` hook during that exit spawned a second watcher, which also logged `watcher exit owner exit`.
+
+The workspace-trust dialog on `/tmp/kiro-trust-probe` was blocked on 6 of 6 status samples. `herdr agent explain` returned `workspace_trust`. The capture is `logs/workspace-trust.txt`.
+
+| run | banner samples | non-working while banner up | idle after the run | watcher left |
+| --- | --- | --- | --- | --- |
+| sequential | 59 | 0 | 0.199s | no |
+| parallel | 32 | 0 | 0.499s | no |
+| repeat | 33 | 0 | 0.462s | no |
+| watch | 24 | 0 | 0.384s | no |
+| solo | 26 | 0 | 0.388s | no |
+| watch-tool | 25 | 0 | 0.281s | no |
+
+The macOS `kqueue` path was unit-tested with a fake `select.kqueue`. It was not executed against a macOS kernel.

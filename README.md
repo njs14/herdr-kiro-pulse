@@ -14,7 +14,7 @@ Measured on herdr 0.9.5 with Kiro CLI 2.37.0 in V3 mode. The poll log is `logs/p
 
 ## Install
 
-Version 0.8.0. Requires `herdr` 0.9.5 or newer and `kiro-cli` on `PATH`, and Python 3.9 or newer. macOS and Linux.
+Version 0.9.0. License `WTFPL`. Requires `herdr` 0.9.5 or newer and `kiro-cli` on `PATH`, and Python 3.9 or newer. macOS and Linux.
 
 This tree is a herdr plugin. The manifest is `herdr-plugin.toml` (`id = "herdr-kiro"`).
 
@@ -33,16 +33,17 @@ herdr plugin action invoke herdr-kiro.install
 
 ### What the plugin system does not do
 
-Herdr has no manifest field for Kiro's hook directory or for `agent-detection`. `plugin install` and `plugin link` only register the package. The Kiro hook `~/.kiro/hooks/herdr-kiro.json` and the override `~/.config/herdr/agent-detection/kiro.toml` are written by `install.sh`, which the build command, the startup command, and the `install` action all run.
+Herdr has no manifest field for Kiro's hook directory or for `agent-detection`. `plugin install` and `plugin link` only register the package. The Kiro hook `~/.kiro/hooks/herdr-kiro.json` and the override `~/.config/herdr/agent-detection/kiro.toml` are written by `install.sh`. The build command and the `install` action run that script. Startup runs `startup.sh`, which runs `install.sh` only when the lifecycle marker says `installed`.
 
-- `plugin link` does not run `[[build]]`. Startup does not run on link, enable, or config reload. It runs when a server starts.
+- `plugin link` does not run `[[build]]`. Startup does not run on link, enable, or config reload. It runs when a server starts, and only if the lifecycle marker says `installed`.
 - A startup failure does not stop the herdr server. The result is in `herdr plugin log`.
 - Nothing in the plugin sets `chat.agentEngine` or `chat.enableWorkflows`.
 - Nothing restarts a running `kiro-cli`. Kiro reads hooks when its process starts.
 - The local `kiro.toml` replaces the remote Kiro manifest. Herdr 0.9.5 does not merge the two. The diff against upstream `2026.09.19.1` is `docs/kiro-detection-diff.md`.
 - Windows is not a declared platform.
+- herdr 0.9.5 has no uninstall or unlink lifecycle command. `herdr plugin uninstall` and `herdr plugin unlink` only unregister the plugin. They leave `~/.kiro/hooks/herdr-kiro.json` and `~/.config/herdr/agent-detection/kiro.toml` in place. doctor exits non-zero and names those files. `./uninstall.sh`, or `herdr plugin action invoke herdr-kiro.uninstall` while the plugin is still registered, removes the files, writes the uninstalled marker, and unlinks `herdr-kiro` when it is still registered.
 
-The script writes `~/.kiro/hooks/herdr-kiro.json`. The command is passed through `json.dumps`, and the path is shell-quoted, so a checkout path can contain spaces, quotes, and backslashes. The first time it replaces a user file it copies that file to `herdr-kiro.json.original` and records a sha256 of the bytes it wrote in `herdr-kiro.json.herdr-kiro-owned`. A later install does not replace `.original`. If the installed file was edited, that copy is saved under a new `herdr-kiro.json.user-modified.<timestamp>` name before the new bytes are written. A file is treated as ours only when its bytes match the payload being installed. A marker that says the file is owned but has no hash does not overwrite a hand edit. Install copies that file to a new `.user-modified.<timestamp>` name, prints a warning, and leaves the hand edit in place. If no herdr server is running, install still exits 0 and reload happens the next time herdr starts. If `HERDR_SESSION` names a server that is not running, install exits 2 and says that session is not a running herdr server. A failed reload against a running server exits nonzero. Restart Kiro after installing it. Start Kiro in V3 mode with workflows enabled:
+The script writes `~/.kiro/hooks/herdr-kiro.json`. The command is passed through `json.dumps`, and the path is shell-quoted, so a checkout path can contain spaces, quotes, and backslashes. The first time it replaces a user file it copies that file to `herdr-kiro.json.original` and records a sha256 of the bytes it wrote in `herdr-kiro.json.herdr-kiro-owned`. A later install does not replace `.original`. If the installed file was edited, that copy is saved under a new `herdr-kiro.json.user-modified.<timestamp>` name before the new bytes are written. A file is treated as ours only when its bytes match the payload being installed. A marker that says the file is owned but has no hash does not overwrite a hand edit. The first time, install keeps one `.user-modified.<timestamp>` copy and leaves the hand edit in place. A later install does not add another copy of the same bytes and does not print `Installed` for that file. If no herdr server is running, install still exits 0 and reload happens the next time herdr starts. If `HERDR_SESSION` names a server that is not running, install exits 2 and says that session is not a running herdr server. A failed reload against a running server exits nonzero. Restart Kiro after installing it. Start Kiro in V3 mode with workflows enabled:
 
 ```bash
 kiro-cli settings chat.agentEngine v3
@@ -67,7 +68,7 @@ That removes a hook file this repo still owns and moves `.original` back. A file
 
 ```bash
 ./doctor.sh
-python3 -m unittest tests.test_grace tests.test_install tests.test_detection
+python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor
 tests/run_py39.sh
 python3 harness/run_suite.py
 ```
@@ -84,6 +85,6 @@ Kiro CLI 2.37.0 documents `Stop` as the hook that runs when an agent execution c
 
 A draft bug report for the workflow-monitor file-write chooser is `docs/herdr-bug-workflow-monitor-fs-write.md`. It is not filed.
 
-The license file is a placeholder. The owner picks the license. Upstream herdr is Apache-2.0. This package does not copy herdr source. The detection file is a local override derived from the published `kiro.toml` for version `2026.09.19.1`.
+The license is the WTFPL, version 2, in `LICENSE`, copyright njs14. Upstream herdr is Apache-2.0. This package does not copy herdr source. The detection file is a local override derived from the published `kiro.toml` for version `2026.09.19.1`. install and doctor warn when the cached remote version is newer than that, and they print `local_override_shadowing_remote` in that warning. A matching version does not warn, even though the override shadows the remote file.
 
 The idle-prompt rule in that copy sets `visible_idle` to false. herdr then holds a working-to-idle change for a few hundred milliseconds instead of publishing it on the first frame. That hold is what keeps a one-frame idle prompt under the banner from flipping the pane. Plain chat therefore reaches idle a little later than the stock rule. Turning the flag back on makes that one frame publish immediately, which a 0.4 second poll can catch.

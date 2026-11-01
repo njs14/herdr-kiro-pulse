@@ -2,6 +2,7 @@
 # Remove the herdr Kiro hook, stop its watchers, and delete its state files.
 set -eu
 DEST="${KIRO_HOOKS_DIR:-$HOME/.kiro/hooks}"
+HERDR="${HERDR_BIN_PATH:-herdr}"
 export HERDR_KIRO_HOME="$HOME"
 export HERDR_KIRO_HOOK_DIR="$DEST"
 python3 - << 'PY'
@@ -156,6 +157,13 @@ if os.path.isdir(state):
             os.remove(path)
         except OSError:
             pass
+base = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
+directory = os.path.join(base, "herdr-kiro")
+os.makedirs(directory, mode=0o700, exist_ok=True)
+lifecycle = os.path.join(directory, "lifecycle")
+with open(lifecycle, "w", encoding="utf-8") as handle:
+    handle.write("uninstalled\n")
+os.chmod(lifecycle, 0o600)
 for path in glob.glob(os.path.join(legacy, "herdr-kiro-*.json")):
     try:
         os.remove(path)
@@ -171,7 +179,7 @@ PY
 reload_one() {
   shift
   err=$(mktemp)
-  if herdr "$@" 2>"$err"; then
+  if "$HERDR" "$@" 2>"$err"; then
     rm -f "$err"
     return 0
   fi
@@ -191,7 +199,10 @@ reload_one() {
   rm -f "$err"
   return 1
 }
-if command -v herdr >/dev/null 2>&1; then
+if command -v "$HERDR" >/dev/null 2>&1; then
+  if "$HERDR" plugin list 2>/dev/null | grep -q herdr-kiro; then
+    "$HERDR" plugin unlink herdr-kiro || true
+  fi
   if [ -n "${HERDR_SESSION:-}" ]; then
     reload_one session --session "$HERDR_SESSION" server reload-agent-manifests || exit $?
   else

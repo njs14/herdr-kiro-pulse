@@ -117,13 +117,12 @@ state = "blocked"
 priority = 1430
 region = "bottom_non_empty_lines(24)"
 visible_blocker = true
-# Live workflow-monitor rows are prefixed with │. Both choice lines have to be
-# their own rows in the bottom of the screen, so a paragraph that mentions the
-# words, or a chooser sitting ~60 lines up the scrollback, does not match.
+# Both choice rows have to be in the bottom of the screen. A leading box
+# border, a Steps column before the border, or a trailing scrollbar glyph is fine.
 contains = ["requires approval"]
 line_regex = [
-  '(?i)^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*$',
-  '(?i)^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*$',
+  '(?i)^.*(?:^|[│┃║])[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*[^\w]*$',
+  '(?i)^.*(?:^|[│┃║])[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*[^\w]*$',
 ]
 
 [[rules]]
@@ -141,6 +140,14 @@ priority = 1360
 region = "bottom_non_empty_lines(12)"
 visible_blocker = true
 line_regex = ['(?i)^\s*esc\s+to\s+close\b.*\benter\s+to\s+see\s+more\s+options\b']
+
+[[rules]]
+id = "workspace_trust"
+state = "blocked"
+priority = 1440
+region = "bottom_non_empty_lines(16)"
+visible_blocker = true
+contains = ["trust, continue", "don't trust"]
 
 [[rules]]
 id = "workflow_trust_all"

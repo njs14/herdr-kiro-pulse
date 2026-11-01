@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -380,11 +380,16 @@ def update(path: str, fn):
         return state
 
 
+def herdr_bin() -> str:
+    """The herdr that launched this plugin, or `herdr` on PATH."""
+    return os.environ.get("HERDR_BIN_PATH") or "herdr"
+
+
 def herdr(*args: str) -> bool:
     log("herdr " + " ".join(args))
     try:
         completed = subprocess.run(
-            ["herdr", "pane", *args],
+            [herdr_bin(), "pane", *args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
@@ -444,7 +449,7 @@ def release_authority(pane: str, path: str) -> bool:
 def pane_text(pane: str) -> str:
     try:
         return subprocess.check_output(
-            ["herdr", "pane", "read", pane, "--source", "visible", "--lines", "80"],
+            [herdr_bin(), "pane", "read", pane, "--source", "visible", "--lines", "80"],
             text=True,
             timeout=5,
         )
@@ -475,20 +480,70 @@ def workflow_banner_from(text: str) -> bool:
     return any(BANNER_LINE.search(line) for line in tail_text(text).splitlines())
 
 
+def temp_roots():
+    """$TMPDIR on macOS, and /tmp when that is a different directory."""
+    roots = [tempfile.gettempdir()]
+    if os.path.abspath("/tmp") not in [os.path.abspath(root) for root in roots]:
+        roots.append("/tmp")
+    return roots
+
+
 def sweep_stale_rules() -> None:
-    """Remove rule dirs left by processes that SIGKILL prevented from exiting cleanly."""
-    for path in glob.glob("/tmp/herdr-kiro-rules-*"):
-        name = os.path.basename(path)
-        matched = re.match(r"herdr-kiro-rules-(\d+)-", name)
-        if not matched:
+    """Remove rule dirs left behind, including ones from older builds."""
+    for root in temp_roots():
+        for path in glob.glob(os.path.join(root, "herdr-kiro-rules*")):
+            name = os.path.basename(path)
+            matched = re.match(r"herdr-kiro-rules-(\d+)", name)
+            if matched:
+                pid = int(matched.group(1))
+                if pid == os.getpid():
+                    continue
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    shutil.rmtree(path, True)
+                continue
+            try:
+                age = time.time() - os.path.getmtime(path)
+            except OSError:
+                continue
+            if age > 3600:
+                shutil.rmtree(path, True)
+
+
+def sweep_stale_pidfiles() -> None:
+    """Drop pid files whose process is gone or whose start time moved."""
+    directory = os.path.join(state_dir(), "pids")
+    if not os.path.isdir(directory):
+        return
+    for name in os.listdir(directory):
+        if not name.isdigit():
             continue
-        pid = int(matched.group(1))
-        if pid == os.getpid():
-            continue
+        path = os.path.join(directory, name)
+        pid = int(name)
         try:
             os.kill(pid, 0)
         except OSError:
-            shutil.rmtree(path, True)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        try:
+            lines = open(path, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        recorded = lines[1].strip() if len(lines) > 1 else ""
+        if not recorded:
+            continue
+        snap = process_snapshot(pid)
+        if not snap or snap.get("error"):
+            continue
+        if snap.get("lstart") and snap.get("lstart") != recorded:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def cleanup_rules() -> None:
@@ -509,6 +564,7 @@ def explain_env() -> dict:
         return _EXPLAIN_ENV
     global _RULES_DIR
     sweep_stale_rules()
+    sweep_stale_pidfiles()
     base = tempfile.mkdtemp(prefix="herdr-kiro-rules-%s-" % os.getpid())
     _RULES_DIR = base
     atexit.register(shutil.rmtree, base, True)
@@ -542,7 +598,7 @@ def screen_view(text: str) -> dict:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text or "")
         completed = subprocess.run(
-            ["herdr", "agent", "explain", "--file", path, "--agent", "kiro", "--json"],
+            [herdr_bin(), "agent", "explain", "--file", path, "--agent", "kiro", "--json"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -765,6 +821,18 @@ def process_snapshot(pid: int) -> dict:
     return table.get(int(pid))
 
 
+def snap_is_reparented_kiro(snap) -> bool:
+    """A kiro process whose parent is init was left behind by the outer CLI."""
+    if not snap or snap.get("error"):
+        return False
+    if "kiro" not in command_name(snap.get("comm") or ""):
+        return False
+    try:
+        return int(snap.get("ppid") or 0) <= 1
+    except (TypeError, ValueError):
+        return False
+
+
 def owner_is_dead(owner, started: str) -> bool:
     if not owner:
         return False
@@ -777,9 +845,17 @@ def owner_is_dead(owner, started: str) -> bool:
         return True
     if snap.get("error"):
         return False
+    if snap_is_reparented_kiro(snap):
+        return True
     if started and snap.get("lstart") != started:
         return True
     return False
+
+
+def exit_armed(text: str) -> bool:
+    """Kiro's second Ctrl-C prompt. The process is leaving."""
+    lowered = (text or "").lower()
+    return "ctrl+c" in lowered and "again to exit" in lowered
 
 
 def alive(pid: int, started: str = "") -> bool:
@@ -801,7 +877,7 @@ def alive(pid: int, started: str = "") -> bool:
 
 def agent_lookup(pane: str) -> str:
     """herdr's view of the pane. 'gone' when the agent process is not there."""
-    command = ["herdr"]
+    command = [herdr_bin()]
     session = os.environ.get("HERDR_SESSION")
     if session:
         command.extend(["--session", session])
@@ -1174,6 +1250,7 @@ def _watch_loop(pane: str, path: str) -> None:
     reported = None
     misses = 0
     quiet_since = None
+    held = None
     owner_watch = OwnerExitWatch()
     # SessionEnd drops the owner from the state file before the process exits.
     # Keep the last pid so that exit still wakes the watcher.
@@ -1199,6 +1276,8 @@ def _watch_loop(pane: str, path: str) -> None:
                     os.kill(owner, 0)
                 except OSError:
                     continue
+                if snap_is_reparented_kiro(process_snapshot(owner)):
+                    continue
                 owner_alive = True
                 break
             if known_owners and not owner_alive:
@@ -1211,14 +1290,24 @@ def _watch_loop(pane: str, path: str) -> None:
                 reason = "owner exit" if exited or owner_dead else "agent gone"
                 if finish_if_unchanged(pane, path, state, reason):
                     return
+                if known_owners and not owner_alive:
+                    log("watcher exit slot held")
+                    return
             screen = pane_text(pane)
+            if exit_armed(screen):
+                if finish_if_unchanged(pane, path, state, "owner exit"):
+                    return
             view = screen_view(screen)
             if not view.get("ok"):
-                blocked = approval_text(screen)
-                banner = False
+                blocked = approval_text(screen) or held == "blocked"
+                banner = workflow_banner_from(screen) or (held == "working" and not blocked)
             else:
                 blocked = view.get("state") == "blocked" or approval_text(screen)
                 banner = view.get("id") == "workflow_banner_working"
+            if blocked:
+                held = "blocked"
+            elif banner:
+                held = "working"
             if blocked:
                 quiet_since = None
                 if reported != "blocked":

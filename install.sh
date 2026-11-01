@@ -8,6 +8,7 @@ RULES="$ROOT/prototype/kiro-detection.toml"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/agent-detection"
 chmod +x "$HOOK"
 mkdir -p "$DEST"
+HERDR="${HERDR_BIN_PATH:-herdr}"
 export HERDR_KIRO_HOOK="$HOOK"
 export HERDR_KIRO_RULES="$RULES"
 export HERDR_KIRO_CONFIG="$CONFIG"
@@ -44,6 +45,26 @@ def write_bytes(path, payload):
         handle.write(payload)
 
 
+def same_backup(dest, payload):
+    directory = os.path.dirname(dest) or "."
+    prefix = os.path.basename(dest) + ".user-modified."
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, "rb") as handle:
+                if handle.read() == payload:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def unique_backup(dest):
     stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
     candidate = dest + ".user-modified." + stamp
@@ -74,12 +95,14 @@ def install_owned(dest, payload):
             if existing != previous:
                 write_bytes(unique_backup(dest), existing)
     elif existing is not None and owned_hash == "" and existing != payload:
-        kept = unique_backup(dest)
-        write_bytes(kept, existing)
+        if not same_backup(dest, existing):
+            kept = unique_backup(dest)
+            write_bytes(kept, existing)
         sys.stderr.write(
-            "warning: %s has no content hash and differs from this install; left in place as %s\n"
-            % (dest, kept)
+            "warning: %s has no content hash and differs from this install; left in place\n"
+            % dest
         )
+        print("Left %s unchanged" % dest)
         return
     elif existing is not None and owned_hash and digest(existing) != owned_hash:
         backup = unique_backup(dest)
@@ -88,6 +111,7 @@ def install_owned(dest, payload):
     write_bytes(dest, payload)
     with open(marker, "w", encoding="utf-8") as handle:
         handle.write("herdr-kiro-owned\nsha256 %s\n" % digest(payload))
+    print("Installed %s" % dest)
 
 
 hook = os.environ["HERDR_KIRO_HOOK"]
@@ -112,12 +136,20 @@ rules = os.environ.get("HERDR_KIRO_RULES") or ""
 if rules and os.path.isfile(rules):
     with open(rules, "rb") as handle:
         install_owned(sys.argv[2], handle.read())
+base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+directory = os.path.join(base, "herdr-kiro")
+os.makedirs(directory, mode=0o700, exist_ok=True)
+via = "plugin" if os.environ.get("HERDR_PLUGIN_ID") else "script"
+lifecycle = os.path.join(directory, "lifecycle")
+with open(lifecycle, "w", encoding="utf-8") as handle:
+    handle.write("installed\nvia=%s\n" % via)
+os.chmod(lifecycle, 0o600)
 PY
 reload_one() {
   # $1 is "session" or "default"
   shift
   err=$(mktemp)
-  if herdr "$@" 2>"$err"; then
+  if "$HERDR" "$@" 2>"$err"; then
     rm -f "$err"
     return 0
   fi
@@ -138,7 +170,7 @@ reload_one() {
   return 1
 }
 reload_manifests() {
-  if ! command -v herdr >/dev/null 2>&1; then
+  if ! command -v "$HERDR" >/dev/null 2>&1; then
     echo "herdr is not on PATH, skipped manifest reload" >&2
     return 0
   fi
@@ -152,8 +184,5 @@ reload_manifests() {
 if [ -f "$RULES" ]; then
   reload_manifests
 fi
-echo "Installed $DEST/herdr-kiro.json"
-if [ -f "$RULES" ]; then
-  echo "Installed $CONFIG/kiro.toml"
-fi
+python3 "$ROOT/prototype/herdr_kiro_doctor.py" --warn-upstream || true
 echo "Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat --v3"

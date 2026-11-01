@@ -763,6 +763,165 @@ class GraceTests(unittest.TestCase):
         ):
             self.assertEqual(hook.kiro_ancestor(), (9, "outer"))
 
+    def test_kqueue_wait_reports_a_process_exit(self):
+        seen = {}
+
+        class Queue:
+            def control(self, changes, _count, _timeout):
+                seen["changes"] = list(changes)
+                return [object()]
+
+            def close(self):
+                seen["closed"] = True
+
+        def kevent(*args):
+            return args
+
+        watch = hook.OwnerExitWatch()
+        with mock.patch.object(hook.select, "kqueue", lambda: Queue(), create=True), mock.patch.object(
+            hook.select, "KQ_FILTER_PROC", 20, create=True
+        ), mock.patch.object(hook.select, "KQ_NOTE_EXIT", 1, create=True), mock.patch.object(
+            hook.select, "KQ_EV_ADD", 2, create=True
+        ), mock.patch.object(hook.select, "KQ_EV_ENABLE", 4, create=True), mock.patch.object(
+            hook.select, "kevent", kevent, create=True
+        ):
+            woke = watch.wait([4321], 1)
+        watch.close()
+        self.assertTrue(woke)
+        self.assertTrue(seen.get("changes"))
+
+    def test_reparented_kiro_chat_counts_as_owner_death(self):
+        snap = {"ppid": 1, "lstart": "then", "comm": "kiro-cli-chat"}
+        self.assertTrue(hook.snap_is_reparented_kiro(snap))
+        self.assertFalse(hook.snap_is_reparented_kiro({"ppid": 40, "lstart": "then", "comm": "kiro-cli"}))
+        with mock.patch.object(hook, "process_snapshot", lambda _pid: snap):
+            self.assertTrue(hook.owner_is_dead(50, ""))
+
+    def test_exit_prompt_releases_without_the_idle_wait(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        hook.begin_tick()
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 1
+
+        hook.update(path, seed)
+        screen = "› ask a question or describe a task\n Press Ctrl+C or Ctrl+D again to exit\n"
+        started = time.time()
+        with mock.patch.object(hook, "pane_text", lambda _pane: screen), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "working"
+        ), mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True), mock.patch.object(
+            hook, "herdr", lambda *_args: True
+        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}):
+            hook.watch_loop("w1:p9", path)
+        self.assertLess(time.time() - started, 1.5)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["watcher"], 0)
+        owner.kill()
+
+    def test_explain_failure_under_a_banner_stays_working(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        hook.begin_tick()
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 1
+
+        hook.update(path, seed)
+        reports = []
+
+        def fake_wait(_self, _pids, _timeout):
+            if len(reports) >= 1:
+                raise SystemExit("stop")
+            return False
+
+        banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        with mock.patch.object(hook, "pane_text", lambda _pane: banner), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "working"
+        ), mock.patch.object(hook, "send_report", lambda *args, **_kwargs: reports.append(args) or True), mock.patch.object(
+            hook, "herdr", lambda *_args: True
+        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "unknown", "id": None, "ok": False}), mock.patch.object(
+            hook.OwnerExitWatch, "wait", fake_wait
+        ):
+            with self.assertRaises(SystemExit):
+                hook.watch_loop("w1:p9", path)
+        self.assertTrue(any(len(args) >= 3 and args[2] == "working" for args in reports))
+        owner.kill()
+
+    def test_dead_owner_does_not_spin_when_another_watcher_holds_the_slot(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        hook.begin_tick()
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_started"] = {"sess": ""}
+            state["generation"] = 4
+
+        hook.update(path, seed)
+        calls = []
+        phase = {"n": 0}
+
+        def staged(_self, _pids, _timeout):
+            phase["n"] += 1
+            if phase["n"] == 1:
+                return False
+            if phase["n"] == 2:
+                owner.kill()
+                owner.wait(timeout=5)
+
+                def steal(state):
+                    state["watcher"] = 4242
+
+                hook.update(path, steal)
+                return True
+            raise AssertionError("watcher kept calling herdr after the owner died")
+
+        banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        with mock.patch.object(hook, "pane_text", lambda _pane: banner), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "working"
+        ), mock.patch.object(hook, "send_report", lambda *args, **_kwargs: calls.append(args) or True), mock.patch.object(
+            hook, "herdr", lambda *args: calls.append(args) or True
+        ), mock.patch.object(
+            hook, "screen_view", lambda _text: {"state": "working", "id": "workflow_banner_working", "ok": True}
+        ), mock.patch.object(hook.OwnerExitWatch, "wait", staged):
+            hook.watch_loop("w1:p9", path)
+        self.assertLess(len(calls), 15)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["watcher"], 4242)
+
+    def test_sweep_honors_tmpdir_and_removes_old_rule_dirs(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        old = os.path.join(base, "herdr-kiro-rules-legacy")
+        os.makedirs(old)
+        old_stamp = time.time() - 7200
+        os.utime(old, (old_stamp, old_stamp))
+        dead = os.path.join(base, "herdr-kiro-rules-999999-left")
+        os.makedirs(dead)
+        previous = tempfile.tempdir
+        tempfile.tempdir = None
+        try:
+            with mock.patch.dict(os.environ, {"TMPDIR": base}):
+                hook.sweep_stale_rules()
+        finally:
+            tempfile.tempdir = previous
+        self.assertFalse(os.path.isdir(old))
+        self.assertFalse(os.path.isdir(dead))
+
     def test_session_end_clears_the_slot_like_stop(self):
         state = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "sess", 1.0)
         self.assertIn("sess", state["busy"])

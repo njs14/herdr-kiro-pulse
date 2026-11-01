@@ -105,7 +105,10 @@ class InstallTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
-        self.assertEqual(self._files(home), before)
+        after = self._files(home)
+        marker = after.pop(".local/state/herdr-kiro/lifecycle", None)
+        self.assertEqual(marker, b"uninstalled\n")
+        self.assertEqual(after, before)
 
     def test_install_twice_then_uninstall_on_a_fresh_home(self):
         self._round_trip({})
@@ -462,6 +465,83 @@ class InstallTests(unittest.TestCase):
         self.assertIn("reload-agent-manifests failed", completed.stderr)
         with open(log, encoding="utf-8") as handle:
             self.assertIn("--session kiro-repro server reload-agent-manifests", handle.read())
+
+    def test_hashless_marker_does_not_backup_again_or_say_installed(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        hook_dir = os.path.join(home, ".kiro", "hooks")
+        os.makedirs(hook_dir)
+        hook_file = os.path.join(hook_dir, "herdr-kiro.json")
+        with open(hook_file, "wb") as handle:
+            handle.write(b'{"version":"v4"}\n')
+        with open(hook_file + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
+            handle.write("herdr-kiro-owned\n")
+        env = self._home_env(home)
+        script = os.path.join(ROOT, "install.sh")
+        first = subprocess.run(["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(first.returncode, 0, first.stderr or first.stdout)
+        second = subprocess.run(["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(second.returncode, 0, second.stderr or second.stdout)
+        self.assertNotIn("Installed %s" % hook_file, second.stdout)
+        backups = [name for name in os.listdir(hook_dir) if name.startswith("herdr-kiro.json.user-modified.")]
+        self.assertEqual(len(backups), 1)
+        with open(hook_file, "rb") as handle:
+            self.assertEqual(handle.read(), b'{"version":"v4"}\n')
+
+    def test_startup_leaves_an_uninstall_alone(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        state = os.path.join(home, ".local", "state", "herdr-kiro")
+        os.makedirs(state)
+        with open(os.path.join(state, "lifecycle"), "w", encoding="utf-8") as handle:
+            handle.write("uninstalled\n")
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "startup.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertIn("not installed", completed.stderr)
+        self.assertFalse(os.path.exists(os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")))
+
+    def test_install_uses_herdr_bin_path(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        bindir = os.path.join(base, "bin")
+        os.makedirs(bindir)
+        path_herdr = os.path.join(bindir, "herdr")
+        with open(path_herdr, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\necho path-herdr >&2\nexit 1\n")
+        os.chmod(path_herdr, 0o755)
+        chosen = os.path.join(base, "chosen-herdr")
+        log = os.path.join(base, "log")
+        with open(chosen, "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERDR_FAKE_LOG\"\nexit 0\n")
+        os.chmod(chosen, 0o755)
+        env = self._home_env(home)
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env["HERDR_BIN_PATH"] = chosen
+        env["HERDR_FAKE_LOG"] = log
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertNotIn("path-herdr", completed.stderr)
+        with open(log, encoding="utf-8") as handle:
+            self.assertIn("reload-agent-manifests", handle.read())
 
 
 if __name__ == "__main__":

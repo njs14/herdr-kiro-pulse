@@ -1,6 +1,7 @@
 id = "herdr-kiro"
 name = "Kiro workflow state"
-version = "0.8.0"
+version = "0.9.0"
+license = "WTFPL"
 min_herdr_version = "0.9.5"
 description = "Keep a Kiro CLI V3 workflow pane working in herdr, and report a visible blocker as blocked."
 platforms = ["linux", "macos"]
@@ -10,9 +11,9 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["sh", "install.sh"]
 
-# Runs at the next server start. Linking or enabling a plugin does not run it.
+# Repairs only when the lifecycle marker says installed. An uninstall stays undone.
 [[startup]]
-command = ["sh", "install.sh"]
+command = ["sh", "startup.sh"]
 
 [[actions]]
 id = "install"
