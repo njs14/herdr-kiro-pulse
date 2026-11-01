@@ -4,9 +4,13 @@ Herdr drops a working report when a foreground turn repaints onto the idle
 prompt, about 0.2s after Stop, and it keeps the old sequence. Re-sending
 working after that drop is what holds the pane for the grace period.
 """
+import json
 import os
 import sys
+import tempfile
+import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "prototype"))
 
@@ -120,9 +124,57 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(later["busy"], {})
         self.assertEqual(hook.next_action(0, later["grace_until"], False, hook.STALE_SECS + 1), "idle")
 
-    def test_approval_text_is_recognized(self):
-        self.assertTrue(hook.approval_text("esc to close\nAlways allow"))
-        self.assertFalse(hook.approval_text("ask a question or describe a task"))
+    def test_chooser_footer_is_an_approval(self):
+        footer = "esc to close · ↑↓ to navigate · ↵ to select · Tab to edit"
+        text = "\n".join(
+            [
+                "Print the approval probe string requires approval",
+                "❯ Allow once",
+                "  Deny once",
+                "  Create allow rule to approve future similar actions",
+                footer,
+            ]
+        )
+        self.assertTrue(hook.approval_text(text))
+
+    def test_model_output_phrases_are_not_an_approval(self):
+        text = "\n".join(
+            [
+                "I will always allow this pattern.",
+                "You can press esc to close the panel.",
+                "always deny is also a phrase a reply might contain.",
+                "› ask a question or describe a task",
+            ]
+        )
+        self.assertFalse(hook.approval_text(text))
+
+    def test_parallel_steps_with_session_ids_stripped(self):
+        key = hook.session_of({"cwd": "/work", "hook_event_name": "SessionStart"}, ppid=77)
+        self.assertNotEqual(key, "unknown")
+        self.assertEqual(key, hook.session_of({"cwd": "/work", "hook_event_name": "Stop"}, ppid=77))
+        other = hook.session_of({"cwd": "/work"}, ppid=78)
+        self.assertNotEqual(key, other)
+        state = hook.fresh_state()
+        state = hook.apply_event(state, "SessionStart", key, 1)
+        state = hook.apply_event(state, "SessionStart", key, 1.1)
+        state = hook.apply_event(state, "UserPromptSubmit", key, 1.2)
+        self.assertEqual(len(state["busy"]), 2)
+        state = hook.apply_event(state, "Stop", key, 3)
+        self.assertEqual(len(state["busy"]), 1)
+        self.assertEqual(
+            hook.next_action(len(state["busy"]), state["grace_until"], False, 3.2),
+            "working",
+        )
+        state = hook.apply_event(state, "Stop", key, 4)
+        self.assertEqual(state["busy"], {})
+        self.assertEqual(state["grace_until"], 4 + hook.SETTLE_SECS)
+
+    def test_transcript_path_distinguishes_stripped_payloads(self):
+        first = hook.session_of({"transcript_path": "/tmp/one.jsonl", "cwd": "/work"}, ppid=5)
+        second = hook.session_of({"transcript_path": "/tmp/two.jsonl", "cwd": "/work"}, ppid=5)
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, "unknown")
+        self.assertEqual(hook.session_of({"session_id": "sess_a", "cwd": "/work"}, ppid=5), "sess_a")
 
     def test_repeat_gap_is_inside_the_grace(self):
         state = hook.fresh_state()
@@ -135,6 +187,73 @@ class GraceTests(unittest.TestCase):
         state = hook.apply_event(state, "UserPromptSubmit", "step-2", 2.15)
         self.assertEqual(state["grace_until"], 0.0)
         self.assertIn("step-2", state["busy"])
+
+    def test_watcher_exits_after_idle_and_a_new_session_restarts_it(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: None)
+        reads = {"n": 0}
+
+        def read(_pane):
+            reads["n"] += 1
+            return "› ask a question or describe a task\n"
+
+        def sleep(_delay):
+            if reads["n"] > 2:
+                raise AssertionError("watcher kept polling after idle")
+
+        def report(*_args):
+            return True
+
+        with (
+            mock.patch.object(hook, "pane_text", read),
+            mock.patch.object(hook, "send_report", report),
+            mock.patch.object(hook.time, "sleep", sleep),
+        ):
+            hook.watch_loop("w1:p1", path)
+        self.assertEqual(reads["n"], 1)
+        self.assertEqual(json.load(open(path, encoding="utf-8"))["watcher"], 0)
+
+        spawned = {}
+
+        class Proc:
+            pid = 4321
+
+        def popen(*args, **kwargs):
+            spawned["args"] = args
+            return Proc()
+
+        def mark_busy(state):
+            state["busy"]["sess"] = time.time()
+
+        hook.update(path, mark_busy)
+        with mock.patch.object(hook.subprocess, "Popen", popen):
+            hook.ensure_watcher("w1:p1", path)
+        self.assertIn("args", spawned)
+        self.assertEqual(json.load(open(path, encoding="utf-8"))["watcher"], 4321)
+
+    def test_reset_seq_does_not_fall_below_the_high_water(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+
+        def raise_seq(state):
+            state["seq"] = 50
+
+        hook.update(path, raise_seq)
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        raw["seq"] = 0
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(raw, handle)
+        state = hook.update(path, lambda _state: None)
+        self.assertGreaterEqual(state["seq"], 50)
+
+    def test_state_file_is_private(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: None)
+        mode = os.stat(path).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
 
 if __name__ == "__main__":
