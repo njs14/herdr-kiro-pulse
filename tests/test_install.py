@@ -107,7 +107,11 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         after = self._files(home)
         marker = after.pop(".local/state/herdr-kiro/lifecycle", None)
-        self.assertEqual(marker, b"uninstalled\n")
+        self.assertIsNotNone(marker)
+        self.assertEqual(marker.splitlines()[0], b"uninstalled")
+        # herdr writes this lock when uninstall asks it to list plugins. It is herdr's file.
+        after.pop(".config/herdr/.plugins.lock", None)
+        before.pop(".config/herdr/.plugins.lock", None)
         self.assertEqual(after, before)
 
     def test_install_twice_then_uninstall_on_a_fresh_home(self):

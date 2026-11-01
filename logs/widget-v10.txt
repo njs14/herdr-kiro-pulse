@@ -1,0 +1,15 @@
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ ▸ Kiro CLI 3.0 launches at the end of October. If you have auto-updates on, you'll be upgraded to 3.0
+   automatically.
+   It brings Approve for me, cloud sessions, memory, workflows, local sandbox, an improved trust model, expanded
+   hooks and specs.
+   Note: 3.0 doesn't support the legacy --classic experience and the legacy desktop app.
+
+ ▶ write-probe running 0/1 · ctrl+x expand · ctrl+g monitor
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ⚠ 1 tool approval pending
+ ❯ (a) Approve all pending
+   (f) Approve all pending and auto-approve future subagent requests
+   (c) Configure individually (agent monitor)
+   (x) Exit (cancel subagents)

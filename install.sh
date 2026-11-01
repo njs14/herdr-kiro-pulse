@@ -66,7 +66,7 @@ def same_backup(dest, payload):
 
 
 def unique_backup(dest):
-    stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     candidate = dest + ".user-modified." + stamp
     index = 0
     while os.path.exists(candidate):

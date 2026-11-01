@@ -117,12 +117,10 @@ state = "blocked"
 priority = 1430
 region = "bottom_non_empty_lines(24)"
 visible_blocker = true
-# Both choice rows have to be in the bottom of the screen. A leading box
-# border, a Steps column before the border, or a trailing scrollbar glyph is fine.
 contains = ["requires approval"]
 line_regex = [
-  '(?i)^.*(?:^|[│┃║])[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*[^\w]*$',
-  '(?i)^.*(?:^|[│┃║])[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*[^\w]*$',
+  '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌]*\s*$|^.*[└├].*│\s*(?:[>❯]\s*)?allow once\s*[█▲▼░▒▓▌]*\s*$)',
+  '(?i)(?:^[\s│┃║┌┐└┘├┤┬┴┼─]*?(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌]*\s*$|^.*│\s*(?:[>❯]\s*)?deny once\s*[█▲▼░▒▓▌]*\s*$)',
 ]
 
 [[rules]]
@@ -147,7 +145,10 @@ state = "blocked"
 priority = 1440
 region = "bottom_non_empty_lines(16)"
 visible_blocker = true
-contains = ["trust, continue", "don't trust"]
+line_regex = [
+  '(?i)^[\s│┃║]*?(?:[>❯]\s*)?trust,\s*continue\s*$',
+  "(?i)^[\\s│┃║]*?(?:[>❯]\\s*)?don't trust,\\s*exit\\s*$",
+]
 
 [[rules]]
 id = "workflow_trust_all"

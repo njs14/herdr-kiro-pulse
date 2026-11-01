@@ -790,14 +790,12 @@ class GraceTests(unittest.TestCase):
         self.assertTrue(woke)
         self.assertTrue(seen.get("changes"))
 
-    def test_reparented_kiro_chat_counts_as_owner_death(self):
+    def test_a_live_process_with_init_as_parent_is_not_dead(self):
         snap = {"ppid": 1, "lstart": "then", "comm": "kiro-cli-chat"}
-        self.assertTrue(hook.snap_is_reparented_kiro(snap))
-        self.assertFalse(hook.snap_is_reparented_kiro({"ppid": 40, "lstart": "then", "comm": "kiro-cli"}))
         with mock.patch.object(hook, "process_snapshot", lambda _pid: snap):
-            self.assertTrue(hook.owner_is_dead(50, ""))
+            self.assertFalse(hook.owner_is_dead(50, "then"))
 
-    def test_exit_prompt_releases_without_the_idle_wait(self):
+    def test_exit_prompt_text_does_not_release_a_live_owner(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
@@ -812,17 +810,70 @@ class GraceTests(unittest.TestCase):
 
         hook.update(path, seed)
         screen = "› ask a question or describe a task\n Press Ctrl+C or Ctrl+D again to exit\n"
-        started = time.time()
+        def fake_wait(_self, _pids, _timeout):
+            fake_wait.n += 1
+            if fake_wait.n > 2:
+                raise SystemExit("stop")
+            return False
+
+        fake_wait.n = 0
         with mock.patch.object(hook, "pane_text", lambda _pane: screen), mock.patch.object(
             hook, "agent_lookup", lambda _pane: "working"
         ), mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True), mock.patch.object(
             hook, "herdr", lambda *_args: True
-        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}):
+        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "working", "id": "workflow_banner_working", "ok": True}), mock.patch.object(
+            hook.OwnerExitWatch, "wait", fake_wait
+        ):
+            with self.assertRaises(SystemExit):
+                hook.watch_loop("w1:p9", path)
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertIn("sess", saved["busy"])
+        self.assertNotEqual(saved["watcher"], 0)
+        owner.kill()
+
+    def test_no_owner_and_sustained_not_found_exits(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: None)
+        hits = {"n": 0}
+
+        def fake_wait(_self, _pids, _timeout):
+            hits["n"] += 1
+            if hits["n"] > 6:
+                raise AssertionError("watcher stayed up with no owner")
+            return False
+
+        with mock.patch.object(hook, "pane_text", lambda _pane: "plain shell\n"), mock.patch.object(
+            hook, "agent_lookup", lambda _pane: "gone"
+        ), mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True), mock.patch.object(
+            hook, "herdr", lambda *_args: True
+        ), mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}), mock.patch.object(
+            hook, "GONE_CONFIRM_SECS", 0
+        ), mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait):
             hook.watch_loop("w1:p9", path)
-        self.assertLess(time.time() - started, 1.5)
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
-        owner.kill()
+
+    def test_chat_pid_death_is_owner_exit_after_confirm(self):
+        state = hook.fresh_state()
+        state["owners"] = {"sess": 50}
+        state["owner_started"] = {"sess": "outer"}
+        state["chat_pid"] = 60
+        state["chat_started"] = "chat"
+
+        def snap(pid):
+            if pid == 50:
+                return {"ppid": 1, "lstart": "outer", "comm": "kiro-cli"}
+            return None
+
+        with mock.patch.object(hook, "process_snapshot", snap), mock.patch.object(hook, "chat_under", lambda _pid: None):
+            kind, hits = hook.tracked_exit(state, 0)
+            self.assertIsNone(kind)
+            kind, hits = hook.tracked_exit(state, hits)
+            self.assertIsNone(kind)
+            kind, _hits = hook.tracked_exit(state, hits)
+            self.assertEqual(kind, "chat")
 
     def test_explain_failure_under_a_banner_stays_working(self):
         directory = tempfile.mkdtemp()
@@ -908,10 +959,15 @@ class GraceTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, base, True)
         old = os.path.join(base, "herdr-kiro-rules-legacy")
         os.makedirs(old)
-        old_stamp = time.time() - 7200
+        old_stamp = time.time() - 120
         os.utime(old, (old_stamp, old_stamp))
+        numbered = os.path.join(base, "herdr-kiro-424242")
+        os.makedirs(numbered)
         dead = os.path.join(base, "herdr-kiro-rules-999999-left")
         os.makedirs(dead)
+        random_old = os.path.join(base, "herdr-kiro-rules-0ekm2u31")
+        os.makedirs(random_old)
+        os.utime(random_old, (old_stamp, old_stamp))
         previous = tempfile.tempdir
         tempfile.tempdir = None
         try:
@@ -921,6 +977,8 @@ class GraceTests(unittest.TestCase):
             tempfile.tempdir = previous
         self.assertFalse(os.path.isdir(old))
         self.assertFalse(os.path.isdir(dead))
+        self.assertFalse(os.path.isdir(numbered))
+        self.assertFalse(os.path.isdir(random_old))
 
     def test_session_end_clears_the_slot_like_stop(self):
         state = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "sess", 1.0)

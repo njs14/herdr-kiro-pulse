@@ -4,6 +4,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -167,7 +168,37 @@ exit 0
         self.install()
         completed = self.doctor()
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("unlink/uninstall does not remove files", completed.stdout)
+        self.assertIn("unlink does not delete files", completed.stdout)
+
+    def test_a_user_rules_file_is_not_a_problem(self):
+        self.write_herdr()
+        self.write_kiro()
+        rules = os.path.join(self.home, ".config", "herdr", "agent-detection")
+        os.makedirs(rules)
+        with open(os.path.join(rules, "kiro.toml"), "w", encoding="utf-8") as handle:
+            handle.write("id = \"kiro\"\n# user rules\n")
+        completed = self.doctor()
+        self.assertNotIn("uninstall.sh", completed.stdout)
+        self.assertIn("user file", completed.stdout)
+
+    def test_eperm_pidfile_is_left_alone(self):
+        import errno
+        from unittest import mock
+
+        sys.path.insert(0, os.path.join(ROOT, "prototype"))
+        import herdr_kiro_doctor as doctor
+
+        def kill(_pid, _sig):
+            raise OSError(errno.EPERM, "not permitted")
+
+        pid_dir = os.path.join(self.home, "pids")
+        os.makedirs(pid_dir)
+        stale = os.path.join(pid_dir, "42")
+        with open(stale, "w", encoding="utf-8") as handle:
+            handle.write("1\n\n")
+        with mock.patch.object(doctor.os, "kill", kill):
+            self.assertEqual(doctor.dead_pidfiles(pid_dir), [])
+        self.assertTrue(os.path.exists(stale))
 
 
 if __name__ == "__main__":

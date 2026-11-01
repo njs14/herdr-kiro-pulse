@@ -2,6 +2,7 @@
 """Report herdr, Kiro, and this hook. Exit non-zero when something is wrong."""
 from __future__ import annotations
 
+import errno
 import glob
 import hashlib
 import json
@@ -90,13 +91,16 @@ def read_lifecycle():
     try:
         lines = open(path, encoding="utf-8").read().splitlines()
     except OSError:
-        return "", ""
+        return "", "", ""
     state = lines[0].strip() if lines else ""
     via = ""
+    pending = ""
     for line in lines[1:]:
         if line.startswith("via="):
             via = line.split("=", 1)[1].strip()
-    return state, via
+        elif line.startswith("pending_unlink="):
+            pending = line.split("=", 1)[1].strip()
+    return state, via, pending
 
 
 def marker_hash(path):
@@ -166,6 +170,7 @@ def plugin_registered():
 
 
 def dead_pidfiles(directory):
+    """Pid files whose process is gone. EPERM means the process is still there."""
     found = []
     if not os.path.isdir(directory):
         return found
@@ -174,9 +179,37 @@ def dead_pidfiles(directory):
             continue
         try:
             os.kill(int(name), 0)
-        except OSError:
-            found.append(os.path.join(directory, name))
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                found.append(os.path.join(directory, name))
     return found
+
+
+def clear_pending_unlink():
+    path = lifecycle_path()
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return
+    kept = [line for line in lines if not line.startswith("pending_unlink=")]
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(kept) + ("\n" if kept else ""))
+
+
+def finish_pending_unlink(pending, state_name):
+    """Try the unlink that could not run while herdr had no server."""
+    registered = plugin_registered()
+    if not pending and not (state_name == "uninstalled" and registered):
+        return registered, False
+    if registered is True:
+        run([herdr_bin(), "plugin", "unlink", "herdr-kiro"], 5)
+        registered = plugin_registered()
+    if registered is False:
+        clear_pending_unlink()
+        return False, False
+    if registered is True:
+        return True, True
+    return None, False
 
 
 def main() -> int:
@@ -210,34 +243,43 @@ def main() -> int:
         os.environ.get("KIRO_HOOKS_DIR") or os.path.expanduser("~/.kiro/hooks"),
         "herdr-kiro.json",
     )
-    state_name, via = read_lifecycle()
-    print("lifecycle: %s via=%s" % (state_name or "absent", via or "absent"))
-    ours = []
+    state_name, via, pending = read_lifecycle()
+    print("lifecycle: %s via=%s pending_unlink=%s" % (state_name or "absent", via or "absent", pending or "no"))
+    owned_paths = []
     for path in (hook, config):
-        if os.path.isfile(path):
-            ours.append(path)
-            digest = marker_hash(path + ".herdr-kiro-owned")
-            if digest is None:
-                print("owned marker: missing for %s" % path)
-            elif digest == "":
-                problems.append("%s has an owned marker with no content hash" % path)
-                print("hand edit: %s marker has no hash" % path)
-            elif file_digest(path) != digest:
-                problems.append("%s was hand edited" % path)
-                print("hand edit: %s hash does not match the marker" % path)
-            else:
-                print("hand edit: %s matches the marker" % path)
-        else:
+        if not os.path.isfile(path):
             print("file: %s absent" % path)
-    if state_name == "uninstalled" and ours:
-        problems.append("lifecycle is uninstalled but files remain: %s" % ", ".join(ours))
+            continue
+        digest = marker_hash(path + ".herdr-kiro-owned")
+        if digest is None:
+            print("info: %s is a user file, not removed by this hook" % path)
+        elif digest == "":
+            print("info: %s has an owned marker with no content hash" % path)
+            if state_name == "installed":
+                problems.append("%s has an owned marker with no content hash" % path)
+        elif file_digest(path) != digest:
+            problems.append("%s was hand edited" % path)
+            print("hand edit: %s hash does not match the marker" % path)
+        else:
+            owned_paths.append(path)
+            print("hand edit: %s matches the marker" % path)
+    if state_name == "uninstalled" and owned_paths:
+        problems.append("lifecycle is uninstalled but our files remain: %s" % ", ".join(owned_paths))
     registered = plugin_registered() if herdr_code == 0 else None
-    if state_name == "installed" and via == "plugin" and registered is False and ours:
+    still_registered, unlink_failed = finish_pending_unlink(pending, state_name)
+    if unlink_failed:
         problems.append(
-            "herdr plugin unlink/uninstall does not remove files. Still present: %s. Run ./uninstall.sh"
-            % ", ".join(ours)
+            "herdr-kiro is still registered. Unlink could not finish while no server was running. "
+            "doctor retries it. herdr plugin unlink herdr-kiro removes the registration, not your files."
         )
-    if os.path.isfile(config):
+    elif still_registered is False and (pending or state_name == "uninstalled"):
+        registered = False
+    if state_name == "installed" and via == "plugin" and registered is False and owned_paths:
+        problems.append(
+            "herdr plugin unlink does not delete files. Our files are still present: %s. Run ./uninstall.sh"
+            % ", ".join(owned_paths)
+        )
+    if os.path.isfile(config) and config in owned_paths:
         body = open(config, encoding="utf-8").read()
         print("rule file: %s" % config)
         if "workflow_requires_approval" not in body:

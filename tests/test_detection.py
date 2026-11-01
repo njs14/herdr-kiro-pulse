@@ -137,6 +137,23 @@ class DetectionTests(unittest.TestCase):
         )
         self.assertEqual((state, rule), ("blocked", "workflow_requires_approval"))
 
+    def test_workspace_trust_prose_does_not_block(self):
+        state, rule = self.explain(
+            "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "The dialog says Trust, continue or Don't trust, exit.\n"
+            "› ask a question or describe a task\n"
+        )
+        self.assertNotEqual(rule, "workspace_trust")
+        self.assertEqual(state, "working")
+
+    def test_bordered_prose_about_allow_once_does_not_block(self):
+        state, rule = self.explain(
+            "│ The notes say this step requires approval and Allow once is the default.\n"
+            "│ Deny once would stop the write.\n"
+            "› ask a question or describe a task\n"
+        )
+        self.assertNotEqual(rule, "workflow_requires_approval")
+
     def test_requires_approval_prose_does_not_block(self):
         state, rule = self.explain(
             "The step requires approval and the notes say Allow once is the default.\n"

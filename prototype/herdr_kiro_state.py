@@ -29,7 +29,7 @@ import sys
 import tempfile
 import time
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -130,6 +130,8 @@ def fresh_state() -> dict:
         "generation": 0,
         "retiring": False,
         "owners_died": False,
+        "chat_pid": 0,
+        "chat_started": "",
     }
 
 
@@ -203,6 +205,8 @@ def normalize(state: dict, now: float) -> dict:
         "generation": int(state.get("generation") or 0),
         "retiring": bool(state.get("retiring")),
         "owners_died": owners_died,
+        "chat_pid": int(state.get("chat_pid") or 0),
+        "chat_started": state.get("chat_started") or "",
     }
 
 
@@ -232,9 +236,21 @@ def finish_if_idle(state: dict, now: float) -> None:
     state["grace_started"] = now
 
 
-def apply_event(state: dict, event: str, session: str, now: float, owner: int = 0, owner_started: str = "") -> dict:
+def apply_event(
+    state: dict,
+    event: str,
+    session: str,
+    now: float,
+    owner: int = 0,
+    owner_started: str = "",
+    chat_pid: int = 0,
+    chat_started: str = "",
+) -> dict:
     """Fold one hook event into pane state. Pure aside from the clock passed in."""
     nxt = normalize(state, now)
+    if chat_pid:
+        nxt["chat_pid"] = int(chat_pid)
+        nxt["chat_started"] = chat_started or ""
     if session == AGGREGATE:
         count = int(nxt.get("aggregate") or 0)
         if event == "SessionStart":
@@ -491,9 +507,13 @@ def temp_roots():
 def sweep_stale_rules() -> None:
     """Remove rule dirs left behind, including ones from older builds."""
     for root in temp_roots():
-        for path in glob.glob(os.path.join(root, "herdr-kiro-rules*")):
+        paths = glob.glob(os.path.join(root, "herdr-kiro-rules*"))
+        paths.extend(glob.glob(os.path.join(root, "herdr-kiro-*")))
+        for path in paths:
             name = os.path.basename(path)
-            matched = re.match(r"herdr-kiro-rules-(\d+)", name)
+            matched = re.match(r"herdr-kiro-rules-(\d+)-", name) or re.fullmatch(
+                r"herdr-kiro-(\d+)", name
+            )
             if matched:
                 pid = int(matched.group(1))
                 if pid == os.getpid():
@@ -507,7 +527,7 @@ def sweep_stale_rules() -> None:
                 age = time.time() - os.path.getmtime(path)
             except OSError:
                 continue
-            if age > 3600:
+            if age > 60:
                 shutil.rmtree(path, True)
 
 
@@ -523,7 +543,9 @@ def sweep_stale_pidfiles() -> None:
         pid = int(name)
         try:
             os.kill(pid, 0)
-        except OSError:
+        except OSError as exc:
+            if exc.errno != errno.ESRCH:
+                continue
             try:
                 os.remove(path)
             except OSError:
@@ -723,6 +745,48 @@ def release_if_current(state: dict, generation: int, keys) -> bool:
     return True
 
 
+def tracked_exit(state: dict, chat_hits: int):
+    """How a tracked Kiro process ended.
+
+    'outer' when the recorded kiro-cli pid is gone. 'chat' when the recorded
+    kiro-cli-chat pid is gone and no replacement is under a living outer, for
+    several ticks. A live pid is not an exit, including when its parent is init.
+    """
+    owners = state.get("owners") or {}
+    started = state.get("owner_started") or {}
+    outer_alive = False
+    saw_outer = False
+    for key, owner in owners.items():
+        try:
+            pid = int(owner)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 1:
+            continue
+        saw_outer = True
+        if alive(pid, started.get(key) or ""):
+            outer_alive = True
+    if saw_outer and not outer_alive:
+        return "outer", 0
+    chat = int(state.get("chat_pid") or 0)
+    if not chat:
+        return None, 0
+    if alive(chat, state.get("chat_started") or ""):
+        return None, 0
+    if outer_alive:
+        for key, owner in owners.items():
+            try:
+                pid = int(owner)
+            except (TypeError, ValueError):
+                continue
+            if alive(pid, started.get(key) or "") and chat_under(pid):
+                return None, 0
+    hits = chat_hits + 1
+    if hits >= GONE_CONFIRM_HITS:
+        return "chat", hits
+    return None, hits
+
+
 def should_stop_for_dead_owner(state: dict, pane_kiro: bool) -> bool:
     """True after normalize recorded that every owned kiro process is gone."""
     return bool(state.get("owners_died")) and not pane_kiro
@@ -821,19 +885,8 @@ def process_snapshot(pid: int) -> dict:
     return table.get(int(pid))
 
 
-def snap_is_reparented_kiro(snap) -> bool:
-    """A kiro process whose parent is init was left behind by the outer CLI."""
-    if not snap or snap.get("error"):
-        return False
-    if "kiro" not in command_name(snap.get("comm") or ""):
-        return False
-    try:
-        return int(snap.get("ppid") or 0) <= 1
-    except (TypeError, ValueError):
-        return False
-
-
 def owner_is_dead(owner, started: str) -> bool:
+    """True when this pid is gone. A live process is never dead because of its parent."""
     if not owner:
         return False
     try:
@@ -845,17 +898,9 @@ def owner_is_dead(owner, started: str) -> bool:
         return True
     if snap.get("error"):
         return False
-    if snap_is_reparented_kiro(snap):
-        return True
     if started and snap.get("lstart") != started:
         return True
     return False
-
-
-def exit_armed(text: str) -> bool:
-    """Kiro's second Ctrl-C prompt. The process is leaving."""
-    lowered = (text or "").lower()
-    return "ctrl+c" in lowered and "again to exit" in lowered
 
 
 def alive(pid: int, started: str = "") -> bool:
@@ -959,6 +1004,14 @@ def kiro_ancestor() -> tuple:
     The walk meets kiro-cli-chat first. That child stays alive after SIGTERM to
     the outer kiro-cli, so the owner has to be the outermost kiro-cli.
     """
+    outer_pid, outer_started, _chat_pid, _chat_started = kiro_lineage()
+    if outer_pid:
+        return outer_pid, outer_started
+    return _chat_pid, _chat_started
+
+
+def kiro_lineage() -> tuple:
+    """Outer kiro-cli and the kiro-cli-chat under it. Hook shells are not owners."""
     pid = os.getppid()
     seen = set()
     outer = (0, "")
@@ -971,12 +1024,34 @@ def kiro_ancestor() -> tuple:
         name = command_name(snap.get("comm") or "")
         if name == "kiro-cli":
             outer = (pid, snap.get("lstart") or "")
-        elif "kiro" in name and chat == (0, ""):
+        elif name == "kiro-cli-chat" and chat == (0, ""):
             chat = (pid, snap.get("lstart") or "")
         pid = int(snap.get("ppid") or 0)
-    if outer[0]:
-        return outer
-    return chat
+    return outer[0], outer[1], chat[0], chat[1]
+
+
+def chat_under(outer_pid: int):
+    """A kiro-cli-chat whose parent chain reaches this outer kiro-cli."""
+    if not outer_pid:
+        return None
+    table = process_table()
+    if table == "error":
+        return None
+    for pid, row in table.items():
+        if command_name(row.get("comm") or "") != "kiro-cli-chat":
+            continue
+        cursor = pid
+        seen = set()
+        while cursor > 1 and cursor not in seen:
+            seen.add(cursor)
+            if cursor == int(outer_pid):
+                return pid
+            parent = table.get(cursor, {}).get("ppid") or 0
+            try:
+                cursor = int(parent)
+            except (TypeError, ValueError):
+                break
+    return None
 
 
 def process_chain() -> str:
@@ -1255,9 +1330,12 @@ def _watch_loop(pane: str, path: str) -> None:
     # SessionEnd drops the owner from the state file before the process exits.
     # Keep the last pid so that exit still wakes the watcher.
     known_owners = []
+    chat_hits = 0
+    gone_since = None
+    gone_hits = 0
     try:
         while True:
-            exited = owner_watch.wait(known_owners, TICK_SECS)
+            owner_watch.wait(known_owners, TICK_SECS)
             begin_tick()
             looked = agent_lookup(pane)
             state = update(path, lambda _state: None)
@@ -1268,35 +1346,42 @@ def _watch_loop(pane: str, path: str) -> None:
                     current_owners.append(int(owner))
                 except (TypeError, ValueError):
                     continue
+            chat_pid = int(state.get("chat_pid") or 0)
+            if chat_pid:
+                current_owners.append(chat_pid)
             if current_owners:
                 known_owners = current_owners
+            kind, chat_hits = tracked_exit(state, chat_hits)
             owner_alive = False
-            for owner in known_owners:
+            for owner in (state.get("owners") or {}).values():
                 try:
-                    os.kill(owner, 0)
-                except OSError:
+                    pid = int(owner)
+                except (TypeError, ValueError):
                     continue
-                if snap_is_reparented_kiro(process_snapshot(owner)):
-                    continue
+                if alive(pid, ""):
+                    owner_alive = True
+                    break
+            if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
                 owner_alive = True
-                break
-            if known_owners and not owner_alive:
-                exited = True
-            elif owner_alive:
-                exited = False
-            pane_kiro = kiro_in_pane(known_owners)
-            owner_dead = exited or should_stop_for_dead_owner(state, pane_kiro)
-            if owner_dead or (looked == "gone" and not owner_alive and known_owners):
-                reason = "owner exit" if exited or owner_dead else "agent gone"
-                if finish_if_unchanged(pane, path, state, reason):
+            pane_kiro = kiro_in_pane([pid for pid in known_owners])
+            owner_dead = kind is not None or should_stop_for_dead_owner(state, pane_kiro)
+            if not known_owners and looked == "gone":
+                if gone_since is None:
+                    gone_since = now
+                gone_hits += 1
+                if gone_confirmed(gone_since, now, gone_hits, False):
+                    if finish_if_unchanged(pane, path, state, "agent gone"):
+                        return
+            else:
+                gone_since = None
+                gone_hits = 0
+            if owner_dead:
+                if finish_if_unchanged(pane, path, state, "owner exit"):
                     return
-                if known_owners and not owner_alive:
+                if kind is not None and not owner_alive:
                     log("watcher exit slot held")
                     return
             screen = pane_text(pane)
-            if exit_armed(screen):
-                if finish_if_unchanged(pane, path, state, "owner exit"):
-                    return
             view = screen_view(screen)
             if not view.get("ok"):
                 blocked = approval_text(screen) or held == "blocked"
@@ -1415,11 +1500,13 @@ def main() -> int:
     if event not in BUSY_EVENTS and event not in END_EVENTS:
         return 0
     begin_tick()
-    owner, owner_started = kiro_ancestor()
+    owner, owner_started, chat_pid, chat_started = kiro_lineage()
     log(f"event={event} session={session} pane={pane} chain={process_chain()}")
 
     def fold(state: dict) -> None:
-        revised = apply_event(state, event, session, now, owner, owner_started)
+        revised = apply_event(
+            state, event, session, now, owner, owner_started, chat_pid, chat_started
+        )
         state.clear()
         state.update(revised)
 

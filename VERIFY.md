@@ -115,3 +115,9 @@ The workspace-trust dialog on `/tmp/kiro-trust-probe` was blocked on 6 of 6 stat
 | watch-tool | 25 | 0 | 0.281s | no |
 
 The macOS `kqueue` path was unit-tested with a fake `select.kqueue`. It was not executed against a macOS kernel.
+
+## v10 on this VM
+
+Python 3.12 and 3.9 with herdr installed: 97 tests, 0 failures. Without herdr: 97 ran, 21 skipped, 0 failures, on both interpreters. The round-trip tests ignore `~/.config/herdr/.plugins.lock` because that file is herdr's lock.
+
+One Ctrl-C during a live turn left watcher pid 403344 running, both `kiro-cli` and `kiro-cli-chat` alive, and no `owner exit` line. `herdr agent get` stayed `working` from that watcher. A later Ctrl-C sequence that actually exited `kiro-cli` logged `watcher exit owner exit` 0.067 seconds after the last press. SIGKILL of `kiro-cli-chat` logged `watcher exit owner exit` 0.459 seconds later. `sleep 45` was `working` on 50 of 51 samples. The last sample was idle after the command finished. The subagent widget was blocked on 4 of 4 polls. The workflow-monitor `fs_write` chooser was blocked on 5 of 5 polls. `TMPDIR=/tmp/v10-custom-tmpdir` received the explain rules directory, and cleanup removed it. doctor with `pending_unlink` unregistered `herdr-kiro` while a server was up.

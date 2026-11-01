@@ -34,6 +34,14 @@ jobs:
           esac
           curl -fsSL -o "$RUNNER_TEMP/herdr" \
             "https://github.com/herdrdev/herdr/releases/download/v0.9.5/${prefix}-${suffix}"
+          case "${prefix}-${suffix}" in
+            herdr-linux-x86_64) want=14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d ;;
+            herdr-linux-aarch64) want=17d7536f2da50859523680ef279dffcac8e4a235f4e46fe8da6c2ec44141897c ;;
+            herdr-macos-aarch64) want=fb77c2232a05a8035421382c894392f4174e4e38a18e48af3dd0290157c3a7e2 ;;
+            herdr-macos-x86_64) want=5fb0a908ec7f6745e3e245738b06bfad56c46391c391ab3c0955fbead01f1369 ;;
+          esac
+          got=$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$RUNNER_TEMP/herdr")
+          test "$got" = "$want"
           chmod +x "$RUNNER_TEMP/herdr"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: unit tests

@@ -73,23 +73,30 @@ def remove_ours(dest):
         owned = "workflow_banner_working" in body or "herdr-kiro-SessionStart" in body
         owned_hash = "" if owned else None
     if not owned:
+        print("Left %s unchanged" % dest)
         return
+    removed = False
     if os.path.isfile(dest):
         changed = bool(owned_hash) and file_digest(dest) != owned_hash
         if changed:
-            stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             backup = dest + ".user-modified." + stamp
             index = 0
             while os.path.exists(backup):
                 index += 1
                 backup = dest + ".user-modified." + stamp + "." + str(index)
             os.replace(dest, backup)
+            print("Left %s as %s" % (dest, backup))
         else:
             os.remove(dest)
+            removed = True
     if os.path.isfile(marker):
         os.remove(marker)
     if os.path.isfile(original) and not os.path.exists(dest):
         os.replace(original, dest)
+        print("Restored %s" % dest)
+    elif removed:
+        print("Removed %s" % dest)
 
 
 def process_start(pid):
@@ -199,14 +206,25 @@ reload_one() {
   rm -f "$err"
   return 1
 }
+pending=0
 if command -v "$HERDR" >/dev/null 2>&1; then
-  if "$HERDR" plugin list 2>/dev/null | grep -q herdr-kiro; then
-    "$HERDR" plugin unlink herdr-kiro || true
+  list_out=$("$HERDR" plugin list 2>&1) || true
+  if printf '%s\n' "$list_out" | grep -q herdr-kiro; then
+    "$HERDR" plugin unlink herdr-kiro >/dev/null 2>&1 || true
+    list_out=$("$HERDR" plugin list 2>&1) || true
   fi
+  if printf '%s\n' "$list_out" | grep -q herdr-kiro || printf '%s\n' "$list_out" | grep -q server_not_running; then
+    pending=1
+  fi
+fi
+LIFE="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-kiro/lifecycle"
+if [ "$pending" = 1 ] && [ -f "$LIFE" ]; then
+  printf 'pending_unlink=herdr-kiro\n' >> "$LIFE"
+fi
+if command -v "$HERDR" >/dev/null 2>&1; then
   if [ -n "${HERDR_SESSION:-}" ]; then
     reload_one session --session "$HERDR_SESSION" server reload-agent-manifests || exit $?
   else
     reload_one default server reload-agent-manifests || exit $?
   fi
 fi
-echo "Removed $DEST/herdr-kiro.json"
