@@ -1,0 +1,11 @@
+Before the fix. herdr 0.9.5, Kiro CLI 2.37.0, engine v3 via `kiro-cli chat --v3` and `chat.agentEngine=v3`.
+
+Last Stop hook: 1793495078.163
+First herdr poll with agent_status idle: 1793495078.343
+Gap: 0.180s
+Settle sleep elapsed: 3.000s
+Settle idle report: 1793495081.187
+
+The idle prompt replaced the "Kiro is working" footer in the same poll as the status change. The hook had not reported idle yet.
+
+A later probe, with the hook file removed, reported working with --seq 20. That held on a static idle prompt. A short turn then returned the pane to idle and bumped state_change_seq. A follow-up report with --seq 1 was ignored. --seq 21 was accepted. The sequence was not reset when the status dropped.
