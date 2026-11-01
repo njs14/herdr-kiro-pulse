@@ -1,0 +1,26 @@
+{
+  "name": "parallel-steps",
+  "description": "Two shell steps that overlap.",
+  "effortLevel": "low",
+  "steps": [
+    {
+      "type": "parallel",
+      "id": "both",
+      "joinPolicy": "allSettled",
+      "branches": [
+        {
+          "type": "step",
+          "id": "alpha",
+          "agent": "wf-coder",
+          "prompt": "Run exactly this shell command and no other tools except send_message: sleep 6 && printf 'alpha\\n' > alpha.txt. Do not commit, push, search, or read the repository. Then call send_message with severity success and the single word done."
+        },
+        {
+          "type": "step",
+          "id": "beta",
+          "agent": "wf-coder",
+          "prompt": "Run exactly this shell command and no other tools except send_message: sleep 6 && printf 'beta\\n' > beta.txt. Do not commit, push, search, or read the repository. Then call send_message with severity success and the single word done."
+        }
+      ]
+    }
+  ]
+}

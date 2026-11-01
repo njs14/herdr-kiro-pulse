@@ -1,0 +1,13 @@
+{
+  "name": "solo",
+  "description": "One short step, started from a normal prompt.",
+  "effortLevel": "low",
+  "steps": [
+    {
+      "type": "step",
+      "id": "only",
+      "agent": "wf-coder",
+      "prompt": "Run exactly this shell command and no other tools except send_message: sleep 4 && printf 'solo\\n' > solo.txt. Do not commit, push, search, or read the repository. Then call send_message with severity success and the single word done."
+    }
+  ]
+}

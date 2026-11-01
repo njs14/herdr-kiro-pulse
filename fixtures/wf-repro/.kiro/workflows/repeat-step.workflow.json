@@ -1,0 +1,21 @@
+{
+  "name": "repeat-step",
+  "description": "The same short step twice.",
+  "effortLevel": "low",
+  "steps": [
+    {
+      "type": "repeat",
+      "id": "loop",
+      "maxIterations": 2,
+      "onMaxIterations": "continue",
+      "steps": [
+        {
+          "type": "step",
+          "id": "tick",
+          "agent": "wf-coder",
+          "prompt": "Append the line tick to ticks.txt with the shell, using printf. Do not commit, push, search, or read other files. Then call send_message with severity success and the single word done."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "two-step",
+  "description": "Two short shell steps used to measure herdr working state.",
+  "effortLevel": "low",
+  "steps": [
+    {
+      "type": "step",
+      "id": "one",
+      "agent": "wf-coder",
+      "prompt": "Run exactly this shell command and no other tools except send_message: sleep 5 && printf 'step-one\\n' > one.txt. Do not commit, push, search, or read the repository. After the file exists, call send_message with severity success and the single word done."
+    },
+    {
+      "type": "step",
+      "id": "two",
+      "agent": "wf-coder",
+      "prompt": "Run exactly this shell command and no other tools except send_message: sleep 5 && printf 'step-two\\n' > two.txt. Do not commit, push, search, or read the repository. After the file exists, call send_message with severity success and the single word done."
+    }
+  ]
+}

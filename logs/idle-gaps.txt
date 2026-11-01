@@ -1,0 +1,5 @@
+sequential: banner_samples=67 non_working_during_banner=1 first_idle_after_anchor=3.420s sustained_idle=4.636s working_ratio=0.985
+parallel: banner_samples=37 non_working_during_banner=0 first_idle_after_anchor=3.068s sustained_idle=4.286s working_ratio=1.0
+repeat: banner_samples=27 non_working_during_banner=1 first_idle_after_anchor=3.120s sustained_idle=4.338s working_ratio=0.963
+watch: banner_samples=24 non_working_during_banner=1 first_idle_after_anchor=3.232s sustained_idle=4.450s working_ratio=0.958
+auto: banner_samples=30 non_working_during_banner=0 first_idle_after_anchor=3.109s sustained_idle=4.327s working_ratio=1.0

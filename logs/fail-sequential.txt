@@ -1,0 +1,30 @@
+sequential: working for 0.00 of banner samples
+
+1 01:26:13.981321683 +0000 one.txt
+    -rw-r--r-- 1 ubuntu ubuntu 9 2026-11-01 01:26:27.293221983 +0000 two.txt
+    step-one
+    step-two
+
+• Thought for 1s...
+    ╰ There was an earlier run at 01:20, and now this is a second one—I don't recall triggering it myself in this
+      conversation, which is worth flagging.
+• A second "two-step" run (wf_3c12304a213a43fa) finished, and both steps worked again:
+
+  - Step one: one.txt contains step-one.
+  - Step two: two.txt contains step-two.
+
+  Both files were rewritten at 01:26, one about 13s after the other, so this run did write them, after the first run's
+  files from 01:20. The step agents said nothing was committed.
+
+  I didn't start this run anywhere in our conversation, so it was likely launched from outside this chat. Since it ran
+  the same recipe, it simply wrote the same contents over the earlier files.
+
+▸ Credits: turn 0.20 • session 1.86 | Time: 6s
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Trust All Tools active, confirmations are off · /quit to exit
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · auto · ◔ 4%                                                             /workspace/fixtures/wf-repro · (main)
+
+›  ask a question or describe a task ↵
+                                                                              /sessions to resume · /copy to clipboard

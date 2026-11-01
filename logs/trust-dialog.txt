@@ -1,0 +1,14 @@
+Captured from the parent pane on a fresh `kiro-cli chat --v3 --trust-all-tools --trust-workspace` before accepting.
+
+Warning: Kiro is running in trust all tools mode
+
+In this mode, Kiro will execute all tool calls, including shell commands, file operations, and MCP tools, without asking for your approval.
+
+❯ No, exit
+  Yes, I accept
+  Yes, and don't ask again
+
+esc to cancel · ↑↓ to navigate · ↵ to select
+
+herdr agent get at that moment reported agent_status idle, not blocked.
+agent explain matched no approval rule. The Kiro manifest's approval rules look for allow, deny, and "requires approval", and this dialog does not use those words.

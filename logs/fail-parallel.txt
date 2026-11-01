@@ -1,0 +1,29 @@
+parallel: working for 0.00 of banner samples
+
+d timestamps, run_in_background=false
+    -rw-r--r-- 1 ubuntu ubuntu 6 2026-11-01 01:26:49.049059053 +0000 alpha.txt
+    -rw-r--r-- 1 ubuntu ubuntu 5 2026-11-01 01:26:47.409071336 +0000 beta.txt
+    alpha
+    beta
+
+• A second "parallel-steps" run (wf_63bf1d76ff925037) finished, and both steps worked:
+
+  - Step alpha: alpha.txt contains alpha, last written at 01:26:49.
+  - Step beta: beta.txt contains beta, last written at 01:26:47.
+
+  The two writes are 1.6s apart, so the steps ran side by side rather than one after the other. Even with its sleep 6,
+  beta wrote its file first, which is why its notification came before alpha's. Neither step agent checked its own
+  file, so I read both. Both agents said they committed nothing.
+
+  Like the earlier two-step rerun, I didn't start this run in our conversation, so it was likely launched from outside
+  this chat.
+
+▸ Credits: turn 0.21 • session 2.07 | Time: 7s
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Trust All Tools active, confirmations are off · /quit to exit
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Default · auto · ◔ 4%                                                             /workspace/fixtures/wf-repro · (main)
+
+›  ask a question or describe a task ↵
+                                                                              /sessions to resume · /copy to clipboard

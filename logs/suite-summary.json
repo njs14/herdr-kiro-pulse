@@ -1,0 +1,42 @@
+{
+  "sequential": {
+    "banner_samples": 67,
+    "working_ratio": 0.985,
+    "idle_gap_s": 4.636,
+    "anchor": 1793496534.167,
+    "log": "/workspace/logs/poll-sequential.jsonl",
+    "stops": 6
+  },
+  "parallel": {
+    "banner_samples": 37,
+    "working_ratio": 1.0,
+    "idle_gap_s": 4.286,
+    "anchor": 1793496561.258,
+    "log": "/workspace/logs/poll-parallel.jsonl",
+    "stops": 6
+  },
+  "repeat": {
+    "banner_samples": 27,
+    "working_ratio": 0.963,
+    "idle_gap_s": 4.338,
+    "anchor": 1793496582.993,
+    "log": "/workspace/logs/poll-repeat.jsonl",
+    "stops": 6
+  },
+  "watch": {
+    "banner_samples": 24,
+    "working_ratio": 0.958,
+    "idle_gap_s": 4.45,
+    "anchor": 1793496601.128,
+    "log": "/workspace/logs/poll-watch.jsonl",
+    "stops": 2
+  },
+  "auto": {
+    "banner_samples": 30,
+    "working_ratio": 1.0,
+    "idle_gap_s": 4.327,
+    "anchor": 1793496626.795,
+    "log": "/workspace/logs/poll-auto.jsonl",
+    "stops": 6
+  }
+}

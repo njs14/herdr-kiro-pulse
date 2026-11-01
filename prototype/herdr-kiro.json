@@ -1,0 +1,41 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "herdr-kiro-UserPromptSubmit",
+      "trigger": "UserPromptSubmit",
+      "timeout": 10,
+      "action": {
+        "type": "command",
+        "command": "/workspace/prototype/herdr_kiro_state.py UserPromptSubmit"
+      }
+    },
+    {
+      "name": "herdr-kiro-PreToolUse",
+      "trigger": "PreToolUse",
+      "timeout": 10,
+      "action": {
+        "type": "command",
+        "command": "/workspace/prototype/herdr_kiro_state.py PreToolUse"
+      }
+    },
+    {
+      "name": "herdr-kiro-PostToolUse",
+      "trigger": "PostToolUse",
+      "timeout": 10,
+      "action": {
+        "type": "command",
+        "command": "/workspace/prototype/herdr_kiro_state.py PostToolUse"
+      }
+    },
+    {
+      "name": "herdr-kiro-Stop",
+      "trigger": "Stop",
+      "timeout": 10,
+      "action": {
+        "type": "command",
+        "command": "/workspace/prototype/herdr_kiro_state.py Stop"
+      }
+    }
+  ]
+}

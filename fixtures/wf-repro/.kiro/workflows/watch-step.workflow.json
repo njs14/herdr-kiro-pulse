@@ -1,0 +1,17 @@
+{
+  "name": "watch-step",
+  "description": "A command watch with no model step.",
+  "steps": [
+    {
+      "type": "watch",
+      "id": "wait",
+      "handler": "command",
+      "idleTimeoutSec": 90,
+      "config": {
+        "command": "python3 /workspace/fixtures/wf-repro/watch_poll.py",
+        "pollIntervalSec": 10,
+        "commandTimeoutSec": 5
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+fixtures/wf-repro/*.txt
+agent-tools/
+uploads/
