@@ -2,6 +2,15 @@
   "version": "v1",
   "hooks": [
     {
+      "name": "herdr-kiro-SessionStart",
+      "trigger": "SessionStart",
+      "timeout": 10,
+      "action": {
+        "type": "command",
+        "command": "/workspace/prototype/herdr_kiro_state.py SessionStart"
+      }
+    },
+    {
       "name": "herdr-kiro-UserPromptSubmit",
       "trigger": "UserPromptSubmit",
       "timeout": 10,
