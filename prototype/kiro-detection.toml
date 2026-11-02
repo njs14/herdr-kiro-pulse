@@ -148,10 +148,13 @@ priority = 1440
 region = "bottom_non_empty_lines(48)"
 visible_blocker = true
 # The title and the two option rows stay intact when the revoke hint or the
-# footer wraps. The selected row carries the dialog marker. A workflow banner
-# as the last line of the region is not this dialog.
-regex = ['''(?is)trust this workspace\?.*?\n[ \t]*[>❯][ \t]*trust, continue[ \t]*\n(?:[ \t]*\n){0,3}[ \t]*don't trust, exit[ \t]*(?:\n|$)''']
-not = [{ regex = ['(?is)▶[ \t]+\S+[ \t]+running\b[^\n]*\s*\z'] }]
+# footer wraps. The selected row is a short indent and ❯, not a ">" quote or
+# a 4-space indent. At most 20 lines sit between the title and that row, and
+# the rows end the screen (border, footer, and a wrapped revoke line). A
+# workflow banner does not, including when the status bar and the prompt sit
+# below it. In Kiro V3 those two lines are always under the banner.
+regex = ['''(?i)(?:^|\n)[ \t]*trust this workspace\?[ \t]*(?:\n[^\n]*){0,20}\n[ \t]{0,2}❯[ \t]+trust, continue[ \t]*\n(?:[ \t]*\n){0,3}[ \t]{0,3}don't trust, exit[ \t]*(?:\n[^\n]*){0,14}\s*\z''']
+not = [{ regex = ['''(?i)(?:^|\n)[ \t]*▶[ \t]+\S+[ \t]+running\b[^\n]*\bctrl\+x\b[^\n]*(?:\n[^\n]*){0,16}\s*\z'''] }]
 
 [[rules]]
 id = "workflow_trust_all"

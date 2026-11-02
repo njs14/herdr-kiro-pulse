@@ -306,6 +306,67 @@ class DetectionTests(unittest.TestCase):
         self.assertNotEqual(rule, "workspace_trust")
         self.assertEqual(state, "working")
 
+    def test_quoted_trust_prose_during_a_running_workflow_stays_working(self):
+        # Kiro V3 keeps the status bar and the prompt under the banner.
+        # The quoted rows use the dialog marker, with a gap after the title,
+        # and the prompt is the end of the screen.
+        gap = "\n".join(
+            "The notes quote the trust dialog, line %s." % index for index in range(6)
+        )
+        screen = (
+            "Trust this workspace?\n"
+            + gap
+            + "\n"
+            " ❯ Trust, continue\n"
+            "   Don't trust, exit\n"
+            "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
+            "Default · auto · ◔ 3% · /workspace/fixtures/wf-repro · (main)\n"
+            "\n"
+            "›  ask a question or describe a task ↵\n"
+        )
+        state, rule = self.explain(screen)
+        self.assertNotEqual(rule, "workspace_trust")
+        self.assertEqual(state, "working")
+
+    def test_trust_rows_that_do_not_end_the_screen_do_not_match(self):
+        filler = "\n".join("later log %s" % index for index in range(20))
+        screen = (
+            "Trust this workspace?\n"
+            " ❯ Trust, continue\n"
+            "   Don't trust, exit\n"
+            + filler
+            + "\n› ask a question or describe a task\n"
+        )
+        state, rule = self.explain(screen)
+        self.assertNotEqual(rule, "workspace_trust")
+        self.assertEqual(state, "idle")
+
+    def test_trust_gap_over_the_cap_does_not_match(self):
+        gap = "\n".join("quoted line %s" % index for index in range(30))
+        screen = (
+            "Trust this workspace?\n"
+            + gap
+            + "\n ❯ Trust, continue\n"
+            "   Don't trust, exit\n"
+        )
+        _state, rule = self.explain(screen)
+        self.assertNotEqual(rule, "workspace_trust")
+
+    def test_indented_and_quoted_trust_rows_do_not_match(self):
+        indented = (
+            "    Trust this workspace?\n"
+            "    ❯ Trust, continue\n"
+            "    Don't trust, exit\n"
+        )
+        quoted = (
+            "Trust this workspace?\n"
+            "> Trust, continue\n"
+            "Don't trust, exit\n"
+        )
+        for screen in (indented, quoted):
+            _state, rule = self.explain(screen)
+            self.assertNotEqual(rule, "workspace_trust")
+
     def test_workspace_trust_rows_without_a_marker_do_not_match(self):
         screen = (
             "Trust this workspace?\n"

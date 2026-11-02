@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.0
+
+Quoted trust-dialog prose stays working while a workflow is running. The workspace-trust rule no longer treats a banner as absent just because the status bar and the prompt sit below it. The title and the option rows are at most 20 lines apart, the rows end the screen, and a `>` quote or a 4-space indent is not the selection marker. The real dialog still matches when the footer or the revoke line wraps.
+
 ## 0.12.0
 
 The workspace-trust rule matches the dialog title and the two option rows when the revoke hint or the footer wraps. A workflow banner as the last line is not that dialog. The approval chooser and the subagent widget still match when a phrase wraps at a narrow width. A watcher whose slot is held by a dead pid exits on that check. Uninstall records `pending_unlink` when `plugin list` exits non-zero or the herdr socket is missing, not only when the error text is `server_not_running`. Legacy cleanup looks in both `$TMPDIR` and `/tmp`. Rules directories use the same uid and marker proof as the sweep.

@@ -38,7 +38,7 @@ Herdr 0.9.5 does not merge a local `agent-detection/kiro.toml` with the remote m
 
 `workflow_requires_approval` matches when the bottom of the screen contains `requires approval` and both `Allow once` and `Deny once` are rows. A newline inside `requires` still matches, which is what a 54-column wrap does to that row. A leading box border, text before a `│` column, and a trailing scrollbar glyph are part of the row. A sentence that mentions the words does not match. A chooser sitting about 60 lines above the prompt does not match, because the region is the bottom 24 non-empty lines.
 
-`workspace_trust` matches `Trust this workspace?`, then a selected `Trust, continue` row and a `Don't trust, exit` row. Wrapped revoke and footer lines can sit between and after those rows. A workflow banner as the last line suppresses the rule. Two quoted option lines under a banner do not match.
+`workspace_trust` matches `Trust this workspace?`, then a selected `Trust, continue` row and a `Don't trust, exit` row. At most 20 lines sit between the title and the selected row. The selected row is a short indent and `❯`. A `>` quote or a 4-space indent does not match. Wrapped revoke and footer lines can sit after the rows, and the rows end the screen. A workflow banner suppresses the rule when it is the last line, and also when the status bar and the prompt sit below it. Quoted option lines under a banner do not match.
 
 `crew_approval` still requires the subagent phrases. `configure individually (agent monitor)` may split across a newline in a 40-column pane.
 

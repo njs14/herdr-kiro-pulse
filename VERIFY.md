@@ -150,3 +150,7 @@ One Ctrl-C during `sleep 90` left `kiro-cli` and `kiro-cli-chat` alive. The watc
 | watch-tool | 25 | 0 | 0.468s | no |
 
 The sequential miss is one idle sample at t=1793564930.593 while the banner was already on screen. The next poll, 0.5 seconds later, was working. The hook did not log `owner exit`.
+
+## v13 on this VM
+
+Author checks only. Python 3.12 and 3.9 with herdr: the unit suite, including the quoted-prose cases. A live Kiro CLI 2.37.0 render of the workspace-trust dialog in a 70-column tmux pane, saved as `logs/trust-width-70.txt`, explains as blocked `workspace_trust`. Quoted trust rows with a gap under a running banner, status bar, and prompt explain as working. A 30-line gap and a dialog that does not end the screen do not match `workspace_trust`. A sweep of `/tmp` left a user notes directory, an unmarked json file, and an unmarked rules directory in place. The orphan-watcher tests exit without spinning.
