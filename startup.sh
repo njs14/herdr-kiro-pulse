@@ -4,7 +4,15 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 BASE="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-kiro"
 MARK="$BASE/lifecycle"
+if [ -L "$BASE" ]; then
+  echo "startup: state directory is a symlink; refusing to change its mode" >&2
+  exit 1
+fi
 mkdir -p "$BASE"
+if [ -L "$BASE" ]; then
+  echo "startup: state directory is a symlink; refusing to change its mode" >&2
+  exit 1
+fi
 chmod 700 "$BASE"
 if [ ! -f "$MARK" ]; then
   python3 - "$BASE" << 'PY'

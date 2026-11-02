@@ -1124,6 +1124,9 @@ class GraceTests(unittest.TestCase):
             self.assertIsNone(hook.resolved_state_file("a b"))
             self.assertIsNone(hook.resolved_state_file(""))
             self.assertIsNone(hook.resolved_state_file("a" * 65))
+            self.assertIsNone(hook.resolved_state_file("-watch"))
+            self.assertIsNone(hook.resolved_state_file("-"))
+            self.assertTrue(hook.pane_id_ok("w1-p1"))
             path = hook.resolved_state_file("w1:p1")
             self.assertTrue(path.endswith(os.path.join("herdr-kiro", "w1_p1.json")))
             self.assertTrue(hook.inside_state_dir(path))
@@ -1166,6 +1169,18 @@ class GraceTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0)
             self.assertFalse(os.path.exists(os.path.join(base, "escaped.json")))
+            env["HERDR_PANE_ID"] = "-watch"
+            completed = subprocess.run(
+                [sys.executable, script, "SessionStart"],
+                env=env,
+                input="{}",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertFalse(os.path.exists(os.path.join(hook.state_dir(), "-watch.json")))
         finally:
             if previous is None:
                 os.environ.pop("XDG_STATE_HOME", None)
@@ -1220,7 +1235,10 @@ class GraceTests(unittest.TestCase):
         hook.begin_tick()
         ident = hook.watcher_identity(os.getpid())
         self.assertIsNotNone(ident)
-        self.assertRegex(ident["start"], r"^\d+\.\d{6}$")
+        if sys.platform == "darwin":
+            self.assertRegex(ident["start"], r"^sec:\d+$")
+        else:
+            self.assertRegex(ident["start"], r"^\d+\.\d{6}$")
         self.assertTrue(ident["comm"])
         self.assertTrue(
             hook.watcher_matches(os.getpid(), str(os.getuid()), ident["start"], ident["comm"])
@@ -1232,6 +1250,33 @@ class GraceTests(unittest.TestCase):
         self.assertFalse(
             hook.watcher_matches(os.getpid(), "0", ident["start"], ident["comm"])
         )
+
+    def test_macos_start_token_comes_from_ps(self):
+        pid = 4242
+        stdout = " %s 7 Mon Nov  2 01:02:03 2026 /usr/bin/python3\n" % pid
+        completed = subprocess.CompletedProcess(
+            ["ps", "-eo", "pid=,ppid=,lstart=,comm="], 0, stdout=stdout, stderr=""
+        )
+
+        def run(args, **kwargs):
+            if args and args[0] == "ps":
+                return completed
+            raise AssertionError(args)
+
+        hook.begin_tick()
+        try:
+            with mock.patch.object(hook, "_linux_start_ticks", return_value=None):
+                with mock.patch.object(hook.subprocess, "run", side_effect=run):
+                    token = hook.hires_start(pid)
+                    ident = hook.watcher_identity(pid)
+        finally:
+            hook.begin_tick()
+        expected = hook.start_token("Mon Nov  2 01:02:03 2026")
+        self.assertEqual(token, "sec:" + expected)
+        self.assertRegex(token, r"^sec:\d+$")
+        self.assertEqual(ident["start"], token)
+        self.assertEqual(ident["comm"], "python3")
+        self.assertFalse(ident["error"])
 
     def test_rules_delete_does_not_follow_symlinks(self):
         base = tempfile.mkdtemp()

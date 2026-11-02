@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.2
+
+A sidecar is trusted only when `lstat` shows a regular file owned by this uid that is not group- or world-writable, the protected file is a regular file owned by this uid, and the read uses `O_NOFOLLOW`. A symlink or another user's sidecar does not make uninstall delete the file. Pane ids that start with `-` are rejected. startup refuses to chmod a symlinked state directory. The watcher test accepts the macOS `sec:<epoch>` start token. Two sample logs no longer use a `/workspace` path prefix.
+
 ## 0.13.1
 
 Uninstall deletes a temp file only when its sidecar marker names this uid, and it no longer treats `HERDR_KIRO_LEGACY_DIR` as a sweep root. A hook or detection file is removed only when the marker sha256 matches. A different hash is renamed to `*.user-modified.<timestamp>` and `*.original` is restored. No marker, or a marker with no hash, leaves the file unchanged. doctor uses that same check. Install creates each file with `O_CREAT|O_EXCL|O_NOFOLLOW` mode 0600 and refuses a symlink destination. Pane ids must match `^[A-Za-z0-9._:-]{1,64}$` with no `..`, and `--watch` opens a path only when its realpath is that pane's file inside the state directory. Suite output is passed through `demo_live.scrub`, and the run fails if `KIRO_API_KEY` remains. Explain screen text is written in the 0700 state directory. startup sets that directory to mode 0700. Watcher pid files record a sub-second start token and the comm basename. Rules directories are removed with an fd walk that does not follow symlinks. Sample captures and the prototype hook no longer embed an absolute home or workspace path.

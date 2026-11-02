@@ -1,4 +1,5 @@
 """install.sh writes a hook file the shell can run, including odd paths."""
+import hashlib
 import json
 import os
 import shlex
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
@@ -883,6 +885,130 @@ class InstallTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         self.assertEqual(os.stat(state).st_mode & 0o777, 0o700)
+
+    def _marked_pair(self, base):
+        path = os.path.join(base, "herdr-kiro-x.json")
+        payload = b"{}\n"
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        marker = path + ".herdr-kiro-owned"
+        digest = hashlib.sha256(payload).hexdigest()
+        with open(marker, "w", encoding="utf-8") as handle:
+            handle.write("herdr-kiro-owned\nuid %s\nsha256 %s\n" % (os.getuid(), digest))
+        os.chmod(path, 0o644)
+        os.chmod(marker, 0o600)
+        return path, marker, payload, digest
+
+    def _stat_as_uid(self, info, uid):
+        values = list(info)
+        values[4] = uid
+        return os.stat_result(tuple(values))
+
+    def test_sidecar_owned_by_another_uid_keeps_the_file(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        path, marker, payload, digest = self._marked_pair(base)
+        other = os.getuid() + 1
+        real_lstat = hook.os.lstat
+        real_stat = hook.os.stat
+
+        def fake_lstat(target, *args, **kwargs):
+            info = real_lstat(target, *args, **kwargs)
+            if isinstance(target, str) and os.path.abspath(target) == marker:
+                return self._stat_as_uid(info, other)
+            return info
+
+        def fake_stat(target, *args, **kwargs):
+            info = real_stat(target, *args, **kwargs)
+            if isinstance(target, str) and os.path.abspath(target) == marker:
+                return self._stat_as_uid(info, other)
+            return info
+
+        with mock.patch.object(hook.os, "lstat", side_effect=fake_lstat), mock.patch.object(
+            hook.os, "stat", side_effect=fake_stat
+        ), mock.patch.object(hook, "temp_roots", return_value=[base]):
+            self.assertFalse(hook._legacy_file_ours(path))
+            self.assertIsNone(hook.read_owned_hash(marker))
+            self.assertEqual(hook.ownership(path), "absent")
+            hook.sweep_owned_temp()
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), payload)
+
+        os.chmod(marker, 0o666)
+        self.assertFalse(hook._legacy_file_ours(path))
+        self.assertIsNone(hook.read_owned_hash(marker))
+        with mock.patch.object(hook, "temp_roots", return_value=[base]):
+            hook.sweep_owned_temp()
+        self.assertTrue(os.path.isfile(path))
+
+        os.chmod(marker, 0o600)
+
+        def fake_protected_lstat(target, *args, **kwargs):
+            info = real_lstat(target, *args, **kwargs)
+            if isinstance(target, str) and os.path.abspath(target) == path:
+                return self._stat_as_uid(info, other)
+            return info
+
+        def fake_protected_stat(target, *args, **kwargs):
+            info = real_stat(target, *args, **kwargs)
+            if isinstance(target, str) and os.path.abspath(target) == path:
+                return self._stat_as_uid(info, other)
+            return info
+
+        with mock.patch.object(hook.os, "lstat", side_effect=fake_protected_lstat), mock.patch.object(
+            hook.os, "stat", side_effect=fake_protected_stat
+        ), mock.patch.object(hook, "temp_roots", return_value=[base]):
+            self.assertFalse(hook._legacy_file_ours(path))
+            self.assertIsNone(hook.read_owned_hash(marker))
+            hook.sweep_owned_temp()
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(hook._legacy_file_ours(path))
+        self.assertEqual(hook.read_owned_hash(marker), digest)
+
+    def test_symlinked_sidecar_keeps_the_file(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        path, marker, payload, _digest = self._marked_pair(base)
+        body = marker + ".body"
+        os.rename(marker, body)
+        os.symlink(body, marker)
+        with mock.patch.object(hook, "temp_roots", return_value=[base]):
+            self.assertFalse(hook._legacy_file_ours(path))
+            self.assertIsNone(hook.read_owned_hash(marker))
+            self.assertEqual(hook.ownership(path), "absent")
+            hook.sweep_owned_temp()
+        self.assertTrue(os.path.isfile(path))
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), payload)
+        self.assertTrue(os.path.islink(marker))
+
+    def test_startup_refuses_a_symlinked_state_dir(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        parent = os.path.join(home, ".local", "state")
+        os.makedirs(parent)
+        target = os.path.join(base, "elsewhere")
+        os.makedirs(target)
+        os.chmod(target, 0o755)
+        state = os.path.join(parent, "herdr-kiro")
+        os.symlink(target, state)
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "startup.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("symlink", completed.stderr)
+        self.assertIn("refusing", completed.stderr)
+        self.assertTrue(os.path.islink(state))
+        self.assertEqual(os.readlink(state), target)
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o755)
 
 
 if __name__ == "__main__":

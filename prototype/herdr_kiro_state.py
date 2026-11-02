@@ -30,7 +30,7 @@ import sys
 import tempfile
 import time
 
-__version__ = "0.13.1"
+__version__ = "0.13.2"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -84,10 +84,10 @@ _PANE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 
 def pane_id_ok(pane_id: str) -> bool:
-    """True for a short pane id that cannot be a path."""
+    """True for a short pane id that cannot be a path or a leading-dash option."""
     if not isinstance(pane_id, str) or not _PANE_ID.fullmatch(pane_id):
         return False
-    if ".." in pane_id:
+    if pane_id.startswith("-") or ".." in pane_id:
         return False
     return True
 
@@ -666,34 +666,85 @@ def sweep_stale_rules() -> None:
 
 
 _LEGACY_JSON = re.compile(r"^herdr-kiro-.+\.json$")
+_SIDECAR = ".herdr-kiro-owned"
+
+
+def _private_regular(info) -> bool:
+    """True when lstat shows a regular file this uid owns that others cannot write."""
+    mode = info.st_mode
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return False
+    if info.st_uid != os.getuid():
+        return False
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False
+    return True
+
+
+def _read_owned_sidecar(marker_path: str):
+    """Text of a sidecar this uid owns, or None when it must not be trusted.
+
+    lstat of the sidecar must show a regular file owned by this uid that is
+    not group- or world-writable. The protected file must be a regular file
+    owned by this uid. The read uses O_NOFOLLOW so a symlink is not followed.
+    """
+    if not isinstance(marker_path, str) or not marker_path.endswith(_SIDECAR):
+        return None
+    protected = marker_path[: -len(_SIDECAR)]
+    if not protected:
+        return None
+    try:
+        marker_info = os.lstat(marker_path)
+        protected_info = os.lstat(protected)
+    except OSError:
+        return None
+    if not _private_regular(marker_info):
+        return None
+    if stat.S_ISLNK(protected_info.st_mode) or not stat.S_ISREG(protected_info.st_mode):
+        return None
+    if protected_info.st_uid != os.getuid():
+        return None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        fd = os.open(marker_path, flags)
+    except OSError:
+        return None
+    try:
+        chunks = []
+        while True:
+            block = os.read(fd, 65536)
+            if not block:
+                break
+            chunks.append(block)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _legacy_file_ours(path: str) -> bool:
     """A herdr-kiro-*.json or hook log this uid marked.
 
-    No sidecar, or a sidecar that does not say "uid <this uid>", is not ours.
-    A directory, a symlink, and another user's file never match.
+    The sidecar must be a regular file owned by this uid, not group- or
+    world-writable, and not a symlink. The file itself must be owned by
+    this uid. No such sidecar, or one that does not say "uid <this uid>",
+    is not ours.
     """
     name = os.path.basename(path)
     if name != "herdr-kiro-hook.log" and _LEGACY_JSON.fullmatch(name) is None:
         return False
-    try:
-        info = os.lstat(path)
-    except OSError:
+    text = _read_owned_sidecar(path + _SIDECAR)
+    if text is None:
         return False
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        return False
-    if info.st_uid != os.getuid():
-        return False
-    marker = path + ".herdr-kiro-owned"
-    if os.path.islink(marker) or not os.path.isfile(marker):
-        return False
-    try:
-        with open(marker, encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except OSError:
-        return False
-    return ("uid %s" % os.getuid()) in lines
+    return ("uid %s" % os.getuid()) in text.splitlines()
 
 
 def sweep_owned_temp() -> None:
@@ -1227,13 +1278,13 @@ def watcher_matches(pid: int, uid: str, started: str, comm: str) -> bool:
 
 
 def read_owned_hash(marker_path: str):
-    """sha256 from an owned sidecar, '' when the marker has no hash, else None."""
-    if os.path.islink(marker_path):
-        return None
-    try:
-        with open(marker_path, encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
+    """sha256 from an owned sidecar, '' when the marker has no hash, else None.
+
+    A symlink, a sidecar owned by another uid, a group- or world-writable
+    sidecar, or a protected file owned by another uid is not owned.
+    """
+    text = _read_owned_sidecar(marker_path)
+    if text is None:
         return None
     if not text.startswith("herdr-kiro-owned"):
         return None
@@ -1254,7 +1305,8 @@ def file_sha256(path: str) -> str:
 def ownership(dest: str) -> str:
     """How doctor and uninstall classify dest: match, differs, nohash, or absent.
 
-    A symlink is absent. A file is ours only when the sidecar sha256 matches.
+    A symlink is absent. A file is ours only when its sidecar is a private
+    regular file owned by this uid and the sidecar sha256 matches.
     """
     if os.path.islink(dest):
         return "absent"
