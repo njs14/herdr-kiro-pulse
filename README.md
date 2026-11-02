@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/readme/hero.svg" width="100%" alt="herdr-kiro. A workflow pane stays working until the run ends. Three states: idle on the prompt, working under a running banner, blocked on Allow once.">
+</p>
+
 # herdr-kiro
 
 A [herdr](https://herdr.dev) plugin that reports a [Kiro CLI](https://kiro.dev/docs/cli) V3 workflow pane as working for the whole run, and as blocked while a chooser or the workspace-trust dialog is on screen.

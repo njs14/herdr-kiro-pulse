@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">herdr-kiro</title>
+  <desc id="hero-desc">A herdr plugin. One Kiro pane is idle on the prompt, working while a workflow banner runs, then blocked when Allow once is selected.</desc>
+  <rect width="1200" height="460" rx="22" fill="#14120e"/>
+  <g id="title-block">
+    <text x="56" y="64" fill="#a39888" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" letter-spacing="2.4">HERDR PLUGIN</text>
+    <text x="56" y="128" fill="#f4efe6" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="64" font-weight="700">herdr-kiro</text>
+    <text x="56" y="176" fill="#f4efe6" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24">A workflow pane stays working until the run ends.</text>
+    <text x="56" y="208" fill="#a39888" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24">A chooser or trust dialog marks it blocked.</text>
+  </g>
+  <g id="states">
+    <g id="state-idle" transform="translate(56 248)">
+      <rect width="344" height="160" rx="14" fill="#221f1a" stroke="#3c352c"/>
+      <text x="20" y="40" fill="#a39888" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">w1:p1</text>
+      <rect x="232" y="18" width="92" height="32" rx="8" fill="#2c2822"/>
+      <text x="278" y="40" fill="#a39888" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" text-anchor="middle">IDLE</text>
+      <text x="20" y="100" fill="#f4efe6" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22">&#x203A; ask a question</text>
+    </g>
+    <g id="state-working" transform="translate(428 248)">
+      <rect width="344" height="160" rx="14" fill="#221f1a" stroke="#3c352c"/>
+      <text x="20" y="40" fill="#a39888" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">w1:p1</text>
+      <rect x="196" y="18" width="128" height="32" rx="8" fill="#d6ff4a"/>
+      <text x="260" y="40" fill="#14120e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" text-anchor="middle">WORKING</text>
+      <text x="20" y="100" fill="#d6ff4a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22">&#x25B6; two-step running</text>
+    </g>
+    <g id="state-blocked" transform="translate(800 248)">
+      <rect width="344" height="160" rx="14" fill="#221f1a" stroke="#3c352c"/>
+      <text x="20" y="40" fill="#a39888" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">w1:p1</text>
+      <rect x="200" y="18" width="124" height="32" rx="8" fill="#ff5a36"/>
+      <text x="262" y="40" fill="#1a120e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" text-anchor="middle">BLOCKED</text>
+      <text x="20" y="92" fill="#d6ff4a" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22">&gt; Allow once</text>
+      <text x="20" y="126" fill="#f4efe6" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22">Deny once</text>
+    </g>
+  </g>
+</svg>
