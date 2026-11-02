@@ -320,7 +320,7 @@ class DetectionTests(unittest.TestCase):
             " ❯ Trust, continue\n"
             "   Don't trust, exit\n"
             "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
-            "Default · auto · ◔ 3% · /workspace/fixtures/wf-repro · (main)\n"
+            "Default · auto · ◔ 3% · /Users/Jane Doe/fixtures/wf-repro · (main)\n"
             "\n"
             "›  ask a question or describe a task ↵\n"
         )

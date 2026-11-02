@@ -847,6 +847,63 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(handle.read(), "keep\n")
         self.assertFalse(os.path.exists(os.path.join(home, ".config", "herdr", "agent-detection", "kiro.toml")))
 
+    def test_install_sets_the_owner_execute_bit_on_the_hook_path(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        tree = os.path.join(base, "tree")
+        os.makedirs(os.path.join(tree, "prototype"))
+        shutil.copy(os.path.join(ROOT, "install.sh"), tree)
+        hook_path = os.path.join(tree, "prototype", "herdr_kiro_state.py")
+        with open(hook_path, "w", encoding="utf-8") as handle:
+            handle.write("#!/usr/bin/env python3\n")
+        os.chmod(hook_path, 0o644)
+        completed = subprocess.run(
+            ["sh", os.path.join(tree, "install.sh")],
+            env=self._home_env(home),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        mode = os.stat(hook_path).st_mode
+        self.assertTrue(stat.S_ISREG(mode))
+        self.assertTrue(mode & stat.S_IXUSR)
+        self.assertFalse(mode & stat.S_IXGRP)
+        self.assertFalse(mode & stat.S_IXOTH)
+
+    def test_install_refuses_to_chmod_a_symlinked_hook_script(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        tree = os.path.join(base, "tree")
+        os.makedirs(os.path.join(tree, "prototype"))
+        shutil.copy(os.path.join(ROOT, "install.sh"), tree)
+        target = os.path.join(base, "real.py")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("#!/usr/bin/env python3\n")
+        os.chmod(target, 0o644)
+        hook_path = os.path.join(tree, "prototype", "herdr_kiro_state.py")
+        os.symlink(target, hook_path)
+        completed = subprocess.run(
+            ["sh", os.path.join(tree, "install.sh")],
+            env=self._home_env(home),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("symlink", completed.stderr)
+        self.assertIn("refusing", completed.stderr)
+        self.assertTrue(os.path.islink(hook_path))
+        self.assertEqual(os.readlink(hook_path), target)
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o644)
+        self.assertFalse(os.path.exists(os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")))
+
     def test_install_twice_is_idempotent(self):
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)

@@ -8,7 +8,7 @@
 
  ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Default · auto · ◔ 3%                                                           /workspace/fixtures/wf-repro · (main)
+Default · auto · ◔ 3%                                                           /Users/Jane Doe/fixtures/wf-repro · (main)
 
 ›  ask a question or describe a task ↵
                                                                             /sessions to resume · /copy to clipboard

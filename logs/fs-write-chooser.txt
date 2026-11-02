@@ -1,4 +1,4 @@
-↓ Write /workspace/fixtures/wf-repro/note.txt
+↓ Write /Users/Jane Doe/fixtures/wf-repro/note.txt
   added 1 line in note.txt
      1+  note
 

@@ -1,5 +1,5 @@
     ╰ Since the file doesn't exist in the snapshot yet, I'll just write it directly rather than checking first.
-↓ Write /workspace/fixtures/wf-repro/probe-edit.txt
+↓ Write /Users/Jane Doe/fixtures/wf-repro/probe-edit.txt
   added 1 line in probe-edit.txt
      1+  probe
 

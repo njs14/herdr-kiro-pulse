@@ -6,7 +6,12 @@ HOOK="$ROOT/prototype/herdr_kiro_state.py"
 DEST="${KIRO_HOOKS_DIR:-$HOME/.kiro/hooks}"
 RULES="$ROOT/prototype/kiro-detection.toml"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/agent-detection"
-chmod +x "$HOOK"
+# Owner execute bit on this file. chmod follows a symlink, so a link is left alone.
+if [ -L "$ROOT/prototype/herdr_kiro_state.py" ]; then
+  echo "install: hook is a symlink; refusing to change its mode" >&2
+  exit 1
+fi
+chmod u+x "$ROOT/prototype/herdr_kiro_state.py"
 mkdir -p "$DEST"
 HERDR="${HERDR_BIN_PATH:-herdr}"
 export HERDR_KIRO_HOOK="$HOOK"

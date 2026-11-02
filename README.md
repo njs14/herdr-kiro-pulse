@@ -96,7 +96,7 @@ Stay on the stock file if you want herdr to keep applying newer remote Kiro rule
 
 Version 0.13.2, from `herdr-plugin.toml`. Actively changed. Not a stable API, and not published.
 
-Unit tests on this tree: 133 passed, 0 failed, on Python 3.12, with herdr 0.9.5. The command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction`. `tests/run_py39.sh` is the 3.9 run. Live notes from herdr 0.9.5 and Kiro CLI 2.37.0 are in [VERIFY.md](VERIFY.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Unit tests on this tree: 135 passed, 0 failed, on Python 3.12, with herdr 0.9.5. The command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction`. `tests/run_py39.sh` is the 3.9 run. Live notes from herdr 0.9.5 and Kiro CLI 2.37.0 are in [VERIFY.md](VERIFY.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 `python3 harness/run_suite.py` drives workflows in a herdr pane. It needs a session, a Kiro pane, and `KIRO_API_KEY` in that environment. Do not print the key.
 
