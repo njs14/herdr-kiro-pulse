@@ -1,0 +1,8 @@
+{
+  "name": "herdr-kiro",
+  "private": true,
+  "description": "Hyperframes is a dev dependency of the demo in demo/.",
+  "devDependencies": {
+    "hyperframes": "0.8.229"
+  }
+}

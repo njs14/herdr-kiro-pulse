@@ -1,0 +1,214 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      background: #14120e;
+      color: #f4efe6;
+      font-family: Inter, sans-serif;
+    }
+    #mark {
+      position: absolute;
+      left: 192px;
+      top: 108px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 28px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #a39888;
+    }
+    .sentence-text {
+      position: absolute;
+      left: 192px;
+      top: 168px;
+      width: 1400px;
+      font-size: 64px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+      color: #f4efe6;
+    }
+    #pane-card {
+      position: absolute;
+      left: 192px;
+      top: 360px;
+      width: 1536px;
+      height: 500px;
+      background: #221f1a;
+      border: 1px solid #3c352c;
+      border-radius: 18px;
+      overflow: hidden;
+    }
+    #pane-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 84px;
+      padding: 0 28px;
+      border-bottom: 1px solid #3c352c;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 28px;
+      color: #a39888;
+    }
+    #chips {
+      position: relative;
+      width: 240px;
+      height: 44px;
+    }
+    .chip {
+      position: absolute;
+      right: 0;
+      top: 0;
+      height: 44px;
+      padding: 0 14px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+    #chip-idle {
+      color: #a39888;
+      background: #2c2822;
+    }
+    #chip-working {
+      color: #14120e;
+      background: #d6ff4a;
+      opacity: 0;
+    }
+    #chip-blocked {
+      color: #1a120e;
+      background: #ff5a36;
+      opacity: 0;
+    }
+    #screen {
+      position: relative;
+      padding: 36px 36px 0;
+      font-family: "IBM Plex Mono", monospace;
+    }
+    #banner-row {
+      opacity: 0;
+      font-size: 28px;
+      color: #d6ff4a;
+      margin-bottom: 28px;
+    }
+    #prompt-row {
+      font-size: 30px;
+      color: #f4efe6;
+    }
+    #prompt-row span {
+      color: #a39888;
+    }
+    #chooser {
+      opacity: 0;
+      margin-top: 36px;
+      width: 640px;
+      border: 1px solid #3c352c;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .choice {
+      display: flex;
+      align-items: center;
+      height: 64px;
+      padding: 0 22px;
+      font-size: 32px;
+      color: #f4efe6;
+    }
+    .choice + .choice {
+      border-top: 1px solid #3c352c;
+    }
+    #choice-allow {
+      background: #2a261f;
+      color: #d6ff4a;
+    }
+    .marker {
+      width: 28px;
+    }
+  </style>
+  <div id="root" data-composition-id="pane" data-width="1920" data-height="1080">
+    <div id="mark">herdr · kiro</div>
+
+    <div id="line-idle" class="clip" data-start="0.5" data-duration="3.2" data-track-index="2">
+      <h1 id="sentence-idle" class="sentence-text" data-var-text="lineIdle">The prompt is idle.</h1>
+    </div>
+    <div id="line-banner" class="clip" data-start="3.6" data-duration="3.1" data-track-index="3">
+      <h1 id="sentence-banner" class="sentence-text" data-var-text="lineBanner">The banner is still running.</h1>
+    </div>
+    <div id="line-block" class="clip" data-start="6.8" data-duration="5" data-track-index="4">
+      <h1 id="sentence-block" class="sentence-text" data-var-text="lineBlock">A chooser beats the banner.</h1>
+    </div>
+
+    <div id="pane-shell" class="clip" data-start="0" data-duration="12" data-track-index="1">
+      <div id="pane-card">
+        <div id="pane-bar">
+          <div>w1:p1 · kiro</div>
+          <div id="chips">
+            <div id="chip-idle" class="chip">IDLE</div>
+            <div id="chip-working" class="chip">WORKING</div>
+            <div id="chip-blocked" class="chip">BLOCKED</div>
+          </div>
+        </div>
+        <div id="screen">
+          <div id="banner-row">▶ two-step running 1/2 · ctrl+x</div>
+          <div id="prompt-row">› <span>ask a question or describe a task</span></div>
+          <div id="chooser">
+            <div id="choice-allow" class="choice"><span class="marker">❯</span> Allow once</div>
+            <div class="choice"><span class="marker"></span> Deny once</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+    tl.fromTo(
+      "#pane-card",
+      { opacity: 0, y: 28 },
+      { opacity: 1, y: 0, duration: 0.55, ease: "expo.out" },
+      0.12,
+    );
+    tl.fromTo(
+      "#sentence-idle",
+      { opacity: 0, filter: "blur(8px)" },
+      { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power4.out" },
+      0.55,
+    );
+    tl.fromTo(
+      "#banner-row",
+      { opacity: 0, y: 14 },
+      { opacity: 1, y: 0, duration: 0.4, ease: "power4.out" },
+      2.15,
+    );
+    tl.fromTo("#chip-idle", { opacity: 1 }, { opacity: 0, duration: 0.2 }, 3.7);
+    tl.fromTo("#chip-working", { opacity: 0 }, { opacity: 1, duration: 0.25 }, 3.75);
+    tl.fromTo(
+      "#sentence-banner",
+      { opacity: 0, filter: "blur(8px)" },
+      { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power4.out" },
+      3.65,
+    );
+    tl.fromTo(
+      "#chooser",
+      { opacity: 0, y: 18 },
+      { opacity: 1, y: 0, duration: 0.45, ease: "power4.out" },
+      6.7,
+    );
+    tl.fromTo(
+      "#chip-working",
+      { opacity: 1 },
+      { opacity: 0, duration: 0.18, immediateRender: false },
+      7.05,
+    );
+    tl.fromTo("#chip-blocked", { opacity: 0 }, { opacity: 1, duration: 0.22 }, 7.1);
+    tl.fromTo(
+      "#sentence-block",
+      { opacity: 0, filter: "blur(8px)" },
+      { opacity: 1, filter: "blur(0px)", duration: 0.2, ease: "power4.out" },
+      6.9,
+    );
+    window.__timelines = window.__timelines || {};
+    window.__timelines["pane"] = tl;
+  </script>
+</template>

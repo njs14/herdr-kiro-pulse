@@ -1,0 +1,51 @@
+<!doctype html>
+<html
+  lang="en"
+  data-composition-variables='[{"id":"lineIdle","type":"string","label":"Idle line","default":"The prompt is idle."},{"id":"lineBanner","type":"string","label":"Banner line","default":"The banner is still running."},{"id":"lineBlock","type":"string","label":"Chooser line","default":"A chooser beats the banner."}]'
+>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #14120e;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="12"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div
+        id="pane"
+        data-composition-id="pane"
+        data-composition-src="compositions/pane.html"
+        data-start="0"
+        data-duration="12"
+        data-track-index="1"
+        data-track-kind="graphics"
+        data-width="1920"
+        data-height="1080"
+      ></div>
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = gsap.timeline({ paused: true });
+    </script>
+  </body>
+</html>
