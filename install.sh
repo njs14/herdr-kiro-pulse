@@ -14,6 +14,7 @@ export HERDR_KIRO_RULES="$RULES"
 export HERDR_KIRO_CONFIG="$CONFIG"
 python3 - "$DEST/herdr-kiro.json" "$CONFIG/kiro.toml" << 'PY'
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -41,8 +42,69 @@ def marker_hash(path):
 
 
 def write_bytes(path, payload):
-    with open(path, "wb") as handle:
-        handle.write(payload)
+    """Write payload without following a symlink at path.
+
+    The temp file is created with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600,
+    then renamed onto path. A symlink destination is left alone.
+    """
+    if os.path.islink(path):
+        sys.stderr.write("left %s alone\n" % path)
+        return False
+    directory = os.path.dirname(path) or "."
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = None
+    tmp = None
+    for attempt in range(128):
+        tmp = os.path.join(
+            directory, ".%s.%s.%s.tmp" % (os.path.basename(path), os.getpid(), attempt)
+        )
+        try:
+            fd = os.open(tmp, flags, 0o600)
+            break
+        except OSError as exc:
+            if exc.errno in (errno.EEXIST, errno.ELOOP):
+                continue
+            raise
+    else:
+        raise OSError("could not create a temp file for %s" % path)
+    try:
+        view = os.fdopen(fd, "wb")
+        fd = None
+        view.write(payload)
+        view.close()
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+    if os.path.islink(path):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        sys.stderr.write("left %s alone\n" % path)
+        return False
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return True
 
 
 def same_backup(dest, payload):
@@ -79,39 +141,56 @@ def install_owned(dest, payload):
     directory = os.path.dirname(dest)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    if os.path.islink(dest):
+        sys.stderr.write("left %s alone\n" % dest)
+        print("Left %s unchanged" % dest)
+        return False
     marker = dest + MARKER
     original = dest + ".original"
     existing = None
-    if os.path.isfile(dest):
+    if os.path.isfile(dest) and not os.path.islink(dest):
         with open(dest, "rb") as handle:
             existing = handle.read()
-    owned_hash = marker_hash(marker) if os.path.isfile(marker) else None
+    owned_hash = marker_hash(marker) if os.path.isfile(marker) and not os.path.islink(marker) else None
     if existing is not None and owned_hash is None and existing != payload:
         if not os.path.isfile(original):
-            write_bytes(original, existing)
+            if not write_bytes(original, existing):
+                print("Left %s unchanged" % dest)
+                return False
         else:
             with open(original, "rb") as handle:
                 previous = handle.read()
             if existing != previous:
-                write_bytes(unique_backup(dest), existing)
+                if not write_bytes(unique_backup(dest), existing):
+                    print("Left %s unchanged" % dest)
+                    return False
     elif existing is not None and owned_hash == "" and existing != payload:
         if not same_backup(dest, existing):
             kept = unique_backup(dest)
-            write_bytes(kept, existing)
+            if not write_bytes(kept, existing):
+                print("Left %s unchanged" % dest)
+                return False
         sys.stderr.write(
             "warning: %s has no content hash and differs from this install; left in place\n"
             % dest
         )
         print("Left %s unchanged" % dest)
-        return
+        return True
     elif existing is not None and owned_hash and digest(existing) != owned_hash:
         backup = unique_backup(dest)
-        write_bytes(backup, existing)
+        if not write_bytes(backup, existing):
+            print("Left %s unchanged" % dest)
+            return False
         sys.stderr.write("warning: %s was edited; kept %s\n" % (dest, backup))
-    write_bytes(dest, payload)
-    with open(marker, "w", encoding="utf-8") as handle:
-        handle.write("herdr-kiro-owned\nsha256 %s\n" % digest(payload))
+    if not write_bytes(dest, payload):
+        print("Left %s unchanged" % dest)
+        return False
+    body = ("herdr-kiro-owned\nsha256 %s\n" % digest(payload)).encode("utf-8")
+    if not write_bytes(marker, body):
+        print("Left %s unchanged" % dest)
+        return False
     print("Installed %s" % dest)
+    return True
 
 
 hook = os.environ["HERDR_KIRO_HOOK"]
@@ -131,19 +210,24 @@ document = {
         for event in events
     ],
 }
-install_owned(sys.argv[1], (json.dumps(document, indent=2) + "\n").encode("utf-8"))
+ok = install_owned(sys.argv[1], (json.dumps(document, indent=2) + "\n").encode("utf-8"))
 rules = os.environ.get("HERDR_KIRO_RULES") or ""
-if rules and os.path.isfile(rules):
+if ok and rules and os.path.isfile(rules):
     with open(rules, "rb") as handle:
-        install_owned(sys.argv[2], handle.read())
+        ok = install_owned(sys.argv[2], handle.read()) and ok
+if not ok:
+    sys.exit(1)
 base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
 directory = os.path.join(base, "herdr-kiro")
 os.makedirs(directory, mode=0o700, exist_ok=True)
+try:
+    os.chmod(directory, 0o700)
+except OSError:
+    pass
 via = "plugin" if os.environ.get("HERDR_PLUGIN_ID") else "script"
 lifecycle = os.path.join(directory, "lifecycle")
-with open(lifecycle, "w", encoding="utf-8") as handle:
-    handle.write("installed\nvia=%s\n" % via)
-os.chmod(lifecycle, 0o600)
+if not write_bytes(lifecycle, ("installed\nvia=%s\n" % via).encode("utf-8")):
+    sys.exit(1)
 PY
 reload_one() {
   # $1 is "session" or "default"

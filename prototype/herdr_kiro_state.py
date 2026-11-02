@@ -18,11 +18,11 @@ import datetime
 import errno
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import re
 import select
-import shutil
 import signal
 import stat
 import subprocess
@@ -30,7 +30,7 @@ import sys
 import tempfile
 import time
 
-__version__ = "0.13.0"
+__version__ = "0.13.1"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -80,8 +80,45 @@ def log_path() -> str:
     return os.path.join(state_dir(), "hook.log")
 
 
+_PANE_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+def pane_id_ok(pane_id: str) -> bool:
+    """True for a short pane id that cannot be a path."""
+    if not isinstance(pane_id, str) or not _PANE_ID.fullmatch(pane_id):
+        return False
+    if ".." in pane_id:
+        return False
+    return True
+
+
+def inside_state_dir(path: str) -> bool:
+    """True when realpath(path) is a file path inside the private state dir."""
+    root = os.path.realpath(state_dir())
+    try:
+        resolved = os.path.realpath(path)
+    except OSError:
+        return False
+    if resolved == root:
+        return False
+    return resolved.startswith(root + os.sep)
+
+
+def resolved_state_file(pane_id: str):
+    """State file for pane_id, or None when the id or the path is unsafe."""
+    if not pane_id_ok(pane_id):
+        return None
+    path = os.path.join(state_dir(), "%s.json" % pane_id.replace(":", "_"))
+    if os.path.islink(path) or not inside_state_dir(path):
+        return None
+    return path
+
+
 def state_path(pane_id: str) -> str:
-    return os.path.join(state_dir(), f"{pane_id.replace(':', '_')}.json")
+    path = resolved_state_file(pane_id)
+    if path is None:
+        raise ValueError("pane id")
+    return path
 
 
 def seq_floor_path(path: str) -> str:
@@ -418,6 +455,9 @@ def herdr(*args: str) -> bool:
 
 
 def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
+    if not pane_id_ok(pane):
+        log("refusing report")
+        return False
     if kind not in ("working", "idle", "blocked"):
         raise ValueError(kind)
 
@@ -447,6 +487,10 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
 
 
 def release_authority(pane: str, path: str) -> bool:
+    if not pane_id_ok(pane):
+        log("refusing release")
+        return False
+
     def bump_release(state: dict) -> None:
         state["seq"] += 1
 
@@ -531,6 +575,70 @@ def _rules_dir_ours(path: str):
     return int(matched.group(1))
 
 
+def remove_tree(path: str) -> None:
+    """Delete a directory tree without following a symlinked directory.
+
+    Opens each directory with O_NOFOLLOW and unlinks names through that
+    descriptor. A symlink is removed as a link. Errors are ignored, matching
+    the old rmtree ignore_errors behavior on Python 3.9.
+    """
+    parent = os.path.dirname(path) or "."
+    name = os.path.basename(path)
+    if not name or name in (".", ".."):
+        return
+    try:
+        parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        _remove_dir_at(parent_fd, name)
+    finally:
+        os.close(parent_fd)
+
+
+def _dir_flags() -> int:
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return flags
+
+
+def _remove_dir_at(parent_fd: int, name: str) -> None:
+    try:
+        fd = os.open(name, _dir_flags(), dir_fd=parent_fd)
+    except OSError:
+        return
+    try:
+        _clear_dir_fd(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except OSError:
+        pass
+
+
+def _clear_dir_fd(fd: int) -> None:
+    try:
+        names = os.listdir(fd)
+    except OSError:
+        return
+    for name in names:
+        if name in (".", ".."):
+            continue
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            _remove_dir_at(fd, name)
+            continue
+        try:
+            os.unlink(name, dir_fd=fd)
+        except OSError:
+            pass
+
+
 def _sweep_rules_in(roots) -> None:
     """Remove rules dirs this package created after their process is gone.
 
@@ -550,7 +658,7 @@ def _sweep_rules_in(roots) -> None:
             except OSError as exc:
                 if exc.errno != errno.ESRCH:
                     continue
-                shutil.rmtree(path, True)
+                remove_tree(path)
 
 
 def sweep_stale_rules() -> None:
@@ -560,19 +668,11 @@ def sweep_stale_rules() -> None:
 _LEGACY_JSON = re.compile(r"^herdr-kiro-.+\.json$")
 
 
-def owned_temp_roots():
-    """HERDR_KIRO_LEGACY_DIR when set, otherwise TMPDIR and /tmp."""
-    override = os.environ.get("HERDR_KIRO_LEGACY_DIR")
-    if override:
-        return [override]
-    return temp_roots()
-
-
 def _legacy_file_ours(path: str) -> bool:
-    """A pre-marker herdr-kiro-*.json or hook log owned by this uid.
+    """A herdr-kiro-*.json or hook log this uid marked.
 
-    A directory never matches. A sidecar marker must name this uid. EPERM is
-    not used here: the proof is the uid on the inode, same as the rules sweep.
+    No sidecar, or a sidecar that does not say "uid <this uid>", is not ours.
+    A directory, a symlink, and another user's file never match.
     """
     name = os.path.basename(path)
     if name != "herdr-kiro-hook.log" and _LEGACY_JSON.fullmatch(name) is None:
@@ -586,8 +686,8 @@ def _legacy_file_ours(path: str) -> bool:
     if info.st_uid != os.getuid():
         return False
     marker = path + ".herdr-kiro-owned"
-    if not os.path.isfile(marker):
-        return True
+    if os.path.islink(marker) or not os.path.isfile(marker):
+        return False
     try:
         with open(marker, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
@@ -597,12 +697,13 @@ def _legacy_file_ours(path: str) -> bool:
 
 
 def sweep_owned_temp() -> None:
-    """Drop our temp dirs and legacy files under TMPDIR and /tmp.
+    """Drop our temp dirs and marked legacy files under TMPDIR and /tmp.
 
     Rules directories use the sweep's name, uid, and marker proof. User
-    directories such as herdr-kiro-notes are left in place.
+    directories such as herdr-kiro-notes are left in place. An unmarked
+    herdr-kiro-*.json or hook log is left in place.
     """
-    roots = owned_temp_roots()
+    roots = temp_roots()
     _sweep_rules_in(roots)
     for root in roots:
         if not root or not os.path.isdir(root):
@@ -617,6 +718,13 @@ def sweep_owned_temp() -> None:
                 continue
             try:
                 os.remove(path)
+            except OSError:
+                continue
+            marker = path + ".herdr-kiro-owned"
+            if os.path.islink(marker):
+                continue
+            try:
+                os.remove(marker)
             except OSError:
                 pass
 
@@ -646,12 +754,18 @@ def sweep_stale_pidfiles() -> None:
         except OSError:
             continue
         recorded = lines[1].strip() if len(lines) > 1 else ""
+        recorded_comm = lines[2].strip() if len(lines) > 2 else ""
         if not recorded:
             continue
         snap = process_snapshot(pid)
         if not snap or snap.get("error"):
             continue
-        if snap.get("lstart") and snap.get("lstart") != recorded:
+        current = hires_start(pid)
+        current_comm = snap.get("comm") or ""
+        stale = bool(current) and current != recorded
+        if recorded_comm and current_comm and recorded_comm != current_comm:
+            stale = True
+        if stale:
             try:
                 os.remove(path)
             except OSError:
@@ -660,7 +774,7 @@ def sweep_stale_pidfiles() -> None:
 
 def cleanup_rules() -> None:
     if _RULES_DIR and os.path.isdir(_RULES_DIR):
-        shutil.rmtree(_RULES_DIR, True)
+        remove_tree(_RULES_DIR)
     sweep_stale_rules()
 
 
@@ -686,7 +800,7 @@ def explain_env() -> dict:
         os.chmod(marker, FILE_MODE)
     except OSError:
         pass
-    atexit.register(shutil.rmtree, base, True)
+    atexit.register(remove_tree, base)
     dest = os.path.join(base, "herdr", "agent-detection")
     os.makedirs(dest, exist_ok=True)
     try:
@@ -713,7 +827,9 @@ def screen_view(text: str) -> dict:
     path = None
     view = _unknown_screen()
     try:
-        fd, path = tempfile.mkstemp(prefix="herdr-kiro-screen-", suffix=".txt")
+        fd, path = tempfile.mkstemp(
+            prefix="herdr-kiro-screen-", suffix=".txt", dir=state_dir()
+        )
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text or "")
         completed = subprocess.run(
@@ -1021,6 +1137,141 @@ def process_snapshot(pid: int) -> dict:
     return table.get(int(pid))
 
 
+def _linux_start_ticks(pid: int):
+    """Clock ticks since boot from the process stat, or None."""
+    try:
+        with open("/proc/%s/stat" % int(pid), "rb") as handle:
+            raw = handle.read()
+    except (OSError, ValueError):
+        return None
+    end = raw.rfind(b")")
+    if end < 0:
+        return None
+    fields = raw[end + 2 :].split()
+    # starttime is field 22. Fields after comm begin at field 3.
+    if len(fields) <= 19:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _linux_boot_time():
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("btime "):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def hires_start(pid: int) -> str:
+    """Start time finer than one second, or a tagged whole-second token.
+
+    Linux uses boot time plus start ticks. Other platforms tag the ps lstart
+    epoch so a second-only value cannot match a tick token by accident.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    if pid <= 0:
+        return ""
+    ticks = _linux_start_ticks(pid)
+    boot = _linux_boot_time() if ticks is not None else None
+    if ticks is not None and boot is not None:
+        try:
+            clk = float(os.sysconf("SC_CLK_TCK"))
+        except (OSError, ValueError, TypeError):
+            clk = 0.0
+        if clk > 0:
+            return "%.6f" % (boot + (ticks / clk))
+    snap = process_snapshot(pid)
+    if not snap or snap.get("error"):
+        return ""
+    token = snap.get("lstart") or ""
+    if not token:
+        return ""
+    return "sec:" + token
+
+
+def watcher_identity(pid: int):
+    """None when the pid is gone. error is set when ps cannot be read."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    snap = process_snapshot(pid)
+    if snap is None:
+        return None
+    if snap.get("error"):
+        return {"start": "", "comm": "", "error": True}
+    return {"start": hires_start(pid), "comm": snap.get("comm") or "", "error": False}
+
+
+def watcher_matches(pid: int, uid: str, started: str, comm: str) -> bool:
+    """True when this uid's pid file still names the same process."""
+    if str(uid) != str(os.getuid()):
+        return False
+    if not started or not comm:
+        return False
+    ident = watcher_identity(pid)
+    if not ident or ident.get("error"):
+        return False
+    return ident["start"] == started and ident["comm"] == comm
+
+
+def read_owned_hash(marker_path: str):
+    """sha256 from an owned sidecar, '' when the marker has no hash, else None."""
+    if os.path.islink(marker_path):
+        return None
+    try:
+        with open(marker_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    if not text.startswith("herdr-kiro-owned"):
+        return None
+    for line in text.splitlines():
+        if line.startswith("sha256 "):
+            return line.split(" ", 1)[1].strip()
+    return ""
+
+
+def file_sha256(path: str) -> str:
+    hashed = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            hashed.update(chunk)
+    return hashed.hexdigest()
+
+
+def ownership(dest: str) -> str:
+    """How doctor and uninstall classify dest: match, differs, nohash, or absent.
+
+    A symlink is absent. A file is ours only when the sidecar sha256 matches.
+    """
+    if os.path.islink(dest):
+        return "absent"
+    kind = read_owned_hash(dest + ".herdr-kiro-owned")
+    if kind is None:
+        return "absent"
+    if kind == "":
+        return "nohash"
+    try:
+        digest = file_sha256(dest)
+    except OSError:
+        return "differs"
+    if digest == kind:
+        return "match"
+    return "differs"
+
+
 def owner_is_dead(owner, started: str) -> bool:
     """True when this pid is gone. A live process is never dead because of its parent."""
     if not owner:
@@ -1213,10 +1464,18 @@ def write_pidfile(state_file: str, pid: int, started: str) -> None:
         os.chmod(directory, DIR_MODE)
     except OSError:
         pass
+    # `started` stays on the state record as whole-second lstart. The pid file
+    # stores a finer token so a pid reused in that same second does not match.
+    del started
+    token = hires_start(pid)
+    snap = process_snapshot(pid)
+    comm = ""
+    if snap and not snap.get("error"):
+        comm = snap.get("comm") or ""
     path = os.path.join(directory, str(pid))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f"{os.getuid()}\n{started}\n")
+        handle.write("%s\n%s\n%s\n" % (os.getuid(), token, comm))
 
 
 def remove_pidfile(state_file: str, pid: int) -> None:
@@ -1641,7 +1900,18 @@ def session_of(payload: dict, ppid: int = 0) -> str:
 def main() -> int:
     event = sys.argv[1] if len(sys.argv) > 1 else ""
     if event == "--watch":
-        watch_loop(sys.argv[2], sys.argv[3])
+        pane = sys.argv[2] if len(sys.argv) > 2 else ""
+        given = sys.argv[3] if len(sys.argv) > 3 else ""
+        expected = resolved_state_file(pane)
+        if (
+            expected is None
+            or not given
+            or os.path.islink(given)
+            or os.path.realpath(given) != os.path.realpath(expected)
+        ):
+            log("refusing watch")
+            return 1
+        watch_loop(pane, expected)
         return 0
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -1649,10 +1919,13 @@ def main() -> int:
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    pane = os.environ.get("HERDR_PANE_ID")
-    if os.environ.get("HERDR_ENV") != "1" or not pane:
+    pane = os.environ.get("HERDR_PANE_ID") or ""
+    if os.environ.get("HERDR_ENV") != "1" or not pane_id_ok(pane):
         return 0
-    path = state_path(pane)
+    try:
+        path = state_path(pane)
+    except ValueError:
+        return 0
     now = time.time()
     session = session_of(payload)
     if event not in BUSY_EVENTS and event not in END_EVENTS:

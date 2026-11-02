@@ -24,7 +24,7 @@
  esc to exit · ↑↓ to navigate · ↵ to select
 
  Revoke later by removing workspaceTrusted from
- /home/ubuntu/.kiro/workspace-roots/2370cf23209b22a9/permissions.yaml
+ /Users/Jane Doe/.kiro/workspace-roots/2370cf23209b22a9/permissions.yaml
 
 
 

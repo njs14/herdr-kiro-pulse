@@ -7,7 +7,7 @@
       "timeout": 10,
       "action": {
         "type": "command",
-        "command": "/workspace/prototype/herdr_kiro_state.py SessionStart"
+        "command": "prototype/herdr_kiro_state.py SessionStart"
       }
     },
     {
@@ -16,7 +16,7 @@
       "timeout": 10,
       "action": {
         "type": "command",
-        "command": "/workspace/prototype/herdr_kiro_state.py UserPromptSubmit"
+        "command": "prototype/herdr_kiro_state.py UserPromptSubmit"
       }
     },
     {
@@ -25,7 +25,7 @@
       "timeout": 10,
       "action": {
         "type": "command",
-        "command": "/workspace/prototype/herdr_kiro_state.py PreToolUse"
+        "command": "prototype/herdr_kiro_state.py PreToolUse"
       }
     },
     {
@@ -34,7 +34,7 @@
       "timeout": 10,
       "action": {
         "type": "command",
-        "command": "/workspace/prototype/herdr_kiro_state.py PostToolUse"
+        "command": "prototype/herdr_kiro_state.py PostToolUse"
       }
     },
     {
@@ -43,7 +43,7 @@
       "timeout": 10,
       "action": {
         "type": "command",
-        "command": "/workspace/prototype/herdr_kiro_state.py Stop"
+        "command": "prototype/herdr_kiro_state.py Stop"
       }
     },
     {
@@ -52,7 +52,7 @@
       "timeout": 10,
       "action": {
         "type": "command",
-        "command": "/workspace/prototype/herdr_kiro_state.py SessionEnd"
+        "command": "prototype/herdr_kiro_state.py SessionEnd"
       }
     }
   ]

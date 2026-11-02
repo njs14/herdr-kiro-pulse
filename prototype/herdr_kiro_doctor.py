@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import glob
-import hashlib
 import json
 import os
 import subprocess
@@ -12,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from herdr_kiro_state import __version__, herdr_bin, sweep_stale_pidfiles
+from herdr_kiro_state import __version__, herdr_bin, ownership, sweep_stale_pidfiles
 
 BUILT_AGAINST = "2026.09.19.1"
 SETTINGS_TIMEOUT = 2
@@ -101,26 +100,6 @@ def read_lifecycle():
         elif line.startswith("pending_unlink="):
             pending = line.split("=", 1)[1].strip()
     return state, via, pending
-
-
-def marker_hash(path):
-    try:
-        text = open(path, encoding="utf-8").read()
-    except OSError:
-        return None
-    if not text.startswith("herdr-kiro-owned"):
-        return None
-    for line in text.splitlines():
-        if line.startswith("sha256 "):
-            return line.split(" ", 1)[1].strip()
-    return ""
-
-
-def file_digest(path):
-    hashed = hashlib.sha256()
-    with open(path, "rb") as handle:
-        hashed.update(handle.read())
-    return hashed.hexdigest()
 
 
 def explain_upstream():
@@ -223,19 +202,21 @@ def main() -> int:
         if not os.path.isfile(path):
             print("file: %s absent" % path)
             continue
-        digest = marker_hash(path + ".herdr-kiro-owned")
-        if digest is None:
+        kind = ownership(path)
+        if kind == "absent":
             print("info: %s is a user file, not removed by this hook" % path)
-        elif digest == "":
+        elif kind == "nohash":
             print("info: %s has an owned marker with no content hash" % path)
             if state_name == "installed":
                 problems.append("%s has an owned marker with no content hash" % path)
-        elif file_digest(path) != digest:
+        elif kind == "differs":
             problems.append("%s was hand edited" % path)
             print("hand edit: %s hash does not match the marker" % path)
-        else:
+        elif kind == "match":
             owned_paths.append(path)
             print("hand edit: %s matches the marker" % path)
+        else:
+            raise RuntimeError("unknown ownership %s" % kind)
     if state_name == "uninstalled" and owned_paths:
         problems.append("lifecycle is uninstalled but our files remain: %s" % ", ".join(owned_paths))
     registered = plugin_registered() if herdr_code == 0 else None

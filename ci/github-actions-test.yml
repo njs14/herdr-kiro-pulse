@@ -45,4 +45,4 @@ jobs:
           chmod +x "$RUNNER_TEMP/herdr"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: unit tests
-        run: python -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor
+        run: python -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction

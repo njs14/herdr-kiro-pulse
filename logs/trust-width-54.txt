@@ -24,7 +24,7 @@ KIRO  https://kiro.dev/docs/cli/v3/
  esc to exit · ↑↓ to navigate · ↵ to select
 
  Revoke later by removing workspaceTrusted from
- /home/ubuntu/.kiro/workspace-roots/432b151698eb3837/
+ /Users/Jane Doe/.kiro/workspace-roots/432b151698eb3837/
  permissions.yaml
 
 

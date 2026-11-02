@@ -10,6 +10,8 @@ import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "prototype"))
+import herdr_kiro_state as hook
 
 
 class DoctorTests(unittest.TestCase):
@@ -199,6 +201,20 @@ exit 0
         with mock.patch.object(doctor.os, "kill", kill):
             self.assertEqual(doctor.dead_pidfiles(pid_dir), [])
         self.assertTrue(os.path.exists(stale))
+
+    def test_substring_without_a_marker_is_a_user_file(self):
+        self.write_herdr()
+        self.write_kiro()
+        rules = os.path.join(self.home, ".config", "herdr", "agent-detection")
+        os.makedirs(rules)
+        path = os.path.join(rules, "kiro.toml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('id = "workflow_banner_working"\n')
+        completed = self.doctor()
+        self.assertIn("user file", completed.stdout)
+        with open(path, encoding="utf-8") as handle:
+            self.assertIn("workflow_banner_working", handle.read())
+        self.assertEqual(hook.ownership(path), "absent")
 
 
 if __name__ == "__main__":

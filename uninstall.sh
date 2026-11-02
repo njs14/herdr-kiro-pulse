@@ -9,15 +9,13 @@ export HERDR_KIRO_HOOK_DIR="$DEST"
 export HERDR_KIRO_ROOT="$ROOT"
 python3 - << 'PY'
 import datetime
-import hashlib
 import os
 import signal
-import subprocess
 import sys
 
 root = os.environ.get("HERDR_KIRO_ROOT") or ""
 sys.path.insert(0, os.path.join(root, "prototype"))
-from herdr_kiro_state import sweep_owned_temp
+from herdr_kiro_state import begin_tick, ownership, sweep_owned_temp, watcher_identity
 
 MARKER = ".herdr-kiro-owned"
 home = os.environ.get("HERDR_KIRO_HOME") or os.path.expanduser("~")
@@ -34,98 +32,54 @@ config = os.path.join(
 uid = os.getuid()
 
 
-def start_token(text):
-    cleaned = " ".join((text or "").split())
-    if not cleaned:
-        return ""
-    try:
-        parsed = datetime.datetime.strptime(cleaned, "%a %b %d %H:%M:%S %Y")
-    except ValueError:
-        return cleaned
-    return str(int(parsed.timestamp()))
-
-
-def marker_hash(path):
-    try:
-        text = open(path, encoding="utf-8").read()
-    except OSError:
-        return None
-    if not text.startswith("herdr-kiro-owned"):
-        return None
-    for line in text.splitlines():
-        if line.startswith("sha256 "):
-            return line.split(" ", 1)[1].strip()
-    return ""
-
-
-def file_digest(path):
-    hashed = hashlib.sha256()
-    with open(path, "rb") as handle:
-        hashed.update(handle.read())
-    return hashed.hexdigest()
-
-
 def remove_ours(dest):
+    """Delete only when the marker sha256 matches. Otherwise leave the bytes.
+
+    A different hash is renamed to *.user-modified.<ts> and *.original is
+    restored. No marker, or a marker with no hash, leaves the file unchanged.
+    doctor uses the same ownership() check.
+    """
     marker = dest + MARKER
     original = dest + ".original"
-    owned_hash = marker_hash(marker) if os.path.isfile(marker) else None
-    owned = owned_hash is not None
-    if not owned and os.path.isfile(dest):
-        try:
-            body = open(dest, encoding="utf-8").read()
-        except OSError:
-            body = ""
-        owned = "workflow_banner_working" in body or "herdr-kiro-SessionStart" in body
-        owned_hash = "" if owned else None
-    if not owned:
+    kind = ownership(dest)
+    if kind in ("absent", "nohash"):
         print("Left %s unchanged" % dest)
         return
     removed = False
-    if os.path.isfile(dest):
-        changed = bool(owned_hash) and file_digest(dest) != owned_hash
-        if changed:
-            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-            backup = dest + ".user-modified." + stamp
-            index = 0
-            while os.path.exists(backup):
-                index += 1
-                backup = dest + ".user-modified." + stamp + "." + str(index)
-            os.replace(dest, backup)
-            print("Left %s as %s" % (dest, backup))
-        else:
-            os.remove(dest)
-            removed = True
-    if os.path.isfile(marker):
+    if kind == "differs" and os.path.lexists(dest) and not os.path.islink(dest):
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = dest + ".user-modified." + stamp
+        index = 0
+        while os.path.exists(backup):
+            index += 1
+            backup = dest + ".user-modified." + stamp + "." + str(index)
+        os.replace(dest, backup)
+        print("Left %s as %s" % (dest, backup))
+    elif kind == "match" and os.path.lexists(dest) and not os.path.islink(dest):
+        os.remove(dest)
+        removed = True
+    else:
+        print("Left %s unchanged" % dest)
+        return
+    if os.path.isfile(marker) and not os.path.islink(marker):
         os.remove(marker)
-    if os.path.isfile(original) and not os.path.exists(dest):
+    if (
+        os.path.isfile(original)
+        and not os.path.islink(original)
+        and not os.path.lexists(dest)
+    ):
         os.replace(original, dest)
         print("Restored %s" % dest)
     elif removed:
         print("Removed %s" % dest)
 
 
-def process_start(pid):
-    try:
-        completed = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "lstart="],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
-            check=False,
-            env=dict(os.environ, LC_ALL="C"),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if completed.returncode != 0:
-        return ""
-    return start_token(completed.stdout or "")
-
-
 def stop_tracked_watchers(directory):
+    """Stop a watcher only when uid, high-resolution start, and comm all match."""
     pid_dir = os.path.join(directory, "pids")
     if not os.path.isdir(pid_dir):
         return
+    begin_tick()
     for name in os.listdir(pid_dir):
         path = os.path.join(pid_dir, name)
         if not name.isdigit():
@@ -135,20 +89,28 @@ def stop_tracked_watchers(directory):
         except OSError:
             continue
         recorded_uid = lines[0].strip() if lines else ""
-        recorded_start = start_token(lines[1]) if len(lines) > 1 else ""
+        recorded_start = lines[1].strip() if len(lines) > 1 else ""
+        recorded_comm = lines[2].strip() if len(lines) > 2 else ""
         if recorded_uid != str(uid):
             continue
-        if not recorded_start:
-            continue
         pid = int(name)
-        current = process_start(pid)
-        if current and recorded_start != current:
-            continue
-        if current:
+        ident = watcher_identity(pid)
+        if ident is None:
             try:
-                os.kill(pid, signal.SIGTERM)
+                os.remove(path)
             except OSError:
                 pass
+            continue
+        if ident.get("error"):
+            continue
+        if not recorded_start or not recorded_comm:
+            continue
+        if ident["start"] != recorded_start or ident["comm"] != recorded_comm:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
         try:
             os.remove(path)
         except OSError:

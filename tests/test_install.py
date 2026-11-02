@@ -10,6 +10,8 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "prototype"))
+import herdr_kiro_state as hook
 
 
 class InstallTests(unittest.TestCase):
@@ -139,14 +141,26 @@ class InstallTests(unittest.TestCase):
         state_file = os.path.join(state, "w1_p1.json")
         with open(state_file, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
-        legacy_dir = os.path.join(base, "legacy")
-        os.makedirs(legacy_dir)
-        legacy = os.path.join(legacy_dir, "herdr-kiro-hook.log")
+        tmp = os.path.join(base, "tmp")
+        os.makedirs(tmp)
+        legacy = os.path.join(tmp, "herdr-kiro-hook.log")
         with open(legacy, "w", encoding="utf-8") as handle:
             handle.write("legacy\n")
-        legacy_state = os.path.join(legacy_dir, "herdr-kiro-w1_p1.json")
+        legacy_state = os.path.join(tmp, "herdr-kiro-w1_p1.json")
         with open(legacy_state, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
+        marked = os.path.join(tmp, "herdr-kiro-marked.json")
+        with open(marked, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        with open(marked + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
+        decoy_root = os.path.join(base, "not-a-sweep-root")
+        os.makedirs(decoy_root)
+        decoy_marked = os.path.join(decoy_root, "herdr-kiro-decoy.json")
+        with open(decoy_marked, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        with open(decoy_marked + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
         seq_file = os.path.join(state, "w1_p1.json.seq")
         with open(seq_file, "w", encoding="utf-8") as handle:
             handle.write("3000000\n")
@@ -157,18 +171,23 @@ class InstallTests(unittest.TestCase):
         decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file])
         self.addCleanup(lambda: watcher.poll() is not None or watcher.kill())
         self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
-        started = subprocess.check_output(
-            ["ps", "-p", str(watcher.pid), "-o", "lstart="], text=True
-        )
-        collapsed = " ".join(started.split())
+        hook.begin_tick()
+        ident = hook.watcher_identity(watcher.pid)
+        self.assertIsNotNone(ident)
+        self.assertIn(".", ident["start"])
+        decoy_ident = hook.watcher_identity(decoy.pid)
+        self.assertIsNotNone(decoy_ident)
         pid_dir = os.path.join(state, "pids")
         os.makedirs(pid_dir)
         with open(os.path.join(pid_dir, str(watcher.pid)), "w", encoding="utf-8") as handle:
-            handle.write("%s\n%s\n" % (os.getuid(), collapsed))
+            handle.write("%s\n%s\n%s\n" % (os.getuid(), ident["start"], ident["comm"]))
+        with open(os.path.join(pid_dir, str(decoy.pid)), "w", encoding="utf-8") as handle:
+            handle.write("%s\n%s\n%s\n" % (os.getuid(), decoy_ident["start"], "not-the-comm"))
         env = dict(os.environ)
         env["HOME"] = home
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
-        env["HERDR_KIRO_LEGACY_DIR"] = legacy_dir
+        env["TMPDIR"] = tmp
+        env["HERDR_KIRO_LEGACY_DIR"] = decoy_root
         env.pop("KIRO_HOOKS_DIR", None)
         env.pop("HERDR_SESSION", None)
         completed = subprocess.run(
@@ -186,8 +205,10 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(handle.read(), "{}\n")
         self.assertFalse(os.path.exists(state_file))
         self.assertTrue(os.path.exists(seq_file))
-        self.assertFalse(os.path.exists(legacy))
-        self.assertFalse(os.path.exists(legacy_state))
+        self.assertTrue(os.path.exists(legacy))
+        self.assertTrue(os.path.exists(legacy_state))
+        self.assertFalse(os.path.exists(marked))
+        self.assertTrue(os.path.exists(decoy_marked))
         watcher.wait(timeout=5)
         self.assertIsNotNone(watcher.returncode)
         self.assertIsNone(decoy.poll())
@@ -693,6 +714,11 @@ class InstallTests(unittest.TestCase):
             handle.write("{}\n")
         with open(foreign + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
             handle.write("herdr-kiro-owned\nuid 0\n")
+        marked = os.path.join(tmp, "herdr-kiro-ours.json")
+        with open(marked, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        with open(marked + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
+            handle.write("uid %s\n" % os.getuid())
         env = self._home_env(home)
         env["TMPDIR"] = tmp
         env.pop("HERDR_KIRO_LEGACY_DIR", None)
@@ -710,8 +736,153 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(notes, "note.txt")))
         self.assertTrue(os.path.isdir(unmarked))
         self.assertFalse(os.path.isdir(owned))
-        self.assertFalse(os.path.exists(legacy))
+        self.assertTrue(os.path.exists(legacy))
         self.assertTrue(os.path.isfile(foreign))
+        self.assertFalse(os.path.exists(marked))
+
+    def test_uninstall_leaves_substring_and_hashless_files(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        hook_dir = os.path.join(home, ".kiro", "hooks")
+        rules = os.path.join(home, ".config", "herdr", "agent-detection")
+        os.makedirs(hook_dir)
+        os.makedirs(rules)
+        hook_file = os.path.join(hook_dir, "herdr-kiro.json")
+        rules_file = os.path.join(rules, "kiro.toml")
+        with open(hook_file, "w", encoding="utf-8") as handle:
+            handle.write('{"name":"herdr-kiro-SessionStart"}\n')
+        with open(rules_file, "w", encoding="utf-8") as handle:
+            handle.write('id = "workflow_banner_working"\n')
+        hashless = hook_file + ".herdr-kiro-owned"
+        with open(hashless, "w", encoding="utf-8") as handle:
+            handle.write("herdr-kiro-owned\n")
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        with open(hook_file, encoding="utf-8") as handle:
+            self.assertIn("herdr-kiro-SessionStart", handle.read())
+        with open(rules_file, encoding="utf-8") as handle:
+            self.assertIn("workflow_banner_working", handle.read())
+        self.assertTrue(os.path.isfile(hashless))
+        with open(os.path.join(ROOT, "uninstall.sh"), encoding="utf-8") as handle:
+            body = handle.read().split("def remove_ours", 1)[1].split("def stop_tracked", 1)[0]
+        self.assertNotIn("workflow_banner_working", body)
+
+    def test_uninstall_renames_a_mismatch_and_restores_original(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        hook_file = os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")
+        with open(hook_file + ".original", "wb") as handle:
+            handle.write(b'{"user":"original"}\n')
+        with open(hook_file, "ab") as handle:
+            handle.write(b"# user edit\n")
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "uninstall.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        with open(hook_file, "rb") as handle:
+            self.assertEqual(handle.read(), b'{"user":"original"}\n')
+        matches = [
+            name
+            for name in os.listdir(os.path.dirname(hook_file))
+            if name.startswith("herdr-kiro.json.user-modified.")
+        ]
+        self.assertEqual(len(matches), 1)
+        with open(os.path.join(os.path.dirname(hook_file), matches[0]), "rb") as handle:
+            self.assertIn(b"# user edit\n", handle.read())
+        self.assertFalse(os.path.exists(hook_file + ".herdr-kiro-owned"))
+
+    def test_install_refuses_a_symlinked_hook(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        hooks = os.path.join(home, ".kiro", "hooks")
+        os.makedirs(hooks)
+        target = os.path.join(base, "target.json")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("keep\n")
+        link = os.path.join(hooks, "herdr-kiro.json")
+        os.symlink(target, link)
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "install.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("left %s alone" % link, completed.stderr)
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(os.readlink(link), target)
+        with open(target, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "keep\n")
+        self.assertFalse(os.path.exists(os.path.join(home, ".config", "herdr", "agent-detection", "kiro.toml")))
+
+    def test_install_twice_is_idempotent(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        env = self._home_env(home)
+        script = os.path.join(ROOT, "install.sh")
+        first = subprocess.run(
+            ["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
+        self.assertEqual(first.returncode, 0, first.stderr or first.stdout)
+        snap = self._files(home)
+        second = subprocess.run(
+            ["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
+        self.assertEqual(second.returncode, 0, second.stderr or second.stdout)
+        self.assertEqual(self._files(home), snap)
+
+    def test_startup_state_dir_is_private(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        state = os.path.join(home, ".local", "state", "herdr-kiro")
+        os.makedirs(state, mode=0o755)
+        os.chmod(state, 0o755)
+        with open(os.path.join(state, "lifecycle"), "w", encoding="utf-8") as handle:
+            handle.write("uninstalled\n")
+        env = self._home_env(home)
+        completed = subprocess.run(
+            ["sh", os.path.join(ROOT, "startup.sh")],
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        self.assertEqual(os.stat(state).st_mode & 0o777, 0o700)
 
 
 if __name__ == "__main__":

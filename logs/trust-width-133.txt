@@ -21,7 +21,7 @@
  ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  esc to exit · ↑↓ to navigate · ↵ to select
 
- Revoke later by removing workspaceTrusted from /home/ubuntu/.kiro/workspace-roots/f2e6426dca7adc49/permissions.yaml
+ Revoke later by removing workspaceTrusted from /Users/Jane Doe/.kiro/workspace-roots/f2e6426dca7adc49/permissions.yaml
 
 
 

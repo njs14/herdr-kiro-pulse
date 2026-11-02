@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 BASE="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-kiro"
 MARK="$BASE/lifecycle"
 mkdir -p "$BASE"
+chmod 700 "$BASE"
 if [ ! -f "$MARK" ]; then
   python3 - "$BASE" << 'PY'
 import hashlib

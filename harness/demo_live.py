@@ -16,8 +16,10 @@ SECRET = os.environ.get("KIRO_API_KEY", "")
 
 
 def scrub(text: str) -> str:
-    if SECRET and SECRET in text:
-        return text.replace(SECRET, "[redacted]")
+    """Replace KIRO_API_KEY with a placeholder. Reads the environment each call."""
+    secret = os.environ.get("KIRO_API_KEY", "") or SECRET
+    if secret and text and secret in text:
+        return text.replace(secret, "[redacted]")
     return text
 
 

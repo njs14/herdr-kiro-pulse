@@ -45,7 +45,7 @@ On macOS the same binary looks up config under `~/.config/herdr` (or `$XDG_CONFI
 ./uninstall.sh
 ```
 
-This removes the hook file when the stored hash still matches, and renames a user-edited copy to `herdr-kiro.json.user-modified`. It stops only watchers recorded for this user in the state directory `pids` files. It does not read `/proc`. It leaves `*.seq` so the next run does not restart the sequence at 1. A fresh state file with no floor starts at the current unix time instead of 1. It removes the Kiro detection override when that file contains `workflow_banner_working`, and restores `*.original` the same way.
+This removes the hook file only when the marker sha256 still matches, and renames a user-edited copy to `herdr-kiro.json.user-modified.<timestamp>` before restoring `*.original`. A file with no marker, or a marker with no hash, is left unchanged, including when the text contains `workflow_banner_working` or `herdr-kiro-SessionStart`. doctor classifies files with the same check. It stops a watcher only when the pid file records this uid, a sub-second start token, and the comm basename, and the live process still matches both. It leaves `*.seq` so the next run does not restart the sequence at 1. A fresh state file with no floor starts at the current unix time instead of 1.
 
 ## Stripped session ids
 

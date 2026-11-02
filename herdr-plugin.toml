@@ -1,6 +1,6 @@
 id = "herdr-kiro"
 name = "Kiro workflow state"
-version = "0.13.0"
+version = "0.13.1"
 min_herdr_version = "0.9.5"
 description = "Keep a Kiro CLI V3 workflow pane working in herdr, and report a visible blocker as blocked."
 platforms = ["linux", "macos"]

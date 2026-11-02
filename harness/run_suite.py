@@ -9,8 +9,46 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
+sys.path.insert(0, os.path.join(ROOT, "harness"))
 
 import herdr_kiro_state as hook
+from demo_live import scrub
+
+
+class SecretLeak(RuntimeError):
+    """KIRO_API_KEY was still present after scrub."""
+
+
+def guard_text(text: str) -> str:
+    """Scrub pane text. Fail when the key survives."""
+    cleaned = scrub("" if text is None else text)
+    secret = os.environ.get("KIRO_API_KEY", "")
+    if secret and secret in cleaned:
+        raise SecretLeak("KIRO_API_KEY still present")
+    return cleaned
+
+
+def guard_obj(value):
+    if isinstance(value, str):
+        return guard_text(value)
+    if isinstance(value, list):
+        return [guard_obj(item) for item in value]
+    if isinstance(value, dict):
+        return {guard_text(str(key)): guard_obj(item) for key, item in value.items()}
+    return value
+
+
+def write_private(path: str, text: str) -> None:
+    cleaned = guard_text(text)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(cleaned)
+
+
+def say(text: str) -> None:
+    print(guard_text(text), flush=True)
 
 SESSION = os.environ.get("HERDR_SESSION", "kiro-repro")
 PANE = os.environ.get("HERDR_PANE", "w1:p1")
@@ -79,14 +117,15 @@ def accept_trust_dialog():
         return False
     os.makedirs(LOG_DIR, exist_ok=True)
     status, seq = agent_status()
-    with open(os.path.join(LOG_DIR, "trust-dialog.txt"), "w", encoding="utf-8") as handle:
-        handle.write(text)
-    with open(os.path.join(LOG_DIR, "trust-dialog-status.txt"), "w", encoding="utf-8") as handle:
-        handle.write(f"agent_status={status} seq={seq}\n")
-        handle.write(
+    write_private(os.path.join(LOG_DIR, "trust-dialog.txt"), text)
+    write_private(
+        os.path.join(LOG_DIR, "trust-dialog-status.txt"),
+        "agent_status=%s seq=%s\n" % (status, seq)
+        + (
             "The trust-all confirmation is on the parent pane. "
             "herdr does not match it to a Kiro approval rule, so the status above is not blocked.\n"
-        )
+        ),
+    )
     herdr("agent", "send-keys", PANE, "down", "enter", timeout=10)
     time.sleep(1.2)
     return True
@@ -315,10 +354,9 @@ def assert_run(name, rows, stops, _run_start=None):
 
 def write_log(name, rows):
     os.makedirs(LOG_DIR, exist_ok=True)
-    path = os.path.join(LOG_DIR, f"poll-{name}.jsonl")
-    with open(path, "w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row) + "\n")
+    path = os.path.join(LOG_DIR, "poll-%s.jsonl" % name)
+    body = "".join(json.dumps(guard_obj(row)) + "\n" for row in rows)
+    write_private(path, body)
     return path
 
 
@@ -361,22 +399,20 @@ def save_stops(name, start):
                 except ValueError:
                     continue
                 if stamped >= start:
-                    lines.append(line if line.endswith("\n") else line + "\n")
+                    lines.append(guard_text(line if line.endswith("\n") else line + "\n"))
     except OSError:
         pass
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.writelines(lines)
+    write_private(path, "".join(lines))
     return path
 
 
 def save_ps(name):
-    path = os.path.join(LOG_DIR, f"ps-{name}.txt")
-    rows = watcher_commands()
-    with open(path, "w", encoding="utf-8") as handle:
-        if rows:
-            handle.write("\n".join(rows) + "\n")
-        else:
-            handle.write("no herdr_kiro_state.py watcher\n")
+    path = os.path.join(LOG_DIR, "ps-%s.txt" % name)
+    rows = [guard_text(row) for row in watcher_commands()]
+    if rows:
+        write_private(path, "\n".join(rows) + "\n")
+    else:
+        write_private(path, "no herdr_kiro_state.py watcher\n")
     return path, rows
 
 
@@ -439,23 +475,28 @@ def main() -> int:
         ),
     ]
     results = {}
-    for name, text, seconds in cases:
-        print(f"RUN {name}", flush=True)
-        try:
-            results[name] = run_case(name, text, seconds)
-            print(f"PASS {name} {results[name]}", flush=True)
-        except Exception as exc:
-            screen = visible_text()[-1500:]
-            path = os.path.join(LOG_DIR, f"fail-{name}.txt")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(str(exc) + "\n\n" + screen)
-            print(f"FAIL {name}: {exc}", flush=True)
-            results[name] = {"error": str(exc), "screen": path}
+    try:
+        for name, text, seconds in cases:
+            say("RUN %s" % name)
+            try:
+                results[name] = guard_obj(run_case(name, text, seconds))
+                say("PASS %s %s" % (name, results[name]))
+            except SecretLeak:
+                say("FAIL %s: KIRO_API_KEY still present" % name)
+                return 1
+            except Exception as exc:
+                screen = guard_text(visible_text()[-1500:])
+                path = os.path.join(LOG_DIR, "fail-%s.txt" % name)
+                write_private(path, guard_text(str(exc)) + "\n\n" + screen)
+                say("FAIL %s: %s" % (name, guard_text(str(exc))))
+                results[name] = {"error": guard_text(str(exc)), "screen": path}
+    except SecretLeak:
+        say("FAIL: KIRO_API_KEY still present")
+        return 1
     summary_path = os.path.join(LOG_DIR, "suite-summary.json")
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(results, handle, indent=2)
+    write_private(summary_path, json.dumps(guard_obj(results), indent=2))
     failed = [name for name, item in results.items() if "error" in item]
-    print(json.dumps(results, indent=2))
+    say(json.dumps(results, indent=2))
     return 1 if failed else 0
 
 

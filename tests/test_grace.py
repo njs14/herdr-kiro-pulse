@@ -1108,6 +1108,155 @@ class GraceTests(unittest.TestCase):
             hook._EXPLAIN_ENV = previous_env
             hook._RULES_DIR = previous_dir
 
+    def test_pane_id_and_watch_path_stay_inside_the_state_dir(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        state_home = os.path.join(base, "state")
+        outside = os.path.join(base, "outside.json")
+        with open(outside, "w", encoding="utf-8") as handle:
+            handle.write("secret")
+        previous = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = state_home
+        try:
+            self.assertIsNone(hook.resolved_state_file("../etc/passwd"))
+            self.assertIsNone(hook.resolved_state_file(".."))
+            self.assertIsNone(hook.resolved_state_file("a/b"))
+            self.assertIsNone(hook.resolved_state_file("a b"))
+            self.assertIsNone(hook.resolved_state_file(""))
+            self.assertIsNone(hook.resolved_state_file("a" * 65))
+            path = hook.resolved_state_file("w1:p1")
+            self.assertTrue(path.endswith(os.path.join("herdr-kiro", "w1_p1.json")))
+            self.assertTrue(hook.inside_state_dir(path))
+            env = dict(os.environ)
+            script = os.path.abspath(hook.__file__)
+            completed = subprocess.run(
+                [sys.executable, script, "--watch", "w1:p1", outside],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 1)
+            with open(outside, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "secret")
+            linked = os.path.join(hook.state_dir(), "w1_p1.json")
+            os.symlink(outside, linked)
+            completed = subprocess.run(
+                [sys.executable, script, "--watch", "w1:p1", linked],
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 1)
+            with open(outside, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "secret")
+            env["HERDR_ENV"] = "1"
+            env["HERDR_PANE_ID"] = "../escaped"
+            completed = subprocess.run(
+                [sys.executable, script, "SessionStart"],
+                env=env,
+                input="{}",
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertFalse(os.path.exists(os.path.join(base, "escaped.json")))
+        finally:
+            if previous is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = previous
+
+    def test_screen_text_is_written_in_the_state_dir(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        seen = {}
+        real_run = subprocess.run
+
+        def run(args, **kwargs):
+            if args and args[0] == "ps":
+                return real_run(args, **kwargs)
+            path = args[args.index("--file") + 1]
+            seen["path"] = path
+            self.assertEqual(
+                os.path.dirname(os.path.realpath(path)),
+                os.path.realpath(hook.state_dir()),
+            )
+            self.assertTrue(os.path.basename(path).startswith("herdr-kiro-screen-"))
+            self.assertTrue(os.path.isfile(path))
+            return subprocess.CompletedProcess(
+                args, 0, stdout='{"state":"idle","matched_rule":{"id":"live_prompt_idle"}}'
+            )
+
+        previous_state = os.environ.get("XDG_STATE_HOME")
+        previous_env = hook._EXPLAIN_ENV
+        previous_dir = hook._RULES_DIR
+        hook._SCREEN_CACHE.clear()
+        hook._EXPLAIN_ENV = None
+        hook._RULES_DIR = None
+        os.environ["XDG_STATE_HOME"] = os.path.join(base, "xdg")
+        try:
+            with mock.patch.object(hook.subprocess, "run", run):
+                view = hook.screen_view("pane text")
+        finally:
+            if previous_state is None:
+                os.environ.pop("XDG_STATE_HOME", None)
+            else:
+                os.environ["XDG_STATE_HOME"] = previous_state
+            hook._SCREEN_CACHE.clear()
+            if hook._RULES_DIR and os.path.isdir(hook._RULES_DIR):
+                hook.remove_tree(hook._RULES_DIR)
+            hook._EXPLAIN_ENV = previous_env
+            hook._RULES_DIR = previous_dir
+        self.assertEqual(view["id"], "live_prompt_idle")
+        self.assertFalse(os.path.exists(seen["path"]))
+
+    def test_hires_start_is_finer_than_a_second_and_comm_must_match(self):
+        hook.begin_tick()
+        ident = hook.watcher_identity(os.getpid())
+        self.assertIsNotNone(ident)
+        self.assertRegex(ident["start"], r"^\d+\.\d{6}$")
+        self.assertTrue(ident["comm"])
+        self.assertTrue(
+            hook.watcher_matches(os.getpid(), str(os.getuid()), ident["start"], ident["comm"])
+        )
+        self.assertFalse(
+            hook.watcher_matches(os.getpid(), str(os.getuid()), ident["start"], "not-the-comm")
+        )
+        self.assertFalse(hook.watcher_matches(os.getpid(), str(os.getuid()), "1", ident["comm"]))
+        self.assertFalse(
+            hook.watcher_matches(os.getpid(), "0", ident["start"], ident["comm"])
+        )
+
+    def test_rules_delete_does_not_follow_symlinks(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        outside = os.path.join(base, "outside")
+        os.makedirs(outside)
+        kept = os.path.join(outside, "keep.txt")
+        with open(kept, "w", encoding="utf-8") as handle:
+            handle.write("safe")
+        tree = os.path.join(base, "tree")
+        os.makedirs(os.path.join(tree, "nested"))
+        with open(os.path.join(tree, "nested", "gone.txt"), "w", encoding="utf-8") as handle:
+            handle.write("x")
+        os.symlink(outside, os.path.join(tree, "linkdir"))
+        os.symlink(kept, os.path.join(tree, "linkfile"))
+        top = os.path.join(base, "top-link")
+        os.symlink(outside, top)
+        hook.remove_tree(top)
+        self.assertTrue(os.path.islink(top))
+        hook.remove_tree(tree)
+        self.assertFalse(os.path.exists(tree))
+        with open(kept, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "safe")
+        self.assertTrue(os.path.isdir(outside))
+
 
 if __name__ == "__main__":
     unittest.main()
