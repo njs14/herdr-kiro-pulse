@@ -12,13 +12,9 @@ Stock Kiro detection reads the idle prompt and calls the pane idle, including wh
 
 One pane, twelve seconds. The prompt looks idle, the banner is still a running workflow, then `Allow once` blocks the pane.
 
-![A Kiro pane with the workflow banner still up, Allow once selected, and the status chip reading BLOCKED](demo/poster.png)
+![Twelve seconds: the prompt is idle, the banner is still running, then Allow once blocks the pane](demo/herdr-kiro-demo.gif)
 
-[demo/herdr-kiro-demo.mp4](demo/herdr-kiro-demo.mp4)
-
-<video src="demo/herdr-kiro-demo.mp4" controls width="720"></video>
-
-The file is `demo/herdr-kiro-demo.mp4` (1920×1080, 12 seconds, 30 fps). The three states, in order:
+The clip above is `demo/herdr-kiro-demo.gif` (960×540, 12 seconds) so it plays on the page. The source render is [demo/herdr-kiro-demo.mp4](demo/herdr-kiro-demo.mp4) (1920×1080, 30 fps). The three states, in order:
 
 1. The idle prompt and no banner: the pane is idle.
 2. `▶ two-step running` is on screen: the pane is working.
@@ -73,6 +69,7 @@ npm install
 cd demo
 npx hyperframes check
 npx hyperframes render -o herdr-kiro-demo.mp4
+ffmpeg -y -i herdr-kiro-demo.mp4 -vf "fps=12,scale=960:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse" -loop 0 herdr-kiro-demo.gif
 ```
 
 ## Why not the stock Kiro rules
