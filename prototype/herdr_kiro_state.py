@@ -458,9 +458,29 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
     if not pane_id_ok(pane):
         log("refusing report")
         return False
-    if kind not in ("working", "idle", "blocked"):
+    if kind not in ("working", "idle", "blocked", "unknown"):
         raise ValueError(kind)
+    # herdr 0.9.5 stores an unseen Working or Blocked -> Idle change as done.
+    # agent explain still returns the screen rule, which is idle, so the two
+    # disagree. unknown is not a completion and marks the pane seen, and the
+    # idle report that follows stays idle on a background workspace too.
+    if kind == "idle":
+        prior = update(path, lambda _state: None).get("reported")
+        if prior in ("working", "blocked"):
+            if not emit_report(pane, path, "unknown"):
+                def revert(state: dict) -> None:
+                    state["reported"] = prior
 
+                update(path, revert)
+                return False
+    ok = emit_report(pane, path, kind)
+    if kind != "idle" or not release:
+        return ok
+
+    return release_authority(pane, path) and ok
+
+
+def emit_report(pane: str, path: str, kind: str) -> bool:
     def bump(state: dict) -> None:
         state["seq"] += 1
         state["reported"] = kind
@@ -468,7 +488,7 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
             state["grace_until"] = 0.0
 
     seq = str(update(path, bump)["seq"])
-    ok = herdr(
+    return herdr(
         "report-agent",
         pane,
         "--source",
@@ -480,10 +500,6 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
         "--seq",
         seq,
     )
-    if kind != "idle" or not release:
-        return ok
-
-    return release_authority(pane, path) and ok
 
 
 def release_authority(pane: str, path: str) -> bool:
