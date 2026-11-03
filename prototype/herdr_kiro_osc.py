@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import subprocess
 
@@ -18,7 +19,11 @@ _STATES = {"idle", "working", "done", "blocked", "error", "clear"}
 _KINDS = {"permission", "question", "auth"}
 _QUESTION_RULES = {"question_panel", "workflow_question_esc_cancel"}
 _TTY = re.compile(r"^/dev/(pts/[0-9]+|ttys[0-9]+)$")
-_OPEN = os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_FLAG_SETS = (
+    os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | _CLOEXEC,
+    os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | _CLOEXEC,
+)
 
 
 def fields_for(kind: str, rule_id: str = "") -> dict | None:
@@ -147,6 +152,11 @@ def _ps_field(pid: int, field: str) -> str:
 
 
 def _tty_opens(pid: int):
+    """Stdout, then stderr, then stdin.
+
+    Linux uses `/proc/<pid>/fd`. Elsewhere `lsof` names those same fds.
+    `ps -o tty=` is only the controlling terminal, and a setsid hook has none.
+    """
     proc = f"/proc/{pid}/fd"
     if os.path.isdir(proc):
         for name in ("1", "2", "0"):
@@ -158,9 +168,62 @@ def _tty_opens(pid: int):
             if _TTY.fullmatch(target):
                 yield link, target
         return
-    device = _tty_from_ps(pid)
-    if device:
-        yield device, device
+    seen: set[str] = set()
+    devices = _fd_devices(pid)
+    for name in ("1", "2", "0"):
+        device = devices.get(name) or ""
+        if _TTY.fullmatch(device) and device not in seen:
+            seen.add(device)
+            yield device, device
+    controlling = _tty_from_ps(pid)
+    if controlling and controlling not in seen:
+        yield controlling, controlling
+
+
+def _devices_from_lsof(text: str) -> dict[str, str]:
+    """Map fd number to path from `lsof -F fn` text. Stdout is field `f1`."""
+    found: dict[str, str] = {}
+    number = ""
+    for line in text.splitlines():
+        if line.startswith("f"):
+            number = ""
+            digits: list[str] = []
+            for ch in line[1:]:
+                if not ch.isdigit():
+                    break
+                digits.append(ch)
+            number = "".join(digits)
+        elif line.startswith("n") and number and number not in found:
+            found[number] = line[1:].strip()
+            number = ""
+    return found
+
+
+def _lsof_bin() -> str:
+    found = shutil.which("lsof") or ""
+    if found:
+        return found
+    if os.access("/usr/sbin/lsof", os.X_OK):
+        return "/usr/sbin/lsof"
+    return ""
+
+
+def _fd_devices(pid: int) -> dict[str, str]:
+    binary = _lsof_bin()
+    if not binary:
+        return {}
+    try:
+        completed = subprocess.run(
+            [binary, "-n", "-P", "-a", "-p", str(int(pid)), "-d", "0,1,2", "-F", "fn"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return _devices_from_lsof(completed.stdout or "")
 
 
 def _tty_from_ps(pid: int) -> str:
@@ -182,21 +245,25 @@ def _write_path(open_path: str, device: str, payload: bytes) -> bool:
         return False
     if not stat.S_ISCHR(expected.st_mode):
         return False
-    try:
-        fd = os.open(open_path, _OPEN)
-    except OSError:
-        return False
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISCHR(info.st_mode) or info.st_rdev != expected.st_rdev:
-            return False
-        _write_all(fd, payload)
-    except OSError:
-        return False
-    else:
-        return True
-    finally:
-        os.close(fd)
+    for flags in _FLAG_SETS:
+        try:
+            fd = os.open(open_path, flags)
+        except OSError:
+            continue
+        ok = False
+        try:
+            info = os.fstat(fd)
+            ok = stat.S_ISCHR(info.st_mode) and info.st_rdev == expected.st_rdev
+            if ok:
+                _write_all(fd, payload)
+        except OSError:
+            continue
+        else:
+            if ok:
+                return True
+        finally:
+            os.close(fd)
+    return False
 
 
 def _write_all(fd: int, payload: bytes) -> None:
@@ -209,24 +276,25 @@ def _write_all(fd: int, payload: bytes) -> None:
 
 
 def _write_controlling(payload: bytes) -> str:
-    try:
-        fd = os.open("/dev/tty", _OPEN)
-    except OSError:
-        return ""
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISCHR(info.st_mode):
-            return ""
+    for flags in _FLAG_SETS:
         try:
-            device = os.ttyname(fd)
+            fd = os.open("/dev/tty", flags)
         except OSError:
-            return ""
-        if not _TTY.fullmatch(device):
-            return ""
-        _write_all(fd, payload)
-    except OSError:
-        return ""
-    else:
-        return device
-    finally:
-        os.close(fd)
+            continue
+        device = ""
+        try:
+            info = os.fstat(fd)
+            if stat.S_ISCHR(info.st_mode):
+                device = os.ttyname(fd)
+            if not _TTY.fullmatch(device):
+                device = ""
+            elif device:
+                _write_all(fd, payload)
+        except OSError:
+            continue
+        else:
+            if device:
+                return device
+        finally:
+            os.close(fd)
+    return ""

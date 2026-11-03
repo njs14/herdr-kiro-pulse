@@ -163,6 +163,49 @@ class OscDeliveryTests(unittest.TestCase):
         got = _read_ready(master, 1.0)
         self.assertIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got)
 
+    def test_lsof_text_names_stdout_before_the_controlling_tty(self):
+        text = "p42\nf1u\nn/dev/ttys000\nf2w\nn/dev/ttys000\nf0r\nn/dev/ttys001\nfcwd\nn/\n"
+        self.assertEqual(
+            osc._devices_from_lsof(text),
+            {"1": "/dev/ttys000", "2": "/dev/ttys000", "0": "/dev/ttys001"},
+        )
+
+    def test_missing_proc_writes_the_fd_device(self):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        holder = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+        )
+        self.addCleanup(_stop, holder)
+        device = os.ttyname(slave)
+        payload = osc.encode(osc.fields_for("working"))
+        real_isdir = os.path.isdir
+
+        def hide_proc(path):
+            text = str(path)
+            if text.startswith("/proc/") and text.endswith("/fd"):
+                return False
+            return real_isdir(path)
+
+        def devices(pid):
+            if pid == holder.pid:
+                return {"1": device}
+            return {}
+
+        with (
+            mock.patch.object(osc, "_fd_devices", devices),
+            mock.patch.object(osc.os.path, "isdir", hide_proc),
+        ):
+            written = osc.write_pid(payload, holder.pid)
+        self.assertEqual(written, device)
+        self.assertIn(payload, _read_ready(master, 1.0))
+        _stop(holder)
+
 
 class OscHookTests(unittest.TestCase):
     def test_app_idle_is_done_on_the_tty_and_tui_stays_idle(self):

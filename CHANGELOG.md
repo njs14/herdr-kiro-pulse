@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-The hook reports a Kiro CLI V3 session to the Herdr App with OSC 7501 on the pane tty. `hc` is herdr-core and has no status-set command. A finished turn is `state=done` on the App and still `idle` on the Herdr TUI. The TUI report is not followed by `release-agent` while kiro-cli is running. Question-panel rules use `kind=question`. Other blockers use `kind=permission`.
+The hook reports a Kiro CLI V3 session to the Herdr App with OSC 7501 on the pane tty. `hc` is herdr-core and has no status-set command. A finished turn is `state=done` on the App and still `idle` on the Herdr TUI. The TUI report is not followed by `release-agent` while kiro-cli is running. Question-panel rules use `kind=question`. Other blockers use `kind=permission`. On macOS the pane device comes from the process's stdout fd. A setsid hook has no controlling terminal, so `ps -o tty=` is not that device.
 
 ## 0.13.2
 
