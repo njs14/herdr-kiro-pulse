@@ -174,7 +174,8 @@ class InstallTests(unittest.TestCase):
         hook.begin_tick()
         ident = hook.watcher_identity(watcher.pid)
         self.assertIsNotNone(ident)
-        self.assertIn(".", ident["start"])
+        # Linux is fractional seconds. Other platforms tag whole seconds with sec:.
+        self.assertRegex(ident["start"], r"^(?:\d+\.\d+|sec:\d+)$")
         decoy_ident = hook.watcher_identity(decoy.pid)
         self.assertIsNotNone(decoy_ident)
         pid_dir = os.path.join(state, "pids")
