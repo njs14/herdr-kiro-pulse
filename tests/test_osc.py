@@ -7,6 +7,7 @@ the captured pipe must stay empty.
 
 import os
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,18 @@ def _read_ready(fd, timeout):
     return os.read(fd, 4096)
 
 
+def _stop(proc):
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=5)
+
+
+def _scratch(prefix):
+    fd, path = tempfile.mkstemp(prefix=prefix)
+    os.close(fd)
+    return path
+
+
 class OscMapTests(unittest.TestCase):
     def test_spec_states_are_the_only_words(self):
         self.assertEqual(osc.fields_for("working"), {"state": "working", "app": "kiro"})
@@ -38,7 +51,10 @@ class OscMapTests(unittest.TestCase):
             osc.fields_for("blocked", "workflow_question_esc_cancel"),
             {"state": "blocked", "kind": "question", "app": "kiro"},
         )
-        self.assertEqual(osc.fields_for("blocked", "workspace_trust")["kind"], "permission")
+        self.assertEqual(
+            osc.fields_for("blocked", "workspace_trust"),
+            {"state": "blocked", "kind": "permission", "app": "kiro"},
+        )
         # A finished TUI report is idle. The App word for that finish is done.
         self.assertEqual(osc.fields_for("idle"), {"state": "done", "app": "kiro"})
         self.assertIsNone(osc.fields_for("unknown"))
@@ -58,22 +74,20 @@ class OscMapTests(unittest.TestCase):
         self.assertEqual(osc.encode(osc.fields_for("idle")), b"\x1b]7501;state=done:app=kiro\x1b\\")
 
     def test_a_regular_file_is_not_a_pane(self):
-        handle = tempfile.NamedTemporaryFile(prefix="herdr-kiro-notty-")
-        self.addCleanup(handle.close)
-        holder = subprocess.Popen(
-            ["sleep", "30"],
-            stdin=subprocess.DEVNULL,
-            stdout=handle,
-            stderr=subprocess.DEVNULL,
-        )
-        self.addCleanup(lambda: holder.poll() is not None or holder.kill())
-        payload = osc.encode(osc.fields_for("working"))
-        self.assertEqual(osc.write_pid(payload, holder.pid), "")
-        holder.kill()
-        holder.wait(timeout=5)
-        handle.flush()
-        handle.seek(0)
-        self.assertNotIn(b"7501", handle.read())
+        with tempfile.NamedTemporaryFile(prefix="herdr-kiro-notty-") as handle:
+            holder = subprocess.Popen(
+                ["sleep", "30"],
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.DEVNULL,
+            )
+            self.addCleanup(_stop, holder)
+            payload = osc.encode(osc.fields_for("working"))
+            self.assertEqual(osc.write_pid(payload, holder.pid), "")
+            _stop(holder)
+            handle.flush()
+            handle.seek(0)
+            self.assertNotIn(b"7501", handle.read())
 
 
 class OscDeliveryTests(unittest.TestCase):
@@ -88,15 +102,14 @@ class OscDeliveryTests(unittest.TestCase):
             stderr=slave,
             start_new_session=True,
         )
-        self.addCleanup(lambda: holder.poll() is not None or holder.kill())
+        self.addCleanup(_stop, holder)
         _read_ready(master, 0.05)
         payload = osc.encode(osc.fields_for("idle"))
         written = osc.write_pid(payload, holder.pid)
         self.assertEqual(written, os.ttyname(slave))
         got = _read_ready(master, 1.0)
         self.assertIn(payload, got)
-        holder.kill()
-        holder.wait(timeout=5)
+        _stop(holder)
 
     def test_setsid_hook_writes_the_ancestor_pty_not_its_pipe(self):
         master, slave = os.openpty()
@@ -126,26 +139,25 @@ class OscDeliveryTests(unittest.TestCase):
             "open(sys.argv[4], 'wb').write(err)\n"
             "open(sys.argv[5], 'w').write(str(proc.returncode))\n"
         )
-        stdout_path = tempfile.NamedTemporaryFile(prefix="herdr-kiro-hook-out-", delete=False)
-        stderr_path = tempfile.NamedTemporaryFile(prefix="herdr-kiro-hook-err-", delete=False)
-        code_path = tempfile.NamedTemporaryFile(prefix="herdr-kiro-hook-code-", delete=False)
-        for handle in (stdout_path, stderr_path, code_path):
-            handle.close()
-            self.addCleanup(lambda path=handle.name: os.path.exists(path) and os.remove(path))
+        stdout_path = _scratch("herdr-kiro-hook-out-")
+        stderr_path = _scratch("herdr-kiro-hook-err-")
+        code_path = _scratch("herdr-kiro-hook-code-")
+        for path in (stdout_path, stderr_path, code_path):
+            self.addCleanup(lambda kept=path: os.path.exists(kept) and os.remove(kept))
         parent = subprocess.Popen(
-            [sys.executable, "-c", parent_code, hook_code, proto, stdout_path.name, stderr_path.name, code_path.name],
+            [sys.executable, "-c", parent_code, hook_code, proto, stdout_path, stderr_path, code_path],
             stdin=slave,
             stdout=slave,
             stderr=slave,
         )
-        self.addCleanup(lambda: parent.poll() is not None or parent.kill())
+        self.addCleanup(_stop, parent)
         self.assertEqual(parent.wait(timeout=20), 0)
-        with open(code_path.name, encoding="utf-8") as handle:
+        with open(code_path, encoding="utf-8") as handle:
             self.assertEqual(handle.read().strip(), "0")
-        with open(stdout_path.name, "rb") as handle:
+        with open(stdout_path, "rb") as handle:
             captured = handle.read()
         self.assertNotIn(b"7501", captured)
-        with open(stderr_path.name, "rb") as handle:
+        with open(stderr_path, "rb") as handle:
             reported = handle.read().decode("utf-8", "replace").strip()
         self.assertEqual(reported, os.ttyname(slave))
         got = _read_ready(master, 1.0)
@@ -164,13 +176,13 @@ class OscHookTests(unittest.TestCase):
             stderr=slave,
             start_new_session=True,
         )
-        self.addCleanup(lambda: holder.poll() is not None or holder.kill())
+        self.addCleanup(_stop, holder)
         directory = tempfile.mkdtemp(prefix="herdr-kiro-osc-")
-        self.addCleanup(lambda: os.path.isdir(directory) and os.rmdir(directory) if not os.listdir(directory) else None)
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
 
         def seed(state):
-            state["owners"] = {"sess": holder.pid}
+            state["chat_pid"] = holder.pid
             state["reported"] = "working"
             state["seq"] = 4
 
@@ -188,18 +200,12 @@ class OscHookTests(unittest.TestCase):
         self.assertNotIn("release-agent", [args[0] for args in calls])
         got = _read_ready(master, 1.0)
         self.assertIn(b"\x1b]7501;state=done:app=kiro\x1b\\", got)
-        holder.kill()
-        holder.wait(timeout=5)
-        os.remove(path)
-        floor = path + ".seq"
-        if os.path.exists(floor):
-            os.remove(floor)
-        os.rmdir(directory)
+        _stop(holder)
 
     def test_tui_report_does_not_need_a_pane_tty(self):
         directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-")
         path = os.path.join(directory, "pane.json")
-        self.addCleanup(lambda: os.path.isdir(directory) and __import__("shutil").rmtree(directory, True))
+        self.addCleanup(shutil.rmtree, directory, True)
         hook.update(path, lambda state: state.update({"reported": "working", "seq": 4}))
         calls = []
 

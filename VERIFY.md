@@ -6,7 +6,7 @@ Do not print `KIRO_API_KEY`. Do not write it into logs.
 
 ## What passing looks like
 
-`python3 -m unittest tests.test_grace tests.test_install tests.test_detection` exits 0.
+`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty. It does not launch the Herdr App. A live App check is a Mac run of `kiro-cli chat --v3` inside an App terminal.
 
 `tests/run_py39.sh` runs those tests on Python 3.9. Stock macOS `/usr/bin/python3` is 3.9, and the hook uses `from __future__ import annotations` so `int | None` is not evaluated at import.
 

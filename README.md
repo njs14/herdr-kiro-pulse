@@ -4,9 +4,20 @@
 
 # herdr-kiro
 
-A [herdr](https://herdr.dev) plugin that reports a [Kiro CLI](https://kiro.dev/docs/cli) V3 workflow pane as working for the whole run, and as blocked while a chooser or the workspace-trust dialog is on screen.
+A [herdr](https://herdr.dev) plugin that reports a [Kiro CLI](https://kiro.dev/docs/cli) V3 session to the Herdr App, and still to the Herdr TUI.
 
-Stock Kiro detection reads the idle prompt and calls the pane idle, including when `▶ name running` is still painted above that prompt. This plugin reports the pane from the workflow and from those dialogs. herdr 0.9.5 does not merge a local detection file with the remote one, so installing this replaces upstream Kiro rules until you uninstall.
+The App reads status only from OSC 7501 on the program's own output. `hc` is the herdr-core CLI. It can print a screen and paste input. It cannot set status. Inside an App terminal, core sets `HC_TERMINAL_ID`, and this hook writes one report to that pane's tty:
+
+- a running turn is `state=working:app=kiro`
+- a chooser or the workspace-trust dialog is `state=blocked:kind=permission:app=kiro`
+- a question panel is `state=blocked:kind=question:app=kiro`
+- a finished turn is `state=done:app=kiro`
+
+The App shows `blocked` as needing you, and `done` until the pane is seen, then idle. Those are display names. The bytes stay `blocked` and `done`.
+
+The Herdr TUI path is unchanged. `HERDR_ENV=1` and `HERDR_PANE_ID` still call `herdr pane report-agent` with `working`, `idle`, `blocked`, or `unknown`. A finished turn is an `idle` report. herdr 0.9.5 shows that unseen idle as done. The hook does not call `release-agent` while `kiro-cli` is running.
+
+Stock Kiro detection reads the idle prompt and calls the pane idle, including when `▶ name running` is still painted above that prompt. On the TUI, this plugin reports the pane from the workflow and from those dialogs. herdr 0.9.5 does not merge a local detection file with the remote one, so installing this replaces upstream Kiro rules until you uninstall.
 
 ## Demo
 
@@ -61,7 +72,7 @@ Kiro reads hooks when its process starts. After install:
 kiro-cli chat --v3
 ```
 
-The hook was tested with `chat.agentEngine` set to `v3` and `chat.enableWorkflows` set to `true`. Nothing in this package writes those settings, and nothing restarts a `kiro-cli` that is already running. Outside a herdr pane the hook exits without reporting.
+The hook was tested with `chat.agentEngine` set to `v3` and `chat.enableWorkflows` set to `true`. Nothing in this package writes those settings, and nothing restarts a `kiro-cli` that is already running. Outside an App terminal (`HC_TERMINAL_ID`) and outside a TUI pane (`HERDR_ENV=1` and `HERDR_PANE_ID`) the hook exits without reporting.
 
 ```bash
 ./doctor.sh
@@ -96,7 +107,7 @@ Stay on the stock file if you want herdr to keep applying newer remote Kiro rule
 
 Version 0.13.2, from `herdr-plugin.toml`. Actively changed. Not a stable API, and not published.
 
-Unit tests on this tree: 137 passed, 0 failed, on Python 3.12, with herdr 0.9.5. The command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction`. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes from herdr 0.9.5 and Kiro CLI 2.37.0 are in [VERIFY.md](VERIFY.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
+Unit tests on this tree: 144 passed, 0 failed, on Python 3.12, with herdr 0.9.5. The command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes from herdr 0.9.5 and Kiro CLI 2.37.0 are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 `python3 harness/run_suite.py` drives workflows in a herdr pane. It needs a session, a Kiro pane, and `KIRO_API_KEY` in that environment. Do not print the key.
 
