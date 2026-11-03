@@ -42,7 +42,7 @@ python3 .cursor/skills/verify-herdr-kiro/drive.py focus-primary
 
 ## Evidence
 
-`wait` and `status --save` write JSON under `$VERIFY_EVIDENCE/<run-id>/` (default `/tmp/herdr-kiro-verify-evidence/<run-id>/`). Each file has `agent_status`, `state_change_seq`, `completion_seq`, `explain_state`, and `explain_rule`. The herdr server log and `hook.log` are in that same directory. Proof is the command plus the saved JSON, not the final number alone. A finished turn is proved only when `completion_seq` is null and both sides say idle. Do not copy these files into the repo.
+`wait` and `status --save` write JSON under `$VERIFY_EVIDENCE/<run-id>/` (default `/tmp/herdr-kiro-verify-evidence/<run-id>/`). Each file has `agent_status`, `state_change_seq`, `completion_seq`, `explain_state`, and `explain_rule`. The herdr server log and `hook.log` are in that same directory. Proof is the command plus the saved JSON, not the final number alone. A finished turn is proved only when a second read, at least 12 seconds after the first idle sample, still has `completion_seq` null and both sides say idle. `done` on that read is a failure. The hook log for that turn has no `release-agent` line while `kiro-cli` is still running. Do not copy these files into the repo.
 
 ## Cleanup
 

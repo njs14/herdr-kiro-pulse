@@ -24,9 +24,10 @@ Preconditions:
 - **Start a turn.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py paint working` and `python3 .cursor/skills/verify-herdr-kiro/drive.py hook UserPromptSubmit`. `python3 .cursor/skills/verify-herdr-kiro/drive.py status` reports `agent_status` `working`.
 - **End the turn.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py paint idle` and `python3 .cursor/skills/verify-herdr-kiro/drive.py hook Stop`.
 - **Read the settled status.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py wait idle live_prompt_idle 12`. The saved JSON has `agent_status` `idle`, `explain_state` `idle`, `explain_rule` `live_prompt_idle`, and `completion_seq` null.
+- **Read it again after the old release delay.** Wait 12 seconds, then run `python3 .cursor/skills/verify-herdr-kiro/drive.py status --save settled.json`. `agent_status` is `idle`, not `done`. `explain_state` is `idle`, `explain_rule` is `live_prompt_idle`, and `completion_seq` is null. The Mac failure was still `done` at 10 seconds, so the first idle sample is not the proof.
 
 ## Gotchas
 
 - A direct working-to-idle report on an unfocused workspace is herdr's unseen completion, and get returns `done` while explain stays `idle`. This hook clears through `unknown` first so the idle report is not that completion. If get is `done`, the hook regressed.
-- Sampling during the release window can read `unknown` for about three seconds. That window is the release handoff, not this recipe. `wait` returns on the idle report that happens before release.
+- `release-agent` after that idle drops the hook report. If the screen fallback is still working or blocked, the prompt's later idle publish is the same unseen completion, and get stays `done` while explain says `live_prompt_idle`. The finished turn must not call `release-agent` while `kiro-cli` is still running.
 - The Mac run has to use a real Stop from Kiro. Injecting `hook Stop` is the stand-in.

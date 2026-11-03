@@ -1,16 +1,16 @@
 # Release handoff
 
-After the prompt has been idle, the hook releases herdr's hook authority. The hook log contains `release-agent`. Once that handoff settles, get and explain both report idle and `completion_seq` is null.
+A finished turn does not release the pane. The hook reports idle and leaves that report in place while `kiro-cli` is still running. `herdr agent get` stays idle, including on a background workspace, and `herdr agent explain` stays idle. `completion_seq` stays null. The hook log for that turn has no `release-agent` line.
 
 ## Sub-features
 
-- `release-logged` records `release-agent` in `hook.log`.
-- `release-settles` returns to idle after the unknown gap.
+- `no-release-after-idle` leaves hook authority in place after the prompt is quiet.
+- `settled-idle` is still idle 12 seconds later, not `done`.
 
 ## How to get to it (user POV)
 
-- Finish a turn and leave the prompt up. The hook reports idle, waits, then releases the pane back to screen detection.
-- On a Mac, read `herdr agent get` again a few seconds after the turn ends, not only on the first idle sample.
+- Finish a turn and leave the prompt up. The hook reports idle and does not hand the pane back to screen detection.
+- On a Mac, read `herdr agent get` again at about 12 seconds after Stop, not only on the first idle sample. It stays idle. Explain stays `live_prompt_idle`.
 
 ## Driving it with verify-herdr-kiro
 
@@ -19,13 +19,12 @@ Preconditions:
 - The finished-turn recipe has run in this same launch, through `hook Stop`, and `wait idle` has already saved its JSON.
 - The evidence directory for this launch still exists.
 
-- **Let the delay pass.** Wait eight seconds after the idle wait returns. The hook releases about two seconds after idle, and herdr can then report `unknown` for about three seconds more. Six seconds can still land on that unknown sample.
-- **Read the settled pane.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py status --save release.json`. The saved JSON has `agent_status` `idle`, `explain_state` `idle`, `explain_rule` `live_prompt_idle`, and `completion_seq` null.
-- **Read the log.** Open `$evidence/hook.log` from the launch JSON. It contains a `release-agent` line for this pane and `watcher exit idle`.
+- **Let the old release window pass.** Wait 12 seconds after the idle wait returns. Two seconds used to be the release delay, and a live check at 10 seconds still saw `done`.
+- **Read the settled pane.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py status --save release.json`. The saved JSON has `agent_status` `idle`, not `done`. `explain_state` is `idle`, `explain_rule` is `live_prompt_idle`, and `completion_seq` is null.
+- **Read the log.** Open `$evidence/hook.log` from the launch JSON. It has no `release-agent` line for this idle turn. `watcher exit idle` may be present. A `release-agent` line while the painter or `kiro-cli` is still the foreground process fails the check.
 
 ## Gotchas
 
-- `status` in the three seconds after `release-agent` often reads `unknown` while explain still says idle. Wait until the status stops changing. Do not treat that sample as the settled handoff.
-- The two second delay is measured from when the prompt became quiet, not from the `watcher idle` log line. Release can land later than two seconds after that line.
-- Releasing while the hook still holds authority does not publish the idle screen first. The following screen publish is what ends the unknown gap.
+- The first idle sample can pass and the pane can still become `done` after `release-agent`. Wait the 12 seconds and read get again. `done` with explain `live_prompt_idle` is the failure.
+- Owner exit still calls `release-agent`. That line belongs to a dead Kiro process, not to a quiet prompt.
 - Cleanup kills the watcher. Copy or read `hook.log` before cleanup. Cleanup leaves the evidence directory in place.
