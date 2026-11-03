@@ -26,5 +26,6 @@ Preconditions:
 ## Gotchas
 
 - `status` in the three seconds after `release-agent` often reads `unknown` while explain still says idle. Wait until the status stops changing. Do not treat that sample as the settled handoff.
+- The two second delay is measured from when the prompt became quiet, not from the `watcher idle` log line. Release can land later than two seconds after that line.
 - Releasing while the hook still holds authority does not publish the idle screen first. The following screen publish is what ends the unknown gap.
 - Cleanup kills the watcher. Copy or read `hook.log` before cleanup. Cleanup leaves the evidence directory in place.
