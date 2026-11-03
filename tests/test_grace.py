@@ -1316,11 +1316,12 @@ class GraceTests(unittest.TestCase):
             self.assertEqual(handle.read(), "safe")
         self.assertTrue(os.path.isdir(outside))
 
-    def test_idle_after_working_or_blocked_clears_through_unknown(self):
+    def test_idle_after_working_or_blocked_is_one_report(self):
         # herdr 0.9.5 maps an unseen Working or Blocked -> Idle report to
-        # agent_status done. agent explain still returns the screen rule idle.
-        # An unknown report in between is not a completion, so the idle report
-        # stays idle and the two commands agree.
+        # agent_status done (api_helpers.rs 96-107). Explain still returns
+        # the screen rule. That split is the finished-not-yet-seen status.
+        # The idle report is the completion. An unknown report in front of
+        # it is a different transition and hides done.
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
@@ -1341,37 +1342,17 @@ class GraceTests(unittest.TestCase):
                 self.assertTrue(hook.send_report("w1:p1", path, kind))
             return [args[args.index("--state") + 1] for args in calls]
 
-        self.assertEqual(states_for("working", "idle"), ["unknown", "idle"])
-        self.assertEqual(states_for("blocked", "idle"), ["unknown", "idle"])
+        self.assertEqual(states_for("working", "idle"), ["idle"])
+        self.assertEqual(states_for("blocked", "idle"), ["idle"])
         self.assertEqual(states_for("idle", "idle"), ["idle"])
         self.assertEqual(states_for("working", "working"), ["working"])
 
-        hook.update(path, lambda state: seed(state, "working"))
-        calls = []
-
-        def fail_unknown(*args):
-            calls.append(args)
-            return "--state" in args and args[args.index("--state") + 1] != "unknown"
-
-        with mock.patch.object(hook, "herdr", fail_unknown):
-            self.assertFalse(hook.send_report("w1:p1", path, "idle"))
-        self.assertEqual(
-            [args[args.index("--state") + 1] for args in calls],
-            ["unknown"],
-        )
-        with open(path, encoding="utf-8") as handle:
-            self.assertEqual(json.load(handle)["reported"], "working")
-
-    def test_finished_turn_does_not_release_into_a_screen_completion(self):
-        # herdr 0.9.5: done is idle with seen false (api_helpers.rs 96-107).
-        # That seen flag flips on Working|Blocked -> Idle when the pane is not
-        # the focused tab (actions.rs 22-29, 38-43, 1846-1847). hook:kiro is
-        # not a full-lifecycle source (detect/mod.rs 330-340), so the hook
-        # state is effective while held (state.rs 2032-2037, 2404-2419).
-        # release-agent keeps the screen fallback when the process still owns
-        # the agent and drops the hook (state.rs 1835-1874). The next screen
-        # idle is then the completion: get done, explain idle. A headless
-        # reacquire can hide that with unknown; the Mac run stayed on done.
+    def test_finished_turn_stays_done_until_seen_and_does_not_release(self):
+        # done is idle with seen false. Working|Blocked -> Idle on a
+        # background pane clears seen (actions.rs 22-29, 1846-1847).
+        # Marking the pane seen flips get back to idle and leaves the
+        # completion in place. release-agent is a separate handoff: it
+        # drops the hook and can expose a working fallback.
         for prior in ("working", "blocked"):
             pane = _ScreenCompletion()
             pane.screen(prior)
@@ -1387,8 +1368,10 @@ class GraceTests(unittest.TestCase):
                 state["busy"] = {}
 
             hook.update(path, seed)
+            calls = []
 
             def fake_herdr(*args, pane=pane):
+                calls.append(args)
                 if args[0] == "report-agent":
                     pane.report(args[args.index("--state") + 1])
                 elif args[0] == "release-agent":
@@ -1406,8 +1389,16 @@ class GraceTests(unittest.TestCase):
                     )
                 )
             pane.screen("idle")
+            self.assertEqual(
+                [args[args.index("--state") + 1] for args in calls if args[0] == "report-agent"],
+                ["idle"],
+            )
+            self.assertFalse(any(args[0] == "release-agent" for args in calls))
+            self.assertEqual(pane.status(), "done")
+            self.assertEqual(pane.completion, "idle")
+            pane.see()
             self.assertEqual(pane.status(), "idle")
-            self.assertIsNone(pane.completion)
+            self.assertEqual(pane.completion, "idle")
 
 
 class _ScreenCompletion:
@@ -1450,6 +1441,9 @@ class _ScreenCompletion:
     def release(self):
         self.hook = None
         self._recompute()
+
+    def see(self):
+        self.seen = True
 
 
 if __name__ == "__main__":
