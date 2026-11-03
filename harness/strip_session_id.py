@@ -4,6 +4,7 @@
 Kiro spawns this process. The hook's parent is this wrapper, a new pid every
 event. That is the live failure mode for a parent-pid session key.
 """
+
 import json
 import os
 import sys

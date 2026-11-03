@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run Kiro V3 workflows in a herdr pane and assert the pane stays working."""
+
 import json
 import os
 import signal
@@ -11,11 +12,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
 sys.path.insert(0, os.path.join(ROOT, "harness"))
 
+import contextlib
+
 import herdr_kiro_state as hook
 from demo_live import scrub
 
 
-class SecretLeak(RuntimeError):
+class SecretLeakError(RuntimeError):
     """KIRO_API_KEY was still present after scrub."""
 
 
@@ -24,7 +27,7 @@ def guard_text(text: str) -> str:
     cleaned = scrub("" if text is None else text)
     secret = os.environ.get("KIRO_API_KEY", "")
     if secret and secret in cleaned:
-        raise SecretLeak("KIRO_API_KEY still present")
+        raise SecretLeakError("KIRO_API_KEY still present")
     return cleaned
 
 
@@ -50,6 +53,7 @@ def write_private(path: str, text: str) -> None:
 def say(text: str) -> None:
     print(guard_text(text), flush=True)
 
+
 SESSION = os.environ.get("HERDR_SESSION", "kiro-repro")
 PANE = os.environ.get("HERDR_PANE", "w1:p1")
 LOG_DIR = os.path.join(ROOT, "logs")
@@ -62,8 +66,7 @@ def herdr(*args, timeout=30):
     return subprocess.run(
         ["herdr", "--session", SESSION, *args],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=timeout,
         check=False,
     )
@@ -120,7 +123,7 @@ def accept_trust_dialog():
     write_private(os.path.join(LOG_DIR, "trust-dialog.txt"), text)
     write_private(
         os.path.join(LOG_DIR, "trust-dialog-status.txt"),
-        "agent_status=%s seq=%s\n" % (status, seq)
+        f"agent_status={status} seq={seq}\n"
         + (
             "The trust-all confirmation is on the parent pane. "
             "herdr does not match it to a Kiro approval rule, so the status above is not blocked.\n"
@@ -278,7 +281,8 @@ def poll_run(seconds):
 def stop_times_since(start):
     times = []
     try:
-        lines = open(HOOK_LOG, encoding="utf-8").read().splitlines()
+        with open(HOOK_LOG, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
     except OSError:
         return []
     for line in lines:
@@ -323,7 +327,7 @@ def assert_run(name, rows, stops, _run_start=None):
         raise AssertionError(f"{name}: {len(bad)} non-working samples while the banner was up")
     anchor = banner_rows[-1]["t"]
     if stops:
-        anchor = max(anchor, max(stops))
+        anchor = max(anchor, *stops)
     run = []
     stable = None
     for row in rows:
@@ -340,9 +344,7 @@ def assert_run(name, rows, stops, _run_start=None):
         raise AssertionError(f"{name}: never settled idle")
     gap = stable - anchor
     if gap > IDLE_AFTER_STOP:
-        raise AssertionError(
-            f"{name}: sustained idle {gap:.2f}s after the run ended, wanted within {IDLE_AFTER_STOP}s"
-        )
+        raise AssertionError(f"{name}: sustained idle {gap:.2f}s after the run ended, wanted within {IDLE_AFTER_STOP}s")
     return {
         "banner_samples": len(banner_rows),
         "mid_run_idle": len(bad),
@@ -354,7 +356,7 @@ def assert_run(name, rows, stops, _run_start=None):
 
 def write_log(name, rows):
     os.makedirs(LOG_DIR, exist_ok=True)
-    path = os.path.join(LOG_DIR, "poll-%s.jsonl" % name)
+    path = os.path.join(LOG_DIR, f"poll-{name}.jsonl")
     body = "".join(json.dumps(guard_obj(row)) + "\n" for row in rows)
     write_private(path, body)
     return path
@@ -366,7 +368,8 @@ def watcher_commands():
         if not name.isdigit():
             continue
         try:
-            command = open(f"/proc/{name}/cmdline", "rb").read().replace(b"\0", b" ").decode()
+            with open(f"/proc/{name}/cmdline", "rb") as handle:
+                command = handle.read().replace(b"\0", b" ").decode()
         except OSError:
             continue
         if "herdr_kiro_state.py" in command and "--watch" in command:
@@ -377,10 +380,8 @@ def watcher_commands():
 def stop_watchers():
     for row in watcher_commands():
         pid = int(row.split()[0])
-        try:
+        with contextlib.suppress(OSError):
             os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
     deadline = time.time() + 2
     while watcher_commands() and time.time() < deadline:
         time.sleep(0.1)
@@ -407,7 +408,7 @@ def save_stops(name, start):
 
 
 def save_ps(name):
-    path = os.path.join(LOG_DIR, "ps-%s.txt" % name)
+    path = os.path.join(LOG_DIR, f"ps-{name}.txt")
     rows = [guard_text(row) for row in watcher_commands()]
     if rows:
         write_private(path, "\n".join(rows) + "\n")
@@ -477,20 +478,20 @@ def main() -> int:
     results = {}
     try:
         for name, text, seconds in cases:
-            say("RUN %s" % name)
+            say(f"RUN {name}")
             try:
                 results[name] = guard_obj(run_case(name, text, seconds))
-                say("PASS %s %s" % (name, results[name]))
-            except SecretLeak:
-                say("FAIL %s: KIRO_API_KEY still present" % name)
+                say(f"PASS {name} {results[name]}")
+            except SecretLeakError:
+                say(f"FAIL {name}: KIRO_API_KEY still present")
                 return 1
             except Exception as exc:
                 screen = guard_text(visible_text()[-1500:])
-                path = os.path.join(LOG_DIR, "fail-%s.txt" % name)
+                path = os.path.join(LOG_DIR, f"fail-{name}.txt")
                 write_private(path, guard_text(str(exc)) + "\n\n" + screen)
-                say("FAIL %s: %s" % (name, guard_text(str(exc))))
+                say(f"FAIL {name}: {guard_text(str(exc))}")
                 results[name] = {"error": guard_text(str(exc)), "screen": path}
-    except SecretLeak:
+    except SecretLeakError:
         say("FAIL: KIRO_API_KEY still present")
         return 1
     summary_path = os.path.join(LOG_DIR, "suite-summary.json")

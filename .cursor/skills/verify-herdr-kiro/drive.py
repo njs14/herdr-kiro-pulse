@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -79,8 +79,7 @@ def herdr(meta: dict, args: list, timeout: float = 20) -> subprocess.CompletedPr
     return subprocess.run(
         [herdr_bin(), "--session", SESSION, *args],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=timeout,
         check=False,
         env=env,
@@ -126,10 +125,7 @@ def write_throwaway_agent(home: str, workspace: str) -> None:
     permissions = os.path.join(config, "permissions.yaml")
     with open(permissions, "w", encoding="utf-8") as handle:
         handle.write(
-            "# Throwaway verification permissions. Every tool asks.\n"
-            "rules:\n"
-            "  - tool: '*'\n"
-            "    permission: ask\n"
+            "# Throwaway verification permissions. Every tool asks.\nrules:\n  - tool: '*'\n    permission: ask\n"
         )
     os.chmod(permissions, 0o600)
 
@@ -159,8 +155,7 @@ def launch() -> None:
     compiled = subprocess.run(
         ["cc", "-O2", "-o", binary, PAINTER],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     if compiled.returncode != 0:
@@ -170,16 +165,16 @@ def launch() -> None:
     os.mkfifo(fifo, 0o600)
     env = base_env(home)
     env["PATH"] = os.path.dirname(binary) + ":" + env["PATH"]
-    log = open(os.path.join(evidence, "herdr-server.log"), "w", encoding="utf-8")
-    server = subprocess.Popen(
-        [herdr_bin(), "--session", SESSION, "server"],
-        cwd=workspace,
-        env=env,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    with open(os.path.join(evidence, "herdr-server.log"), "w", encoding="utf-8") as log:
+        server = subprocess.Popen(
+            [herdr_bin(), "--session", SESSION, "server"],
+            cwd=workspace,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     socket = os.path.join(home, ".config", "herdr", "sessions", SESSION, "herdr.sock")
     meta = {
         "home": home,
@@ -233,8 +228,7 @@ def doctor() -> None:
     version = subprocess.run(
         [herdr_bin(), "--version"],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
     text = (version.stdout or version.stderr).strip()
@@ -298,8 +292,7 @@ def hook_event(event: str) -> None:
         [sys.executable, HOOK, event],
         input=payload,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=10,
         check=False,
         env=env,
@@ -352,9 +345,7 @@ def wait_for(status_name: str, rule: str, seconds: float) -> None:
             and last.get("explain_state") == status_name
             and last.get("explain_rule") == rule
         ):
-            path = os.path.join(
-                meta["evidence"], "wait-%s-%s.json" % (status_name, rule)
-            )
+            path = os.path.join(meta["evidence"], f"wait-{status_name}-{rule}.json")
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(last, handle)
@@ -363,7 +354,7 @@ def wait_for(status_name: str, rule: str, seconds: float) -> None:
             print(json.dumps(last))
             return
         time.sleep(0.3)
-    raise SystemExit("timed out waiting for %s/%s last=%s" % (status_name, rule, json.dumps(last)))
+    raise SystemExit(f"timed out waiting for {status_name}/{rule} last={json.dumps(last)}")
 
 
 def background() -> None:

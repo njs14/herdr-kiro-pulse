@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Report herdr, Kiro, and this hook. Exit non-zero when something is wrong."""
+
 from __future__ import annotations
 
 import errno
@@ -58,7 +59,8 @@ def settings_file():
 def setting_from_file(key):
     path = settings_file()
     try:
-        data = json.loads(open(path, encoding="utf-8").read())
+        with open(path, encoding="utf-8") as handle:
+            data = json.loads(handle.read())
     except (OSError, ValueError):
         return None
     value = data.get(key)
@@ -88,7 +90,8 @@ def lifecycle_path():
 def read_lifecycle():
     path = lifecycle_path()
     try:
-        lines = open(path, encoding="utf-8").read().splitlines()
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
     except OSError:
         return "", "", ""
     state = lines[0].strip() if lines else ""
@@ -126,17 +129,14 @@ def warn_upstream():
         return 0
     shadowing = data.get("local_override_shadowing_remote")
     sys.stderr.write(
-        "WARNING: upstream Kiro detection %s is newer than %s, the version this override was built against.\n"
-        % (remote, BUILT_AGAINST)
+        f"WARNING: upstream Kiro detection {remote} is newer than {BUILT_AGAINST}, the version this override was built against.\n"
     )
     sys.stderr.write(
-        "local_override_shadowing_remote=%s. The installed kiro.toml replaces the remote manifest.\n"
-        % shadowing
+        f"local_override_shadowing_remote={shadowing}. The installed kiro.toml replaces the remote manifest.\n"
     )
     sys.stderr.write(
         "Resolve it by moving ~/.config/herdr/agent-detection/kiro.toml aside and running "
-        "herdr server reload-agent-manifests, or by rebuilding this override against %s and reinstalling.\n"
-        % remote
+        f"herdr server reload-agent-manifests, or by rebuilding this override against {remote} and reinstalling.\n"
     )
     return 1
 
@@ -168,7 +168,7 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--warn-upstream":
         return warn_upstream()
     problems = []
-    print("herdr-kiro %s" % __version__)
+    print(f"herdr-kiro {__version__}")
     herdr_code, herdr_text = run([herdr_bin(), "--version"], 3)
     print("herdr: %s" % (herdr_text if herdr_code == 0 and herdr_text else "not on PATH"))
     if herdr_code != 0 or not herdr_text:
@@ -179,12 +179,12 @@ def main() -> int:
         problems.append("kiro-cli is not on PATH")
     engine, engine_from = read_setting("chat.agentEngine")
     workflows, workflows_from = read_setting("chat.enableWorkflows")
-    print("chat.agentEngine: %s (%s)" % (engine, engine_from))
-    print("chat.enableWorkflows: %s (%s)" % (workflows, workflows_from))
+    print(f"chat.agentEngine: {engine} ({engine_from})")
+    print(f"chat.enableWorkflows: {workflows} ({workflows_from})")
     if engine != "v3":
-        problems.append("chat.agentEngine is %s, want v3" % engine)
+        problems.append(f"chat.agentEngine is {engine}, want v3")
     if workflows != "true":
-        problems.append("chat.enableWorkflows is %s, want true" % workflows)
+        problems.append(f"chat.enableWorkflows is {workflows}, want true")
     config = os.path.join(
         os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
         "herdr",
@@ -196,29 +196,29 @@ def main() -> int:
         "herdr-kiro.json",
     )
     state_name, via, pending = read_lifecycle()
-    print("lifecycle: %s via=%s pending_unlink=%s" % (state_name or "absent", via or "absent", pending or "no"))
+    print("lifecycle: {} via={} pending_unlink={}".format(state_name or "absent", via or "absent", pending or "no"))
     owned_paths = []
     for path in (hook, config):
         if not os.path.isfile(path):
-            print("file: %s absent" % path)
+            print(f"file: {path} absent")
             continue
         kind = ownership(path)
         if kind == "absent":
-            print("info: %s is a user file, not removed by this hook" % path)
+            print(f"info: {path} is a user file, not removed by this hook")
         elif kind == "nohash":
-            print("info: %s has an owned marker with no content hash" % path)
+            print(f"info: {path} has an owned marker with no content hash")
             if state_name == "installed":
-                problems.append("%s has an owned marker with no content hash" % path)
+                problems.append(f"{path} has an owned marker with no content hash")
         elif kind == "differs":
-            problems.append("%s was hand edited" % path)
-            print("hand edit: %s hash does not match the marker" % path)
+            problems.append(f"{path} was hand edited")
+            print(f"hand edit: {path} hash does not match the marker")
         elif kind == "match":
             owned_paths.append(path)
-            print("hand edit: %s matches the marker" % path)
+            print(f"hand edit: {path} matches the marker")
         else:
-            raise RuntimeError("unknown ownership %s" % kind)
+            raise RuntimeError(f"unknown ownership {kind}")
     if state_name == "uninstalled" and owned_paths:
-        problems.append("lifecycle is uninstalled but our files remain: %s" % ", ".join(owned_paths))
+        problems.append("lifecycle is uninstalled but our files remain: {}".format(", ".join(owned_paths)))
     registered = plugin_registered() if herdr_code == 0 else None
     if pending or (state_name == "uninstalled" and registered is True):
         problems.append(
@@ -227,12 +227,14 @@ def main() -> int:
         )
     if state_name == "installed" and via == "plugin" and registered is False and owned_paths:
         problems.append(
-            "herdr plugin unlink does not delete files. Our files are still present: %s. Run ./uninstall.sh"
-            % ", ".join(owned_paths)
+            "herdr plugin unlink does not delete files. Our files are still present: {}. Run ./uninstall.sh".format(
+                ", ".join(owned_paths)
+            )
         )
     if os.path.isfile(config) and config in owned_paths:
-        body = open(config, encoding="utf-8").read()
-        print("rule file: %s" % config)
+        with open(config, encoding="utf-8") as handle:
+            body = handle.read()
+        print(f"rule file: {config}")
         if "workflow_requires_approval" not in body:
             problems.append("installed kiro.toml has no workflow_requires_approval rule")
     elif state_name == "installed":
@@ -247,7 +249,7 @@ def main() -> int:
     stale = dead_pidfiles(pid_dir)
     print("watcher pid files: %s" % (len(glob.glob(os.path.join(pid_dir, "*"))) if os.path.isdir(pid_dir) else 0))
     if stale:
-        problems.append("stale watcher pid files: %s" % ", ".join(stale))
+        problems.append("stale watcher pid files: {}".format(", ".join(stale)))
         sweep_stale_pidfiles()
     server_code, server_text = run([herdr_bin(), "pane", "list"], 3)
     if server_code != 0 or "server_not_running" in server_text:
@@ -258,15 +260,15 @@ def main() -> int:
     data = explain_upstream()
     remote = str(data.get("cached_remote_version") or "")
     print("cached remote kiro.toml: %s" % (remote or "unknown"))
-    print("override built against: %s" % BUILT_AGAINST)
-    print("local_override_shadowing_remote: %s" % data.get("local_override_shadowing_remote"))
+    print(f"override built against: {BUILT_AGAINST}")
+    print("local_override_shadowing_remote: {}".format(data.get("local_override_shadowing_remote")))
     if newer_upstream(remote):
-        problems.append("upstream Kiro detection %s is newer than %s" % (remote, BUILT_AGAINST))
+        problems.append(f"upstream Kiro detection {remote} is newer than {BUILT_AGAINST}")
         warn_upstream()
     if problems:
-        print("problems: %s" % len(problems))
+        print(f"problems: {len(problems)}")
         for item in problems:
-            print("problem: %s" % item)
+            print(f"problem: {item}")
         return 1
     print("problems: 0")
     return 0

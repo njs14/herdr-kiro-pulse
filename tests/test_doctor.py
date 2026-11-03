@@ -1,4 +1,5 @@
 """doctor exits non-zero when the install is not healthy."""
+
 import json
 import os
 import shutil
@@ -12,6 +13,16 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
 import herdr_kiro_state as hook
+
+
+class _Timed:
+    """A completed doctor run plus how long it took."""
+
+    def __init__(self, completed: subprocess.CompletedProcess, elapsed: float) -> None:
+        self.returncode = completed.returncode
+        self.stdout = completed.stdout
+        self.stderr = completed.stderr
+        self.elapsed = elapsed
 
 
 class DoctorTests(unittest.TestCase):
@@ -38,15 +49,15 @@ class DoctorTests(unittest.TestCase):
         server_body = '{"result":{"panes":[]}}' if server else '{"error":{"code":"server_not_running"}}'
         server_rc = "0" if server else "1"
         plugin_body = "- herdr-kiro" if plugin else "No plugins installed."
-        script = """#!/bin/sh
+        script = f"""#!/bin/sh
 case "$1" in
   --version) echo herdr 0.9.5; exit 0 ;;
-  pane) echo '%s'; exit %s ;;
-  plugin) echo '%s'; exit 0 ;;
-  agent) echo '{"cached_remote_version":"%s","local_override_shadowing_remote":true}'; exit 0 ;;
+  pane) echo '{server_body}'; exit {server_rc} ;;
+  plugin) echo '{plugin_body}'; exit 0 ;;
+  agent) echo '{{"cached_remote_version":"{remote}","local_override_shadowing_remote":true}}'; exit 0 ;;
 esac
 exit 0
-""" % (server_body, server_rc, plugin_body, remote)
+"""
         path = os.path.join(self.bindir, "herdr")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(script)
@@ -54,14 +65,14 @@ exit 0
 
     def write_kiro(self, slow=False, engine="v3", workflows="true"):
         if slow:
-            body = "#!/bin/sh\nif [ \"$1\" = --version ]; then echo kiro-cli 2.37.0; exit 0; fi\nsleep 5\nexit 0\n"
+            body = '#!/bin/sh\nif [ "$1" = --version ]; then echo kiro-cli 2.37.0; exit 0; fi\nsleep 5\nexit 0\n'
         else:
             body = (
                 "#!/bin/sh\n"
-                "if [ \"$1\" = --version ]; then echo kiro-cli 2.37.0; exit 0; fi\n"
-                "if [ \"$2\" = chat.agentEngine ]; then echo %s; exit 0; fi\n"
-                "if [ \"$2\" = chat.enableWorkflows ]; then echo %s; exit 0; fi\n"
-                "exit 0\n" % (engine, workflows)
+                'if [ "$1" = --version ]; then echo kiro-cli 2.37.0; exit 0; fi\n'
+                f'if [ "$2" = chat.agentEngine ]; then echo {engine}; exit 0; fi\n'
+                f'if [ "$2" = chat.enableWorkflows ]; then echo {workflows}; exit 0; fi\n'
+                "exit 0\n"
             )
         path = os.path.join(self.bindir, "kiro-cli")
         with open(path, "w", encoding="utf-8") as handle:
@@ -73,8 +84,7 @@ exit 0
             ["sh", os.path.join(ROOT, "install.sh")],
             env=self.env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -85,12 +95,10 @@ exit 0
             ["python3", os.path.join(ROOT, "prototype", "herdr_kiro_doctor.py")],
             env=self.env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
-        completed.elapsed = time.time() - started
-        return completed
+        return _Timed(completed, time.time() - started)
 
     def test_healthy_install_exits_zero(self):
         self.write_herdr()
@@ -178,7 +186,7 @@ exit 0
         rules = os.path.join(self.home, ".config", "herdr", "agent-detection")
         os.makedirs(rules)
         with open(os.path.join(rules, "kiro.toml"), "w", encoding="utf-8") as handle:
-            handle.write("id = \"kiro\"\n# user rules\n")
+            handle.write('id = "kiro"\n# user rules\n')
         completed = self.doctor()
         self.assertNotIn("uninstall.sh", completed.stdout)
         self.assertIn("user file", completed.stdout)

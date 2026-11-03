@@ -1,4 +1,5 @@
 """The local kiro.toml override marks a workflow banner working and a chooser blocked."""
+
 import json
 import os
 import shutil
@@ -61,8 +62,7 @@ class DetectionTests(unittest.TestCase):
             handle.write(text)
         completed = subprocess.run(
             ["herdr", "agent", "explain", "--file", path, "--agent", "kiro", "--json"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             env=self.env,
             check=False,
@@ -73,9 +73,7 @@ class DetectionTests(unittest.TestCase):
 
     def test_slash_watch_banner_is_working(self):
         state, rule = self.explain(
-            "▶ watch-step running 0/0 · ctrl+x expand · ctrl+g monitor\n"
-            "\n"
-            "› ask a question or describe a task\n"
+            "▶ watch-step running 0/0 · ctrl+x expand · ctrl+g monitor\n\n› ask a question or describe a task\n"
         )
         self.assertEqual(state, "working")
         self.assertEqual(rule, "workflow_banner_working")
@@ -92,17 +90,12 @@ class DetectionTests(unittest.TestCase):
 
     def test_model_phrases_do_not_hide_the_prompt(self):
         state, _rule = self.explain(
-            "I will always allow this.\n"
-            "You can press esc to close the panel.\n"
-            "› ask a question or describe a task\n"
+            "I will always allow this.\nYou can press esc to close the panel.\n› ask a question or describe a task\n"
         )
         self.assertEqual(state, "idle")
 
     def test_model_status_line_is_not_the_banner(self):
-        state, rule = self.explain(
-            "Status: ▶ deploy running\n"
-            "› ask a question or describe a task\n"
-        )
+        state, rule = self.explain("Status: ▶ deploy running\n› ask a question or describe a task\n")
         self.assertEqual(state, "idle")
         self.assertNotEqual(rule, "workflow_banner_working")
 
@@ -122,19 +115,11 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual((state, rule), ("blocked", "workspace_trust"))
 
     def test_chooser_right_border_stays_blocked(self):
-        state, rule = self.explain(
-            "│ Write File requires approval\n"
-            "│ ❯ Allow once  │\n"
-            "│   Deny once  │\n"
-        )
+        state, rule = self.explain("│ Write File requires approval\n│ ❯ Allow once  │\n│   Deny once  │\n")
         self.assertEqual((state, rule), ("blocked", "workflow_requires_approval"))
 
     def test_chooser_scrollbar_glyph_stays_blocked(self):
-        state, rule = self.explain(
-            "│ Write File requires approval\n"
-            "│ ❯ Allow once █\n"
-            "│   Deny once █\n"
-        )
+        state, rule = self.explain("│ Write File requires approval\n│ ❯ Allow once █\n│   Deny once █\n")
         self.assertEqual((state, rule), ("blocked", "workflow_requires_approval"))
 
     def test_chooser_on_the_steps_row_stays_blocked(self):
@@ -185,7 +170,7 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "working")
 
     def test_bordered_prose_about_allow_once_does_not_block(self):
-        state, rule = self.explain(
+        _state, rule = self.explain(
             "│ The notes say this step requires approval and Allow once is the default.\n"
             "│ Deny once would stop the write.\n"
             "› ask a question or describe a task\n"
@@ -201,13 +186,11 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "idle")
 
     def test_chooser_scrolled_off_the_bottom_does_not_block(self):
-        filler = "\n".join(["older log line %s" % index for index in range(70)])
-        state, rule = self.explain(
+        filler = "\n".join([f"older log line {index}" for index in range(70)])
+        _state, rule = self.explain(
             "│ Write File requires approval\n"
             "│ ❯ Allow once\n"
-            "│   Deny once\n"
-            + filler
-            + "\n› ask a question or describe a task\n"
+            "│   Deny once\n" + filler + "\n› ask a question or describe a task\n"
         )
         self.assertNotEqual(rule, "workflow_requires_approval")
 
@@ -310,13 +293,9 @@ class DetectionTests(unittest.TestCase):
         # Kiro V3 keeps the status bar and the prompt under the banner.
         # The quoted rows use the dialog marker, with a gap after the title,
         # and the prompt is the end of the screen.
-        gap = "\n".join(
-            "The notes quote the trust dialog, line %s." % index for index in range(6)
-        )
+        gap = "\n".join(f"The notes quote the trust dialog, line {index}." for index in range(6))
         screen = (
-            "Trust this workspace?\n"
-            + gap
-            + "\n"
+            "Trust this workspace?\n" + gap + "\n"
             " ❯ Trust, continue\n"
             "   Don't trust, exit\n"
             "▶ two-step running 0/1 · ctrl+x expand · ctrl+g monitor\n"
@@ -329,50 +308,32 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "working")
 
     def test_trust_rows_that_do_not_end_the_screen_do_not_match(self):
-        filler = "\n".join("later log %s" % index for index in range(20))
+        filler = "\n".join(f"later log {index}" for index in range(20))
         screen = (
             "Trust this workspace?\n"
             " ❯ Trust, continue\n"
-            "   Don't trust, exit\n"
-            + filler
-            + "\n› ask a question or describe a task\n"
+            "   Don't trust, exit\n" + filler + "\n› ask a question or describe a task\n"
         )
         state, rule = self.explain(screen)
         self.assertNotEqual(rule, "workspace_trust")
         self.assertEqual(state, "idle")
 
     def test_trust_gap_over_the_cap_does_not_match(self):
-        gap = "\n".join("quoted line %s" % index for index in range(30))
-        screen = (
-            "Trust this workspace?\n"
-            + gap
-            + "\n ❯ Trust, continue\n"
-            "   Don't trust, exit\n"
-        )
+        gap = "\n".join(f"quoted line {index}" for index in range(30))
+        screen = "Trust this workspace?\n" + gap + "\n ❯ Trust, continue\n   Don't trust, exit\n"
         _state, rule = self.explain(screen)
         self.assertNotEqual(rule, "workspace_trust")
 
     def test_indented_and_quoted_trust_rows_do_not_match(self):
-        indented = (
-            "    Trust this workspace?\n"
-            "    ❯ Trust, continue\n"
-            "    Don't trust, exit\n"
-        )
-        quoted = (
-            "Trust this workspace?\n"
-            "> Trust, continue\n"
-            "Don't trust, exit\n"
-        )
+        indented = "    Trust this workspace?\n    ❯ Trust, continue\n    Don't trust, exit\n"
+        quoted = "Trust this workspace?\n> Trust, continue\nDon't trust, exit\n"
         for screen in (indented, quoted):
             _state, rule = self.explain(screen)
             self.assertNotEqual(rule, "workspace_trust")
 
     def test_workspace_trust_rows_without_a_marker_do_not_match(self):
         screen = (
-            "Trust this workspace?\n"
-            "Trust, continue\n"
-            "Don't trust, exit\n"
-            "esc to exit · ↑↓ to navigate · ↵ to select\n"
+            "Trust this workspace?\nTrust, continue\nDon't trust, exit\nesc to exit · ↑↓ to navigate · ↵ to select\n"
         )
         _state, rule = self.explain(screen)
         self.assertNotEqual(rule, "workspace_trust")

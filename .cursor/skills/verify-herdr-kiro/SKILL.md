@@ -59,6 +59,12 @@ CI can run, with herdr 0.9.5 installed and no Kiro key:
 - `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction`
 - `python3 .cursor/skills/verify-herdr-kiro/drive.py` for idle, working, tool approval, workspace trust, finished turn, and release handoff
 
+These three are CI checks. They do not need herdr or a Kiro key:
+
+- `uvx ruff check`
+- `uvx ruff format --check`
+- `uvx ty check`
+
 A live Mac run is still required for a real `kiro-cli`. It uses the same throwaway home and permissions file, starts `kiro-cli chat --v3 --trust-workspace` in the pane, and does not pass `--trust-all-tools`. The `ask` rule is what produces a real tool-approval dialog. `--trust-workspace` skips the trust dialog, so the trust drive on a Mac is a fresh workspace that has not been trusted yet, before that flag is used.
 
 Stand-in steps a Mac run will not do:

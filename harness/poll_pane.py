@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Poll herdr agent status and a few screen lines until a deadline."""
+
 import json
 import subprocess
 import sys
 import time
+
 
 def main() -> int:
     session = sys.argv[1]
@@ -16,10 +18,10 @@ def main() -> int:
         while time.time() < deadline:
             t = time.time()
             try:
-                raw = subprocess.check_output(herdr + ["agent", "get", pane], text=True, timeout=5)
+                raw = subprocess.check_output([*herdr, "agent", "get", pane], text=True, timeout=5)
                 agent = json.loads(raw)["result"]["agent"]
                 screen = subprocess.check_output(
-                    herdr + ["pane", "read", pane, "--source", "visible", "--lines", "18"],
+                    [*herdr, "pane", "read", pane, "--source", "visible", "--lines", "18"],
                     text=True,
                     timeout=5,
                 )
@@ -57,6 +59,7 @@ def main() -> int:
             out.flush()
             time.sleep(0.2)
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
