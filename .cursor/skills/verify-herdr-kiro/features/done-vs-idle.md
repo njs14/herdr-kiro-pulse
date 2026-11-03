@@ -11,7 +11,7 @@ After a Kiro turn ends on a workspace that is not the focused one, and the agent
 ## How to get to it (user POV)
 
 - Let a turn finish in a workspace you are not looking at. The hook receives Stop and the prompt returns. Get says done. Explain says the idle prompt.
-- Focus that pane with `herdr agent focus <pane_id>`. Get and explain both say idle. `herdr workspace focus <workspace_id>` on that pane's workspace does the same.
+- Focus that pane with `herdr agent focus <pane_id>`. Get becomes idle on the same seq. Explain stays on the idle rule. `completion_seq` stays.
 
 ## Driving it with verify-herdr-kiro
 
@@ -34,5 +34,6 @@ Preconditions:
 - `herdr pane focus --direction` moves to a neighbor. It does not mark this pane seen. A direction with no neighbor leaves get on `done`.
 - `herdr agent get` and `herdr agent explain` do not mark the pane seen. Another read leaves `done` in place.
 - The first idle after the process is detected is not a completion. Herdr suppresses it. Read a later turn.
+- A pane that never published `working` or `blocked` does not become `done`. Explain can already say idle, and `completion_seq` stays absent. That is the Mac Codex error turn. An error title after a working title is `done`.
 - The active workspace suppresses this completion when no client has reported the terminal unfocused. Get stays idle. This recipe focuses another workspace first.
-- `release-agent` while `kiro-cli` is still running drops the hook idle and can expose a working screen. The finished turn keeps the idle report. Owner exit still releases.
+- `release-agent` while `kiro-cli` is still running drops `done`. With the idle prompt already up, get goes unknown and then idle, and `completion_seq` disappears. With the working footer still up, get goes back to working, and the later idle screen settles idle. The finished turn keeps the idle report. Owner exit still releases.

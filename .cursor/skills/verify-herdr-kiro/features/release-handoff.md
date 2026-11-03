@@ -1,6 +1,6 @@
 # Release handoff
 
-A finished turn does not release the pane. The hook reports idle and leaves that report in place while `kiro-cli` is still running. On a background workspace, get stays `done` and explain stays idle across the old release window. The hook log for that turn has no `release-agent` line. After the pane is seen, get stays idle.
+A finished turn does not release the pane. The hook reports idle and leaves that report in place while `kiro-cli` is still running. On herdr 0.9.5, `release-agent` after that idle drops `done`: an idle prompt settles to idle with no `completion_seq`, and a working footer returns to working before the later idle screen also settles idle. With the report held, a background workspace stays `done` across the old release window, and explain stays idle. The hook log for that turn has no `release-agent` line. After `herdr agent focus`, get stays idle.
 
 ## Sub-features
 
@@ -26,6 +26,7 @@ Preconditions:
 
 ## Gotchas
 
+- `release-agent` while the process is still running drops `done`. The 12 second read has to stay `done`, with the same `completion_seq`, before any focus command.
 - `herdr agent focus` and `herdr workspace focus` on that workspace turn `done` into `idle` without a new completion. Run them after the 12 second read.
 - Owner exit still calls `release-agent`. That line belongs to a dead Kiro process, not to a quiet prompt.
 - Cleanup kills the watcher. Copy or read `hook.log` before cleanup. Cleanup leaves the evidence directory in place.

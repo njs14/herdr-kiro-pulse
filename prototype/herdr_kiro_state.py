@@ -462,10 +462,10 @@ def send_report(pane: str, path: str, kind: str) -> bool:
     if kind not in ("working", "idle", "blocked", "unknown"):
         raise ValueError(kind)
     # herdr 0.9.5 stores an unseen Working or Blocked -> Idle report as done.
-    # agent explain still returns the screen rule. That split is the
-    # finished-not-yet-seen status, including for a hook:kiro report. Leave
-    # the idle report in place while kiro-cli is running. release-agent
-    # drops it and restores the screen fallback.
+    # agent explain still returns the screen rule. Leave this idle report in
+    # place while kiro-cli is running. release-agent after it drops done:
+    # an idle screen settles to idle with no completion, and a working
+    # footer returns to working before that later idle screen also settles idle.
     return emit_report(pane, path, kind)
 
 
@@ -1616,9 +1616,8 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     update(path, confirm)
     if not still["ok"]:
         return False
-    # Idle while kiro is still running must keep the hook report. release-agent
-    # would restore a working or blocked fallback, and the prompt's idle publish
-    # is then an unseen completion: get says done, explain says idle.
+    # Idle while kiro is still running keeps the hook report. release-agent
+    # after that idle drops done on herdr 0.9.5. Owner exit still releases.
     if reason != "idle":
         release_authority(pane, path)
     clear_watcher(path)

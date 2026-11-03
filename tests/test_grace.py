@@ -1351,8 +1351,8 @@ class GraceTests(unittest.TestCase):
         # done is idle with seen false. Working|Blocked -> Idle on a
         # background pane clears seen (actions.rs 22-29, 1846-1847).
         # Marking the pane seen flips get back to idle and leaves the
-        # completion in place. release-agent is a separate handoff: it
-        # drops the hook and can expose a working fallback.
+        # completion in place. release-agent after that idle drops done
+        # on the herdr 0.9.5 binary, so a finished turn does not release.
         for prior in ("working", "blocked"):
             pane = _ScreenCompletion()
             pane.screen(prior)
