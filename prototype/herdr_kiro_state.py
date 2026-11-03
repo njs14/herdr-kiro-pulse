@@ -455,7 +455,7 @@ def herdr(*args: str) -> bool:
     return completed.returncode == 0
 
 
-def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
+def send_report(pane: str, path: str, kind: str) -> bool:
     if not pane_id_ok(pane):
         log("refusing report")
         return False
@@ -465,6 +465,9 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
     # agent explain still returns the screen rule, which is idle, so the two
     # disagree. unknown is not a completion and marks the pane seen, and the
     # idle report that follows stays idle on a background workspace too.
+    # Do not release here. release-agent drops this idle and exposes the
+    # screen fallback. If that fallback is still working or blocked, the
+    # prompt's later idle publish is the unseen completion.
     if kind == "idle":
         prior = update(path, lambda _state: None).get("reported")
         if prior in ("working", "blocked") and not emit_report(pane, path, "unknown"):
@@ -474,11 +477,7 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
 
             update(path, revert)
             return False
-    ok = emit_report(pane, path, kind)
-    if kind != "idle" or not release:
-        return ok
-
-    return release_authority(pane, path) and ok
+    return emit_report(pane, path, kind)
 
 
 def emit_report(pane: str, path: str, kind: str) -> bool:
@@ -1592,7 +1591,7 @@ def clear_watcher(path: str) -> None:
 
 
 def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
-    """Release only while this process still owns the watcher slot."""
+    """Stop the watcher only while this process still owns its slot."""
     me = os.getpid()
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
@@ -1628,14 +1627,18 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     update(path, confirm)
     if not still["ok"]:
         return False
-    release_authority(pane, path)
+    # Idle while kiro is still running must keep the hook report. release-agent
+    # would restore a working or blocked fallback, and the prompt's idle publish
+    # is then an unseen completion: get says done, explain says idle.
+    if reason != "idle":
+        release_authority(pane, path)
     clear_watcher(path)
     log("watcher exit " + reason)
     return True
 
 
 def note_report(pane: str, path: str, kind: str, reported, misses: int):
-    ok = send_report(pane, path, kind, release=False)
+    ok = send_report(pane, path, kind)
     if ok:
         return kind, 0
     misses += 1

@@ -1338,7 +1338,7 @@ class GraceTests(unittest.TestCase):
                 return True
 
             with mock.patch.object(hook, "herdr", fake_herdr):
-                self.assertTrue(hook.send_report("w1:p1", path, kind, release=False))
+                self.assertTrue(hook.send_report("w1:p1", path, kind))
             return [args[args.index("--state") + 1] for args in calls]
 
         self.assertEqual(states_for("working", "idle"), ["unknown", "idle"])
@@ -1354,7 +1354,7 @@ class GraceTests(unittest.TestCase):
             return "--state" in args and args[args.index("--state") + 1] != "unknown"
 
         with mock.patch.object(hook, "herdr", fail_unknown):
-            self.assertFalse(hook.send_report("w1:p1", path, "idle", release=False))
+            self.assertFalse(hook.send_report("w1:p1", path, "idle"))
         self.assertEqual(
             [args[args.index("--state") + 1] for args in calls],
             ["unknown"],
