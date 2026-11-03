@@ -1,0 +1,82 @@
+[project]
+name = "herdr-kiro"
+version = "0.13.2"
+description = "herdr plugin that reports a Kiro CLI workflow pane"
+requires-python = ">=3.9"
+
+# Rule set, from Astral's linter guide ("popular, without being too pedantic":
+# E, F, UP, B, SIM, I) plus the groups that match this hook.
+# https://docs.astral.sh/ruff/linter/
+# W, C4, and "ignore E501 because the formatter owns line length" follow the
+# python-code-style skill (https://www.skills.sh/wshobson/agents/python-code-style),
+# with target-version py39 because this tree still runs on Python 3.9.
+# RUF is Ruff's own rules. S is the security set for a hook that launches
+# processes and opens paths. PLE and PLW are the pylint error and warning
+# rules. RET, ARG, ERA, TRY, and N catch real mistakes in this script.
+# D is not selected: pydocstyle conflicts with itself, Astral's popular set
+# omits it, and these files are scripts and tests rather than a library API.
+# PLC and PLR are not selected: they are convention and complexity scores.
+# PTH is not selected: the hook uses os.open with O_NOFOLLOW and O_EXCL, and
+# fd walks that pathlib does not express.
+
+[tool.ruff]
+target-version = "py39"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "RUF",
+    "C4",
+    "S",
+    "PLE",
+    "PLW",
+    "RET",
+    "ARG",
+    "ERA",
+    "TRY",
+    "N",
+]
+ignore = [
+    # Line length belongs to the formatter.
+    "E501",
+    # Every subprocess argv is a fixed list. shell=True is not used.
+    "S603",
+    "S607",
+    # os.execv replaces the forked child with the hook interpreter.
+    "S606",
+    # › ▶ and ❯ are the Kiro glyphs the detection rules match.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # The exception text is the operator-facing message. The type stays.
+    "TRY003",
+    # Scratch directories and the legacy sweep roots are chosen paths.
+    "S108",
+    # 0o755 is the executable bit. 0o666 is a fixture install must reject.
+    "S103",
+    # _EXPLAIN_ENV, _RULES_DIR, and _TABLE are process-lifetime caches.
+    "PLW0603",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# unittest uses assert.
+# The path insert has to run before the local import. Assert is unittest.
+"tests/**" = ["S101", "E402"]
+"harness/**" = ["S101", "E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.9"
+# Tests and the harness import the hook by inserting these directories on
+# sys.path. They are not installed packages.
+extra-paths = ["prototype", "harness"]

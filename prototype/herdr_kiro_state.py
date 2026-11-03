@@ -11,9 +11,11 @@ after Stop, and it remembers the sequence number. A single idle report 3s
 later arrives after the pane is already idle. This process re-sends working
 until the grace ends, then reports idle, releases, and exits.
 """
+
 from __future__ import annotations
 
 import atexit
+import contextlib
 import datetime
 import errno
 import fcntl
@@ -48,7 +50,7 @@ GONE_CONFIRM_HITS = 3
 # Releasing the hook the instant the prompt returns makes herdr report unknown
 # for about 3 seconds. Report idle first and release only after this delay, so
 # a run can settle idle before that hand-off.
-RELEASE_DELAY = 2.0
+RELEASE_DELAY: float = 2.0
 TAIL_LINES = 30
 BUSY_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
 # Stop fires after a turn. SessionEnd fires when that loaded session is torn down.
@@ -57,8 +59,8 @@ END_EVENTS = {"Stop", "SessionEnd"}
 AGGREGATE = "aggregate"
 FILE_MODE = 0o600
 DIR_MODE = 0o700
-LOG_LIMIT = 200_000
-LOG_KEEP = 100_000
+LOG_LIMIT: int = 200_000
+LOG_KEEP: int = 100_000
 CHOOSER_FOOTER = ("esc to close", "to navigate", "to select")
 
 
@@ -66,10 +68,8 @@ def state_dir() -> str:
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     path = os.path.join(base, "herdr-kiro")
     os.makedirs(path, mode=DIR_MODE, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, DIR_MODE)
-    except OSError:
-        pass
     return path
 
 
@@ -87,9 +87,7 @@ def pane_id_ok(pane_id: str) -> bool:
     """True for a short pane id that cannot be a path or a leading-dash option."""
     if not isinstance(pane_id, str) or not _PANE_ID.fullmatch(pane_id):
         return False
-    if pane_id.startswith("-") or ".." in pane_id:
-        return False
-    return True
+    return not (pane_id.startswith("-") or ".." in pane_id)
 
 
 def inside_state_dir(path: str) -> bool:
@@ -108,7 +106,7 @@ def resolved_state_file(pane_id: str):
     """State file for pane_id, or None when the id or the path is unsafe."""
     if not pane_id_ok(pane_id):
         return None
-    path = os.path.join(state_dir(), "%s.json" % pane_id.replace(":", "_"))
+    path = os.path.join(state_dir(), "{}.json".format(pane_id.replace(":", "_")))
     if os.path.islink(path) or not inside_state_dir(path):
         return None
     return path
@@ -174,9 +172,12 @@ def fresh_state() -> dict:
 
 
 def normalize(state: dict, now: float) -> dict:
-    busy = state.get("busy") if isinstance(state.get("busy"), dict) else {}
-    owners = state.get("owners") if isinstance(state.get("owners"), dict) else {}
-    owner_started = state.get("owner_started") if isinstance(state.get("owner_started"), dict) else {}
+    raw_busy = state.get("busy")
+    raw_owners = state.get("owners")
+    raw_started = state.get("owner_started")
+    busy = raw_busy if isinstance(raw_busy, dict) else {}
+    owners = raw_owners if isinstance(raw_owners, dict) else {}
+    owner_started = raw_started if isinstance(raw_started, dict) else {}
     kept = {}
     kept_owners = {}
     kept_started = {}
@@ -454,13 +455,21 @@ def herdr(*args: str) -> bool:
     return completed.returncode == 0
 
 
-def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
+def send_report(pane: str, path: str, kind: str) -> bool:
     if not pane_id_ok(pane):
         log("refusing report")
         return False
-    if kind not in ("working", "idle", "blocked"):
+    if kind not in ("working", "idle", "blocked", "unknown"):
         raise ValueError(kind)
+    # herdr 0.9.5 stores an unseen Working or Blocked -> Idle report as done.
+    # agent explain still returns the screen rule. Leave this idle report in
+    # place while kiro-cli is running. release-agent after it drops done:
+    # an idle screen settles to idle with no completion, and a working
+    # footer returns to working before that later idle screen also settles idle.
+    return emit_report(pane, path, kind)
 
+
+def emit_report(pane: str, path: str, kind: str) -> bool:
     def bump(state: dict) -> None:
         state["seq"] += 1
         state["reported"] = kind
@@ -468,7 +477,7 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
             state["grace_until"] = 0.0
 
     seq = str(update(path, bump)["seq"])
-    ok = herdr(
+    return herdr(
         "report-agent",
         pane,
         "--source",
@@ -480,10 +489,6 @@ def send_report(pane: str, path: str, kind: str, release: bool = True) -> bool:
         "--seq",
         seq,
     )
-    if kind != "idle" or not release:
-        return ok
-
-    return release_authority(pane, path) and ok
 
 
 def release_authority(pane: str, path: str) -> bool:
@@ -531,9 +536,9 @@ def tail_text(text: str) -> str:
 BANNER_LINE = re.compile(r"(?i)^\s*▶\s+\S+\s+running\b.*\bctrl\+x\b")
 IDLE_PROMPT = re.compile(r"(?i)ask a question or describe a task")
 RULES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kiro-detection.toml")
-_EXPLAIN_ENV = None
-_RULES_DIR = None
-_SCREEN_CACHE = {}
+_EXPLAIN_ENV: dict | None = None
+_RULES_DIR: str | None = None
+_SCREEN_CACHE: dict = {}
 
 
 def workflow_banner_from(text: str) -> bool:
@@ -570,7 +575,7 @@ def _rules_dir_ours(path: str):
             lines = handle.read().splitlines()
     except OSError:
         return None
-    if ("uid %s" % os.getuid()) not in lines:
+    if (f"uid {os.getuid()}") not in lines:
         return None
     return int(matched.group(1))
 
@@ -612,10 +617,8 @@ def _remove_dir_at(parent_fd: int, name: str) -> None:
         _clear_dir_fd(fd)
     finally:
         os.close(fd)
-    try:
+    with contextlib.suppress(OSError):
         os.rmdir(name, dir_fd=parent_fd)
-    except OSError:
-        pass
 
 
 def _clear_dir_fd(fd: int) -> None:
@@ -633,10 +636,8 @@ def _clear_dir_fd(fd: int) -> None:
         if stat.S_ISDIR(info.st_mode):
             _remove_dir_at(fd, name)
             continue
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(name, dir_fd=fd)
-        except OSError:
-            pass
 
 
 def _sweep_rules_in(roots) -> None:
@@ -676,9 +677,7 @@ def _private_regular(info) -> bool:
         return False
     if info.st_uid != os.getuid():
         return False
-    if mode & (stat.S_IWGRP | stat.S_IWOTH):
-        return False
-    return True
+    return not mode & (stat.S_IWGRP | stat.S_IWOTH)
 
 
 def _read_owned_sidecar(marker_path: str):
@@ -744,7 +743,7 @@ def _legacy_file_ours(path: str) -> bool:
     text = _read_owned_sidecar(path + _SIDECAR)
     if text is None:
         return False
-    return ("uid %s" % os.getuid()) in text.splitlines()
+    return (f"uid {os.getuid()}") in text.splitlines()
 
 
 def sweep_owned_temp() -> None:
@@ -774,10 +773,8 @@ def sweep_owned_temp() -> None:
             marker = path + ".herdr-kiro-owned"
             if os.path.islink(marker):
                 continue
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(marker)
-            except OSError:
-                pass
 
 
 def sweep_stale_pidfiles() -> None:
@@ -795,13 +792,12 @@ def sweep_stale_pidfiles() -> None:
         except OSError as exc:
             if exc.errno != errno.ESRCH:
                 continue
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(path)
-            except OSError:
-                pass
             continue
         try:
-            lines = open(path, encoding="utf-8").read().splitlines()
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
         except OSError:
             continue
         recorded = lines[1].strip() if len(lines) > 1 else ""
@@ -817,10 +813,8 @@ def sweep_stale_pidfiles() -> None:
         if recorded_comm and current_comm and recorded_comm != current_comm:
             stale = True
         if stale:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(path)
-            except OSError:
-                pass
 
 
 def cleanup_rules() -> None:
@@ -834,6 +828,13 @@ def _on_term(signum, _frame):
     raise SystemExit(128 + signum)
 
 
+def clear_explain_cache() -> None:
+    """Drop the cached explain env so the next call builds a new rules directory."""
+    global _EXPLAIN_ENV, _RULES_DIR
+    _EXPLAIN_ENV = None
+    _RULES_DIR = None
+
+
 def explain_env() -> dict:
     """Point herdr at the toml next to this script. The temp dir is removed on exit."""
     global _EXPLAIN_ENV
@@ -842,15 +843,13 @@ def explain_env() -> dict:
     global _RULES_DIR
     sweep_stale_rules()
     sweep_stale_pidfiles()
-    base = tempfile.mkdtemp(prefix="herdr-kiro-rules-%s-" % os.getpid())
+    base = tempfile.mkdtemp(prefix=f"herdr-kiro-rules-{os.getpid()}-")
     _RULES_DIR = base
     marker = os.path.join(base, "herdr-kiro-owned")
     with open(marker, "w", encoding="utf-8") as handle:
-        handle.write("uid %s\n" % os.getuid())
-    try:
+        handle.write(f"uid {os.getuid()}\n")
+    with contextlib.suppress(OSError):
         os.chmod(marker, FILE_MODE)
-    except OSError:
-        pass
     atexit.register(remove_tree, base)
     dest = os.path.join(base, "herdr", "agent-detection")
     os.makedirs(dest, exist_ok=True)
@@ -878,9 +877,7 @@ def screen_view(text: str) -> dict:
     path = None
     view = _unknown_screen()
     try:
-        fd, path = tempfile.mkstemp(
-            prefix="herdr-kiro-screen-", suffix=".txt", dir=state_dir()
-        )
+        fd, path = tempfile.mkstemp(prefix="herdr-kiro-screen-", suffix=".txt", dir=state_dir())
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text or "")
         completed = subprocess.run(
@@ -898,10 +895,8 @@ def screen_view(text: str) -> dict:
         return _unknown_screen()
     finally:
         if path:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(path)
-            except OSError:
-                pass
     if completed.returncode != 0 or not (completed.stdout or "").strip():
         return _unknown_screen()
     try:
@@ -1108,9 +1103,7 @@ def workflow_banner(pane: str) -> bool:
 
 
 _TABLE = None
-_PS_LINE = re.compile(
-    r"^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.*?)\s*$"
-)
+_PS_LINE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.*?)\s*$")
 
 
 def begin_tick() -> None:
@@ -1175,7 +1168,7 @@ def start_token(text: str) -> str:
     return str(int(parsed.timestamp()))
 
 
-def process_snapshot(pid: int) -> dict:
+def process_snapshot(pid: int) -> dict | None:
     """Return ppid, lstart, and comm basename. None if the pid is gone.
 
     One ps fills the table for the tick. Later lookups do not call ps again.
@@ -1191,7 +1184,7 @@ def process_snapshot(pid: int) -> dict:
 def _linux_start_ticks(pid: int):
     """Clock ticks since boot from the process stat, or None."""
     try:
-        with open("/proc/%s/stat" % int(pid), "rb") as handle:
+        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
             raw = handle.read()
     except (OSError, ValueError):
         return None
@@ -1210,7 +1203,7 @@ def _linux_start_ticks(pid: int):
 
 def _linux_boot_time():
     try:
-        with open("/proc/stat", "r", encoding="utf-8") as handle:
+        with open("/proc/stat", encoding="utf-8") as handle:
             for line in handle:
                 if line.startswith("btime "):
                     return int(line.split()[1])
@@ -1324,22 +1317,20 @@ def ownership(dest: str) -> str:
     return "differs"
 
 
-def owner_is_dead(owner, started: str) -> bool:
+def owner_is_dead(owner: object, started: object = "") -> bool:
     """True when this pid is gone. A live process is never dead because of its parent."""
-    if not owner:
+    if not isinstance(owner, (int, str)) or not owner:
         return False
     try:
         pid = int(owner)
-    except (TypeError, ValueError):
+    except ValueError:
         return False
     snap = process_snapshot(pid)
     if snap is None:
         return True
     if snap.get("error"):
         return False
-    if started and snap.get("lstart") != started:
-        return True
-    return False
+    return bool(started and snap.get("lstart") != started)
 
 
 def alive(pid: int, started: str = "") -> bool:
@@ -1354,9 +1345,7 @@ def alive(pid: int, started: str = "") -> bool:
         except OSError:
             return False
         return not started
-    if started and snap.get("lstart") != started:
-        return False
-    return True
+    return not (started and snap.get("lstart") != started)
 
 
 def agent_lookup(pane: str) -> str:
@@ -1369,8 +1358,7 @@ def agent_lookup(pane: str) -> str:
     try:
         completed = subprocess.run(
             command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=5,
             check=False,
@@ -1502,9 +1490,9 @@ def process_chain() -> str:
         seen.add(pid)
         snap = process_snapshot(pid)
         if not snap or snap.get("error"):
-            parts.append("%s:?" % pid)
+            parts.append(f"{pid}:?")
             break
-        parts.append("%s:%s" % (pid, command_name(snap.get("comm") or "")))
+        parts.append("{}:{}".format(pid, command_name(snap.get("comm") or "")))
         pid = int(snap.get("ppid") or 0)
     return " ".join(parts)
 
@@ -1512,10 +1500,8 @@ def process_chain() -> str:
 def write_pidfile(state_file: str, pid: int, started: str) -> None:
     directory = os.path.join(os.path.dirname(state_file), "pids")
     os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(directory, DIR_MODE)
-    except OSError:
-        pass
     # `started` stays on the state record as whole-second lstart. The pid file
     # stores a finer token so a pid reused in that same second does not match.
     del started
@@ -1527,15 +1513,13 @@ def write_pidfile(state_file: str, pid: int, started: str) -> None:
     path = os.path.join(directory, str(pid))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write("%s\n%s\n%s\n" % (os.getuid(), token, comm))
+        handle.write(f"{os.getuid()}\n{token}\n{comm}\n")
 
 
 def remove_pidfile(state_file: str, pid: int) -> None:
     path = os.path.join(os.path.dirname(state_file), "pids", str(pid))
-    try:
+    with contextlib.suppress(OSError):
         os.remove(path)
-    except OSError:
-        pass
 
 
 def ensure_watcher(pane: str, path: str) -> None:
@@ -1596,7 +1580,7 @@ def clear_watcher(path: str) -> None:
 
 
 def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
-    """Release only while this process still owns the watcher slot."""
+    """Stop the watcher only while this process still owns its slot."""
     me = os.getpid()
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
@@ -1632,14 +1616,17 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     update(path, confirm)
     if not still["ok"]:
         return False
-    release_authority(pane, path)
+    # Idle while kiro is still running keeps the hook report. release-agent
+    # after that idle drops done on herdr 0.9.5. Owner exit still releases.
+    if reason != "idle":
+        release_authority(pane, path)
     clear_watcher(path)
     log("watcher exit " + reason)
     return True
 
 
 def note_report(pane: str, path: str, kind: str, reported, misses: int):
-    ok = send_report(pane, path, kind, release=False)
+    ok = send_report(pane, path, kind)
     if ok:
         return kind, 0
     misses += 1
@@ -1659,16 +1646,12 @@ class OwnerExitWatch:
 
     def close(self) -> None:
         for fd in self._fds.values():
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
         self._fds.clear()
         if self._kq is not None:
-            try:
+            with contextlib.suppress(OSError):
                 self._kq.close()
-            except OSError:
-                pass
             self._kq = None
 
     def wait(self, pids, timeout: float) -> bool:
@@ -1714,19 +1697,28 @@ class OwnerExitWatch:
         return bool(poller.poll(max(0, int(timeout * 1000))))
 
     def _wait_kqueue(self, pids, timeout: float) -> bool:
+        # kqueue is macOS and BSD. Linux stdlib select does not define it.
+        kqueue = getattr(select, "kqueue", None)
+        kevent = getattr(select, "kevent", None)
+        kq_filter = getattr(select, "KQ_FILTER_PROC", None)
+        kq_add = getattr(select, "KQ_EV_ADD", None)
+        kq_enable = getattr(select, "KQ_EV_ENABLE", None)
+        kq_note = getattr(select, "KQ_NOTE_EXIT", None)
+        if (
+            kqueue is None
+            or kevent is None
+            or kq_filter is None
+            or kq_add is None
+            or kq_enable is None
+            or kq_note is None
+        ):
+            return self._wait_kill(pids, timeout)
         if self._kq is None:
-            self._kq = select.kqueue()
+            self._kq = kqueue()
         changes = []
         for pid in pids:
             try:
-                changes.append(
-                    select.kevent(
-                        pid,
-                        select.KQ_FILTER_PROC,
-                        select.KQ_EV_ADD | select.KQ_EV_ENABLE,
-                        select.KQ_NOTE_EXIT,
-                    )
-                )
+                changes.append(kevent(pid, kq_filter, kq_add | kq_enable, kq_note))
             except OSError as exc:
                 if exc.errno == errno.ESRCH:
                     return True
@@ -1757,7 +1749,7 @@ def watch_loop(pane: str, path: str) -> None:
     try:
         _watch_loop(pane, path)
     except Exception as exc:
-        log("watcher error %s: %s" % (type(exc).__name__, exc))
+        log(f"watcher error {type(exc).__name__}: {exc}")
         clear_watcher(path)
 
 
@@ -1834,15 +1826,16 @@ def _watch_loop(pane: str, path: str) -> None:
                     break
             if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
                 owner_alive = True
-            pane_kiro = kiro_in_pane([pid for pid in known_owners])
+            pane_kiro = kiro_in_pane(list(known_owners))
             owner_dead = kind is not None or should_stop_for_dead_owner(state, pane_kiro)
             if not known_owners and looked == "gone":
                 if gone_since is None:
                     gone_since = now
                 gone_hits += 1
-                if gone_confirmed(gone_since, now, gone_hits, False):
-                    if finish_if_unchanged(pane, path, state, "agent gone"):
-                        return
+                if gone_confirmed(gone_since, now, gone_hits, False) and finish_if_unchanged(
+                    pane, path, state, "agent gone"
+                ):
+                    return
             else:
                 gone_since = None
                 gone_hits = 0
@@ -1885,7 +1878,12 @@ def _watch_loop(pane: str, path: str) -> None:
                     keys = list(state["busy"])
                     decision = {"ok": False}
 
-                    def apply_clear(current: dict) -> None:
+                    def apply_clear(
+                        current: dict,
+                        decision: dict = decision,
+                        generation: int = generation,
+                        keys: list = keys,
+                    ) -> None:
                         decision["ok"] = release_if_current(current, generation, keys)
 
                     update(path, apply_clear)
@@ -1915,9 +1913,8 @@ def _watch_loop(pane: str, path: str) -> None:
                         return
                     log("watcher idle")
                 held = quiet_since is not None and now - quiet_since >= RELEASE_DELAY
-                if reported == "idle" and not state["busy"] and held:
-                    if finish_if_unchanged(pane, path, state, "idle"):
-                        return
+                if reported == "idle" and not state["busy"] and held and finish_if_unchanged(pane, path, state, "idle"):
+                    return
                 continue
             if action == reported:
                 continue
@@ -1987,17 +1984,12 @@ def main() -> int:
     log(f"event={event} session={session} pane={pane} chain={process_chain()}")
 
     def fold(state: dict) -> None:
-        revised = apply_event(
-            state, event, session, now, owner, owner_started, chat_pid, chat_started
-        )
+        revised = apply_event(state, event, session, now, owner, owner_started, chat_pid, chat_started)
         state.clear()
         state.update(revised)
 
     state = update(path, fold)
-    log(
-        f"state event={event} busy={len(state['busy'])} "
-        f"grace_until={state['grace_until']:.3f}"
-    )
+    log(f"state event={event} busy={len(state['busy'])} grace_until={state['grace_until']:.3f}")
     ensure_watcher(pane, path)
     screen = pane_text(pane)
     action = next_action(

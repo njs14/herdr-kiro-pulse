@@ -1,4 +1,5 @@
 """install.sh writes a hook file the shell can run, including odd paths."""
+
 import hashlib
 import json
 import os
@@ -42,8 +43,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(weird, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -95,8 +95,7 @@ class InstallTests(unittest.TestCase):
                 ["sh", os.path.join(ROOT, "install.sh")],
                 env=env,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -104,8 +103,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -155,14 +153,14 @@ class InstallTests(unittest.TestCase):
         with open(marked, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
         with open(marked + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
-            handle.write("uid %s\n" % os.getuid())
+            handle.write(f"uid {os.getuid()}\n")
         decoy_root = os.path.join(base, "not-a-sweep-root")
         os.makedirs(decoy_root)
         decoy_marked = os.path.join(decoy_root, "herdr-kiro-decoy.json")
         with open(decoy_marked, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
         with open(decoy_marked + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
-            handle.write("uid %s\n" % os.getuid())
+            handle.write(f"uid {os.getuid()}\n")
         seq_file = os.path.join(state, "w1_p1.json.seq")
         with open(seq_file, "w", encoding="utf-8") as handle:
             handle.write("3000000\n")
@@ -176,15 +174,16 @@ class InstallTests(unittest.TestCase):
         hook.begin_tick()
         ident = hook.watcher_identity(watcher.pid)
         self.assertIsNotNone(ident)
-        self.assertIn(".", ident["start"])
+        # Linux is fractional seconds. Other platforms tag whole seconds with sec:.
+        self.assertRegex(ident["start"], r"^(?:\d+\.\d+|sec:\d+)$")
         decoy_ident = hook.watcher_identity(decoy.pid)
         self.assertIsNotNone(decoy_ident)
         pid_dir = os.path.join(state, "pids")
         os.makedirs(pid_dir)
         with open(os.path.join(pid_dir, str(watcher.pid)), "w", encoding="utf-8") as handle:
-            handle.write("%s\n%s\n%s\n" % (os.getuid(), ident["start"], ident["comm"]))
+            handle.write("{}\n{}\n{}\n".format(os.getuid(), ident["start"], ident["comm"]))
         with open(os.path.join(pid_dir, str(decoy.pid)), "w", encoding="utf-8") as handle:
-            handle.write("%s\n%s\n%s\n" % (os.getuid(), decoy_ident["start"], "not-the-comm"))
+            handle.write("{}\n{}\n{}\n".format(os.getuid(), decoy_ident["start"], "not-the-comm"))
         env = dict(os.environ)
         env["HOME"] = home
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
@@ -196,8 +195,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -227,8 +225,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -239,8 +236,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -265,8 +261,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -280,17 +275,14 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         with open(hook_file + ".original", "rb") as handle:
             self.assertEqual(handle.read(), b'{"user":"original"}\n')
         matches = [
-            name
-            for name in os.listdir(os.path.dirname(hook_file))
-            if name.startswith("herdr-kiro.json.user-modified.")
+            name for name in os.listdir(os.path.dirname(hook_file)) if name.startswith("herdr-kiro.json.user-modified.")
         ]
         self.assertEqual(len(matches), 1)
         with open(os.path.join(os.path.dirname(hook_file), matches[0]), "rb") as handle:
@@ -314,19 +306,14 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         self.assertIn("no content hash", completed.stderr)
         with open(hook_file, "rb") as handle:
             self.assertEqual(handle.read(), b'{"version":"v4"}\n')
-        backups = [
-            name
-            for name in os.listdir(hook_dir)
-            if name.startswith("herdr-kiro.json.user-modified.")
-        ]
+        backups = [name for name in os.listdir(hook_dir) if name.startswith("herdr-kiro.json.user-modified.")]
         self.assertEqual(len(backups), 1)
 
     def test_lost_marker_keeps_a_hand_edit(self):
@@ -339,8 +326,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -352,8 +338,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -372,8 +357,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -383,8 +367,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -401,11 +384,7 @@ class InstallTests(unittest.TestCase):
         os.makedirs(bindir)
         fake = os.path.join(bindir, "herdr")
         with open(fake, "w", encoding="utf-8") as handle:
-            handle.write(
-                "#!/bin/sh\n"
-                "echo '{\"error\":{\"code\":\"server_not_running\"}}' >&2\n"
-                "exit 1\n"
-            )
+            handle.write('#!/bin/sh\necho \'{"error":{"code":"server_not_running"}}\' >&2\nexit 1\n')
         os.chmod(fake, 0o755)
         env = self._home_env(home)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
@@ -413,8 +392,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -429,11 +407,7 @@ class InstallTests(unittest.TestCase):
         os.makedirs(bindir)
         fake = os.path.join(bindir, "herdr")
         with open(fake, "w", encoding="utf-8") as handle:
-            handle.write(
-                "#!/bin/sh\n"
-                "echo '{\"error\":{\"code\":\"server_not_running\"}}' >&2\n"
-                "exit 1\n"
-            )
+            handle.write('#!/bin/sh\necho \'{"error":{"code":"server_not_running"}}\' >&2\nexit 1\n')
         os.chmod(fake, 0o755)
         env = self._home_env(home)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
@@ -442,8 +416,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertNotEqual(completed.returncode, 0)
@@ -460,7 +433,7 @@ class InstallTests(unittest.TestCase):
         log = os.path.join(base, "herdr-args")
         fake = os.path.join(bindir, "herdr")
         with open(fake, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERDR_FAKE_LOG\"\nexit 1\n")
+            handle.write('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$HERDR_FAKE_LOG"\nexit 1\n')
         os.chmod(fake, 0o755)
         env = self._home_env(home)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
@@ -470,8 +443,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 1, completed.stderr or completed.stdout)
@@ -484,8 +456,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 1, completed.stderr or completed.stdout)
@@ -506,11 +477,11 @@ class InstallTests(unittest.TestCase):
             handle.write("herdr-kiro-owned\n")
         env = self._home_env(home)
         script = os.path.join(ROOT, "install.sh")
-        first = subprocess.run(["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        first = subprocess.run(["sh", script], env=env, text=True, capture_output=True, check=False)
         self.assertEqual(first.returncode, 0, first.stderr or first.stdout)
-        second = subprocess.run(["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        second = subprocess.run(["sh", script], env=env, text=True, capture_output=True, check=False)
         self.assertEqual(second.returncode, 0, second.stderr or second.stdout)
-        self.assertNotIn("Installed %s" % hook_file, second.stdout)
+        self.assertNotIn(f"Installed {hook_file}", second.stdout)
         backups = [name for name in os.listdir(hook_dir) if name.startswith("herdr-kiro.json.user-modified.")]
         self.assertEqual(len(backups), 1)
         with open(hook_file, "rb") as handle:
@@ -529,8 +500,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "startup.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -551,7 +521,7 @@ class InstallTests(unittest.TestCase):
         chosen = os.path.join(base, "chosen-herdr")
         log = os.path.join(base, "log")
         with open(chosen, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HERDR_FAKE_LOG\"\nexit 0\n")
+            handle.write('#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$HERDR_FAKE_LOG"\nexit 0\n')
         os.chmod(chosen, 0o755)
         env = self._home_env(home)
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
@@ -561,8 +531,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -587,7 +556,7 @@ class InstallTests(unittest.TestCase):
         bindir = self._fake_herdr(
             base,
             "#!/bin/sh\n"
-            "if [ \"$1\" = plugin ] && [ \"$2\" = list ]; then\n"
+            'if [ "$1" = plugin ] && [ "$2" = list ]; then\n'
             "  echo connection refused >&2\n"
             "  exit 1\n"
             "fi\n"
@@ -601,8 +570,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -626,8 +594,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -652,8 +619,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -679,8 +645,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "startup.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -704,10 +669,10 @@ class InstallTests(unittest.TestCase):
         dead = subprocess.Popen(["sleep", "30"])
         dead.kill()
         dead.wait(timeout=5)
-        owned = os.path.join(tmp, "herdr-kiro-rules-%s-ours" % dead.pid)
+        owned = os.path.join(tmp, f"herdr-kiro-rules-{dead.pid}-ours")
         os.makedirs(owned)
         with open(os.path.join(owned, "herdr-kiro-owned"), "w", encoding="utf-8") as handle:
-            handle.write("uid %s\n" % os.getuid())
+            handle.write(f"uid {os.getuid()}\n")
         legacy = os.path.join(tmp, "herdr-kiro-hook.log")
         with open(legacy, "w", encoding="utf-8") as handle:
             handle.write("legacy\n")
@@ -720,7 +685,7 @@ class InstallTests(unittest.TestCase):
         with open(marked, "w", encoding="utf-8") as handle:
             handle.write("{}\n")
         with open(marked + ".herdr-kiro-owned", "w", encoding="utf-8") as handle:
-            handle.write("uid %s\n" % os.getuid())
+            handle.write(f"uid {os.getuid()}\n")
         env = self._home_env(home)
         env["TMPDIR"] = tmp
         env.pop("HERDR_KIRO_LEGACY_DIR", None)
@@ -730,8 +695,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -764,8 +728,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -788,8 +751,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -802,17 +764,14 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
         with open(hook_file, "rb") as handle:
             self.assertEqual(handle.read(), b'{"user":"original"}\n')
         matches = [
-            name
-            for name in os.listdir(os.path.dirname(hook_file))
-            if name.startswith("herdr-kiro.json.user-modified.")
+            name for name in os.listdir(os.path.dirname(hook_file)) if name.startswith("herdr-kiro.json.user-modified.")
         ]
         self.assertEqual(len(matches), 1)
         with open(os.path.join(os.path.dirname(hook_file), matches[0]), "rb") as handle:
@@ -835,17 +794,71 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "install.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("left %s alone" % link, completed.stderr)
+        self.assertIn(f"left {link} alone", completed.stderr)
         self.assertTrue(os.path.islink(link))
         self.assertEqual(os.readlink(link), target)
         with open(target, encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "keep\n")
         self.assertFalse(os.path.exists(os.path.join(home, ".config", "herdr", "agent-detection", "kiro.toml")))
+
+    def test_install_sets_the_owner_execute_bit_on_the_hook_path(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        tree = os.path.join(base, "tree")
+        os.makedirs(os.path.join(tree, "prototype"))
+        shutil.copy(os.path.join(ROOT, "install.sh"), tree)
+        hook_path = os.path.join(tree, "prototype", "herdr_kiro_state.py")
+        with open(hook_path, "w", encoding="utf-8") as handle:
+            handle.write("#!/usr/bin/env python3\n")
+        os.chmod(hook_path, 0o644)
+        completed = subprocess.run(
+            ["sh", os.path.join(tree, "install.sh")],
+            env=self._home_env(home),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+        mode = os.stat(hook_path).st_mode
+        self.assertTrue(stat.S_ISREG(mode))
+        self.assertTrue(mode & stat.S_IXUSR)
+        self.assertFalse(mode & stat.S_IXGRP)
+        self.assertFalse(mode & stat.S_IXOTH)
+
+    def test_install_refuses_to_chmod_a_symlinked_hook_script(self):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        tree = os.path.join(base, "tree")
+        os.makedirs(os.path.join(tree, "prototype"))
+        shutil.copy(os.path.join(ROOT, "install.sh"), tree)
+        target = os.path.join(base, "real.py")
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("#!/usr/bin/env python3\n")
+        os.chmod(target, 0o644)
+        hook_path = os.path.join(tree, "prototype", "herdr_kiro_state.py")
+        os.symlink(target, hook_path)
+        completed = subprocess.run(
+            ["sh", os.path.join(tree, "install.sh")],
+            env=self._home_env(home),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("symlink", completed.stderr)
+        self.assertIn("refusing", completed.stderr)
+        self.assertTrue(os.path.islink(hook_path))
+        self.assertEqual(os.readlink(hook_path), target)
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o644)
+        self.assertFalse(os.path.exists(os.path.join(home, ".kiro", "hooks", "herdr-kiro.json")))
 
     def test_install_twice_is_idempotent(self):
         base = tempfile.mkdtemp()
@@ -854,14 +867,10 @@ class InstallTests(unittest.TestCase):
         os.makedirs(home)
         env = self._home_env(home)
         script = os.path.join(ROOT, "install.sh")
-        first = subprocess.run(
-            ["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
-        )
+        first = subprocess.run(["sh", script], env=env, text=True, capture_output=True, check=False)
         self.assertEqual(first.returncode, 0, first.stderr or first.stdout)
         snap = self._files(home)
-        second = subprocess.run(
-            ["sh", script], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
-        )
+        second = subprocess.run(["sh", script], env=env, text=True, capture_output=True, check=False)
         self.assertEqual(second.returncode, 0, second.stderr or second.stdout)
         self.assertEqual(self._files(home), snap)
 
@@ -879,8 +888,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "startup.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -894,7 +902,7 @@ class InstallTests(unittest.TestCase):
         marker = path + ".herdr-kiro-owned"
         digest = hashlib.sha256(payload).hexdigest()
         with open(marker, "w", encoding="utf-8") as handle:
-            handle.write("herdr-kiro-owned\nuid %s\nsha256 %s\n" % (os.getuid(), digest))
+            handle.write(f"herdr-kiro-owned\nuid {os.getuid()}\nsha256 {digest}\n")
         os.chmod(path, 0o644)
         os.chmod(marker, 0o600)
         return path, marker, payload, digest
@@ -924,9 +932,11 @@ class InstallTests(unittest.TestCase):
                 return self._stat_as_uid(info, other)
             return info
 
-        with mock.patch.object(hook.os, "lstat", side_effect=fake_lstat), mock.patch.object(
-            hook.os, "stat", side_effect=fake_stat
-        ), mock.patch.object(hook, "temp_roots", return_value=[base]):
+        with (
+            mock.patch.object(hook.os, "lstat", side_effect=fake_lstat),
+            mock.patch.object(hook.os, "stat", side_effect=fake_stat),
+            mock.patch.object(hook, "temp_roots", return_value=[base]),
+        ):
             self.assertFalse(hook._legacy_file_ours(path))
             self.assertIsNone(hook.read_owned_hash(marker))
             self.assertEqual(hook.ownership(path), "absent")
@@ -956,9 +966,11 @@ class InstallTests(unittest.TestCase):
                 return self._stat_as_uid(info, other)
             return info
 
-        with mock.patch.object(hook.os, "lstat", side_effect=fake_protected_lstat), mock.patch.object(
-            hook.os, "stat", side_effect=fake_protected_stat
-        ), mock.patch.object(hook, "temp_roots", return_value=[base]):
+        with (
+            mock.patch.object(hook.os, "lstat", side_effect=fake_protected_lstat),
+            mock.patch.object(hook.os, "stat", side_effect=fake_protected_stat),
+            mock.patch.object(hook, "temp_roots", return_value=[base]),
+        ):
             self.assertFalse(hook._legacy_file_ours(path))
             self.assertIsNone(hook.read_owned_hash(marker))
             hook.sweep_owned_temp()
@@ -999,8 +1011,7 @@ class InstallTests(unittest.TestCase):
             ["sh", os.path.join(ROOT, "startup.sh")],
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         self.assertNotEqual(completed.returncode, 0)

@@ -46,3 +46,15 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: unit tests
         run: python -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: ruff
+        run: uvx ruff check
+      - name: ruff format
+        run: uvx ruff format --check
+      - name: ty
+        run: uvx ty check

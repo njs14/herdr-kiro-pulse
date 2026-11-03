@@ -4,6 +4,7 @@
 Every status line and pane line is read from herdr at that moment.
 Nothing is retyped from memory.
 """
+
 import json
 import os
 import subprocess
@@ -27,8 +28,7 @@ def herdr(*args, timeout=20):
     return subprocess.run(
         ["herdr", "--session", SESSION, *args],
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         timeout=timeout,
         check=False,
     )
