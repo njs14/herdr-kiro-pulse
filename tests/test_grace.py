@@ -1362,6 +1362,95 @@ class GraceTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["reported"], "working")
 
+    def test_finished_turn_does_not_release_into_a_screen_completion(self):
+        # herdr 0.9.5: done is idle with seen false (api_helpers.rs 96-107).
+        # That seen flag flips on Working|Blocked -> Idle when the pane is not
+        # the focused tab (actions.rs 22-29, 38-43, 1846-1847). hook:kiro is
+        # not a full-lifecycle source (detect/mod.rs 330-340), so the hook
+        # state is effective while held (state.rs 2032-2037, 2404-2419).
+        # release-agent keeps the screen fallback when the process still owns
+        # the agent and drops the hook (state.rs 1835-1874). The next screen
+        # idle is then the completion: get done, explain idle. A headless
+        # reacquire can hide that with unknown; the Mac run stayed on done.
+        for prior in ("working", "blocked"):
+            pane = _ScreenCompletion()
+            pane.screen(prior)
+            directory = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, directory, True)
+            path = os.path.join(directory, "pane.json")
+
+            def seed(state, prior=prior):
+                state["reported"] = prior
+                state["seq"] = 4
+                state["watcher"] = os.getpid()
+                state["generation"] = 1
+                state["busy"] = {}
+
+            hook.update(path, seed)
+
+            def fake_herdr(*args, pane=pane):
+                if args[0] == "report-agent":
+                    pane.report(args[args.index("--state") + 1])
+                elif args[0] == "release-agent":
+                    pane.release()
+                return True
+
+            with mock.patch.object(hook, "herdr", fake_herdr):
+                self.assertTrue(hook.send_report("w1:p1", path, "idle"))
+                self.assertTrue(
+                    hook.finish_if_unchanged(
+                        "w1:p1",
+                        path,
+                        {"generation": 1, "busy": {}},
+                        "idle",
+                    )
+                )
+            pane.screen("idle")
+            self.assertEqual(pane.status(), "idle")
+            self.assertIsNone(pane.completion)
+
+
+class _ScreenCompletion:
+    """Background pane. Hook overrides fallback until release exposes it."""
+
+    def __init__(self):
+        self.fallback = "unknown"
+        self.hook = None
+        self.state = "unknown"
+        self.seen = True
+        self.completion = None
+
+    def status(self):
+        if self.state == "idle" and not self.seen:
+            return "done"
+        return self.state
+
+    def _transition(self, new):
+        previous = self.state
+        if new == previous:
+            return
+        if new == "idle" and previous in ("working", "blocked"):
+            self.seen = False
+            self.completion = new
+        elif new != "idle":
+            self.seen = True
+        self.state = new
+
+    def _recompute(self):
+        self._transition(self.hook if self.hook is not None else self.fallback)
+
+    def screen(self, kind):
+        self.fallback = kind
+        self._recompute()
+
+    def report(self, kind):
+        self.hook = kind
+        self._recompute()
+
+    def release(self):
+        self.hook = None
+        self._recompute()
+
 
 if __name__ == "__main__":
     unittest.main()
