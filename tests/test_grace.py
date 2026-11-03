@@ -1302,6 +1302,52 @@ class GraceTests(unittest.TestCase):
             self.assertEqual(handle.read(), "safe")
         self.assertTrue(os.path.isdir(outside))
 
+    def test_idle_after_working_or_blocked_clears_through_unknown(self):
+        # herdr 0.9.5 maps an unseen Working or Blocked -> Idle report to
+        # agent_status done. agent explain still returns the screen rule idle.
+        # An unknown report in between is not a completion, so the idle report
+        # stays idle and the two commands agree.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+
+        def seed(state, reported):
+            state["reported"] = reported
+            state["seq"] = 4
+
+        def states_for(reported, kind):
+            hook.update(path, lambda state: seed(state, reported))
+            calls = []
+
+            def fake_herdr(*args):
+                calls.append(args)
+                return True
+
+            with mock.patch.object(hook, "herdr", fake_herdr):
+                self.assertTrue(hook.send_report("w1:p1", path, kind, release=False))
+            return [args[args.index("--state") + 1] for args in calls]
+
+        self.assertEqual(states_for("working", "idle"), ["unknown", "idle"])
+        self.assertEqual(states_for("blocked", "idle"), ["unknown", "idle"])
+        self.assertEqual(states_for("idle", "idle"), ["idle"])
+        self.assertEqual(states_for("working", "working"), ["working"])
+
+        hook.update(path, lambda state: seed(state, "working"))
+        calls = []
+
+        def fail_unknown(*args):
+            calls.append(args)
+            return "--state" in args and args[args.index("--state") + 1] != "unknown"
+
+        with mock.patch.object(hook, "herdr", fail_unknown):
+            self.assertFalse(hook.send_report("w1:p1", path, "idle", release=False))
+        self.assertEqual(
+            [args[args.index("--state") + 1] for args in calls],
+            ["unknown"],
+        )
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["reported"], "working")
+
 
 if __name__ == "__main__":
     unittest.main()
