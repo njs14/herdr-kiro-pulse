@@ -1370,7 +1370,7 @@ class GraceTests(unittest.TestCase):
             hook.update(path, seed)
             calls = []
 
-            def fake_herdr(*args, pane=pane):
+            def fake_herdr(*args, pane=pane, calls=calls):
                 calls.append(args)
                 if args[0] == "report-agent":
                     pane.report(args[args.index("--state") + 1])
