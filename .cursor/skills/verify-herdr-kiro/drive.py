@@ -334,18 +334,24 @@ def status(save: str | None) -> None:
     print(json.dumps(row))
 
 
-def wait_for(status_name: str, rule: str, seconds: float) -> None:
+def wait_for(get_status: str, explain_status: str, rule: str, seconds: float) -> None:
     meta = load_meta()
     deadline = time.time() + seconds
     last = {}
     while time.time() < deadline:
         last = snapshot(meta)
+        completion_ready = get_status != "done" or last.get("completion_seq") is not None
         if (
-            last.get("agent_status") == status_name
-            and last.get("explain_state") == status_name
+            last.get("agent_status") == get_status
+            and last.get("explain_state") == explain_status
             and last.get("explain_rule") == rule
+            and completion_ready
         ):
-            path = os.path.join(meta["evidence"], f"wait-{status_name}-{rule}.json")
+            if get_status == explain_status:
+                name = f"wait-{get_status}-{rule}.json"
+            else:
+                name = f"wait-{get_status}-{explain_status}-{rule}.json"
+            path = os.path.join(meta["evidence"], name)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(last, handle)
@@ -354,7 +360,7 @@ def wait_for(status_name: str, rule: str, seconds: float) -> None:
             print(json.dumps(last))
             return
         time.sleep(0.3)
-    raise SystemExit(f"timed out waiting for {status_name}/{rule} last={json.dumps(last)}")
+    raise SystemExit(f"timed out waiting for {get_status}/{explain_status}/{rule} last={json.dumps(last)}")
 
 
 def background() -> None:
@@ -378,6 +384,23 @@ def focus_primary() -> None:
     if focused.returncode != 0:
         raise SystemExit(focused.stderr or focused.stdout)
     print(json.dumps({"focused": "w1"}))
+
+
+def mark_seen() -> None:
+    """herdr agent focus marks the active tab seen, including an already focused pane."""
+    meta = load_meta()
+    focused = require_ok(herdr(meta, ["agent", "focus", meta["pane"]]), "agent focus")
+    agent = focused.get("result", {}).get("agent") or {}
+    print(
+        json.dumps(
+            {
+                "seen": meta["pane"],
+                "agent_status": agent.get("agent_status"),
+                "state_change_seq": agent.get("state_change_seq"),
+                "completion_seq": agent.get("completion_seq"),
+            }
+        )
+    )
 
 
 def cleanup() -> None:
@@ -425,7 +448,7 @@ def cleanup() -> None:
 def main() -> int:
     args = sys.argv[1:]
     if not args:
-        raise SystemExit("usage: drive.py launch|doctor|paint|hook|status|wait|background|focus-primary|cleanup")
+        raise SystemExit("usage: drive.py launch|doctor|paint|hook|status|wait|background|focus-primary|seen|cleanup")
     command = args[0]
     if command == "launch":
         launch()
@@ -441,14 +464,22 @@ def main() -> int:
             save = args[2]
         status(save)
     elif command == "wait":
-        if len(args) < 3:
-            raise SystemExit("usage: drive.py wait STATUS RULE [seconds]")
-        seconds = float(args[3]) if len(args) > 3 else 8
-        wait_for(args[1], args[2], seconds)
+        rest = args[1:]
+        if len(rest) == 2:
+            get_status, explain_status, rule, seconds = rest[0], rest[0], rest[1], 8.0
+        elif len(rest) == 3:
+            get_status, explain_status, rule, seconds = rest[0], rest[0], rest[1], float(rest[2])
+        elif len(rest) == 4:
+            get_status, explain_status, rule, seconds = rest[0], rest[1], rest[2], float(rest[3])
+        else:
+            raise SystemExit("usage: drive.py wait STATUS RULE [seconds] | drive.py wait GET EXPLAIN RULE seconds")
+        wait_for(get_status, explain_status, rule, seconds)
     elif command == "background":
         background()
     elif command == "focus-primary":
         focus_primary()
+    elif command == "seen":
+        mark_seen()
     elif command == "cleanup":
         cleanup()
     else:

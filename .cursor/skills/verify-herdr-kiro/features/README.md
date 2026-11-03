@@ -42,4 +42,4 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 - [Tool approval](./tool-approval.md) covers the Allow once chooser.
 - [Trust dialog](./trust-dialog.md) covers Trust this workspace.
 - [Finished turn](./done-vs-idle.md) covers get and explain after Stop, including a background workspace.
-- [Release handoff](./release-handoff.md) covers that a finished turn does not release, and get stays idle.
+- [Release handoff](./release-handoff.md) covers that a finished turn does not release, and unseen get stays done.

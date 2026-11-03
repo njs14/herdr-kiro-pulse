@@ -5,7 +5,7 @@ description: Drive the herdr-kiro hook in an isolated herdr 0.9.5 session and co
 
 # Verify herdr-kiro
 
-The user-facing surface is a herdr pane whose foreground process is `kiro-cli`, plus the Kiro hook in `prototype/herdr_kiro_state.py`. `herdr agent get` is the status herdr shows. `herdr agent explain` is the screen rule. After a turn those two must agree.
+The user-facing surface is a herdr pane whose foreground process is `kiro-cli`, plus the Kiro hook in `prototype/herdr_kiro_state.py`. `herdr agent get` is the status herdr shows. `herdr agent explain` is the screen rule. After a turn on a background workspace, get says `done` and explain says idle until that pane is seen. After it is seen, both say idle.
 
 This skill's driver is `.cursor/skills/verify-herdr-kiro/drive.py`. Run it from the repo root. Set `HERDR_BIN` to a herdr 0.9.5 binary when `herdr` is not on `PATH`. Set `VERIFY_RUN` to a scratch directory (default `/tmp/herdr-kiro-verify`). One run owns that directory. Do not drive a herdr the user already has open.
 
@@ -33,16 +33,18 @@ Doctor is read-only. It requires the server pid from this launch to be alive, `h
 python3 .cursor/skills/verify-herdr-kiro/drive.py paint idle|working|approval|trust
 python3 .cursor/skills/verify-herdr-kiro/drive.py hook SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd
 python3 .cursor/skills/verify-herdr-kiro/drive.py wait STATUS RULE [seconds]
+python3 .cursor/skills/verify-herdr-kiro/drive.py wait GET EXPLAIN RULE seconds
 python3 .cursor/skills/verify-herdr-kiro/drive.py status --save NAME.json
 python3 .cursor/skills/verify-herdr-kiro/drive.py background
 python3 .cursor/skills/verify-herdr-kiro/drive.py focus-primary
+python3 .cursor/skills/verify-herdr-kiro/drive.py seen
 ```
 
-`paint` writes one mode into the painter fifo. The pane then shows that screen and nothing else. `hook` runs the real hook on stdin JSON `{"session_id":"verify-session"}` with `HERDR_ENV=1` and this run's pane id. `wait` polls until `agent get` and `agent explain` both report `STATUS` and the matched rule is `RULE`. `background` creates a second workspace and focuses it, leaving the Kiro pane in the background. That is the unseen-completion case.
+`paint` writes one mode into the painter fifo. The pane then shows that screen and nothing else. `hook` runs the real hook on stdin JSON `{"session_id":"verify-session"}` with `HERDR_ENV=1` and this run's pane id. `wait STATUS RULE` polls until `agent get` and `agent explain` both report `STATUS` and the matched rule is `RULE`. `wait GET EXPLAIN RULE` allows those two to differ, which is how a background turn reads get `done` and explain `idle`. `background` creates a second workspace and focuses it, leaving the Kiro pane in the background. `seen` runs `herdr agent focus` on that pane and marks it seen.
 
 ## Evidence
 
-`wait` and `status --save` write JSON under `$VERIFY_EVIDENCE/<run-id>/` (default `/tmp/herdr-kiro-verify-evidence/<run-id>/`). Each file has `agent_status`, `state_change_seq`, `completion_seq`, `explain_state`, and `explain_rule`. The herdr server log and `hook.log` are in that same directory. Proof is the command plus the saved JSON, not the final number alone. A finished turn is proved only when a second read, at least 12 seconds after the first idle sample, still has `completion_seq` null and both sides say idle. `done` on that read is a failure. The hook log for that turn has no `release-agent` line while `kiro-cli` is still running. Do not copy these files into the repo.
+`wait` and `status --save` write JSON under `$VERIFY_EVIDENCE/<run-id>/` (default `/tmp/herdr-kiro-verify-evidence/<run-id>/`). Each file has `agent_status`, `state_change_seq`, `completion_seq`, `explain_state`, and `explain_rule`. The herdr server log and `hook.log` are in that same directory. Proof is the command plus the saved JSON, not the final number alone. A finished turn on a background workspace is proved on the turn after the agent has already been working once. The first idle after process start can stay `idle` with `completion_seq` null. The next unseen Stop is proved when get is `done`, explain is `idle` with rule `live_prompt_idle`, and `completion_seq` equals `state_change_seq`. A second read at least 12 seconds later, before the pane is seen, is still `done`. `herdr agent focus <pane>` then makes get `idle` on the same `state_change_seq`, and `completion_seq` stays. The hook log for that turn has no `release-agent` line while `kiro-cli` is still running. Do not copy these files into the repo.
 
 ## Cleanup
 
