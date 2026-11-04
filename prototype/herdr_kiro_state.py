@@ -201,11 +201,13 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
             continue
         key = str(session)
         # A missed App exit write still has to name this pid. The tick that
-        # notices the reap runs before that write, so this pass can keep it.
-        if not retain_dead_owner and owner_is_dead(owners.get(key), owner_started.get(key)):
+        # notices the reap runs before that write. The stale-stamp cutoff
+        # must not drop that pid while the write is still pending.
+        dead = owner_is_dead(owners.get(key), owner_started.get(key))
+        if dead and not retain_dead_owner:
             dropped_dead = True
             continue
-        if now - seen < STALE_SECS:
+        if now - seen < STALE_SECS or (retain_dead_owner and dead):
             kept[key] = seen
             if owners.get(key):
                 kept_owners[key] = owners.get(key)
@@ -523,10 +525,14 @@ def _open_held(open_path: str) -> int:
     return -1
 
 
-def _hold_live_owner(pid: int) -> None:
-    """Dup the tty fd the owner still has open."""
+def _hold_live_owner(pid: int, started: str) -> None:
+    """Dup the tty fd this owner still has open.
+
+    An empty start token matches any live process at this pid, so it does
+    not identify the owner. Do not hold that process's tty.
+    """
     global _pane_fd
-    if _pane_fd >= 0 or pid <= 1:
+    if _pane_fd >= 0 or pid <= 1 or not started or not alive(pid, started):
         return
     prefix = f"/proc/{pid}/fd/"
     for open_path, _device in herdr_kiro_osc._tty_opens(pid):
@@ -1803,7 +1809,9 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
         if reason == "idle" and current.get("busy"):
             current["retiring"] = False
             return
-        if reason != "idle" and in_app() and not (emit_osc(path, "idle") or _write_held_fd()):
+        # The held fd is the only exit write. Another tty is not success,
+        # and there is no path open when this process holds no fd.
+        if reason != "idle" and in_app() and not _write_held_fd():
             return
         decision["ok"] = release_if_current(current, generation, keys)
 
@@ -2031,10 +2039,14 @@ def _watch_loop(pane: str, path: str) -> None:
                     pid = int(owner)
                 except (TypeError, ValueError):
                     continue
-                if alive(pid, started_by_pid.get(pid) or ""):
-                    owner_alive = True
-                    _hold_live_owner(pid)
-                    break
+                started = started_by_pid.get(pid) or ""
+                if not alive(pid, started):
+                    continue
+                owner_alive = True
+                # An empty start token does not identify this process.
+                if started:
+                    _hold_live_owner(pid, started)
+                break
             if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
                 owner_alive = True
             pane_kiro = kiro_in_pane(list(known_owners))

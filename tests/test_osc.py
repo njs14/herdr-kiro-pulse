@@ -27,7 +27,13 @@ def _read_ready(fd, timeout):
     ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
         return b""
-    return os.read(fd, 4096)
+    try:
+        return os.read(fd, 4096)
+    except OSError as exc:
+        # The last slave fd closed. An empty buffer is EIO, not a payload.
+        if exc.errno == errno.EIO:
+            return b""
+        raise
 
 
 def _stop(proc):
@@ -360,6 +366,12 @@ class AppExitOscTests(unittest.TestCase):
             order.append(("emit", state_path, kind, rule_id))
             return real_emit(state_path, kind, rule_id)
 
+        real_held = hook._write_held_fd
+
+        def spy_held():
+            order.append(("held",))
+            return real_held()
+
         def capture(payload, pids):
             payloads.append(payload)
             pid_lists.append(list(pids))
@@ -375,6 +387,7 @@ class AppExitOscTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.object(hook, "clear_watcher", spy_clear),
             mock.patch.object(hook, "emit_osc", spy_emit),
+            mock.patch.object(hook, "_write_held_fd", spy_held),
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(osc, "write_to_pane", capture),
             mock.patch.object(hook.subprocess, "run", refuse),
@@ -386,25 +399,84 @@ class AppExitOscTests(unittest.TestCase):
         return ok, order, payloads, pid_lists
 
     def test_non_idle_app_exit_writes_done_before_the_watcher_clears(self):
+        # The exit write is the fd opened while the owner was alive.
+        # write_to_pane is not that write, and its success does not clear.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-exit-")
         self.addCleanup(shutil.rmtree, directory, True)
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        hook._pane_fd = os.dup(slave)
+
+        def drop_held():
+            fd = hook._pane_fd
+            hook._pane_fd = -1
+            if isinstance(fd, int) and fd >= 0:
+                os.close(fd)
+
+        self.addCleanup(drop_held)
         env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
         done = b"\x1b]7501;state=done:app=kiro\x1b\\"
         busy = {"sess": time.time()}
         owners = {"sess": 4242}
         path = os.path.join(directory, "owner-exit.json")
         self._seed(path, busy=busy, owners=owners)
-        ok, order, payloads, pid_lists = self._finish(path, "t7", "owner exit", env, busy=busy)
+        ok, order, payloads, _pid_lists = self._finish(path, "t7", "owner exit", env, busy=busy)
         self.assertTrue(ok)
-        emitted = ("emit", path, "idle", "")
-        self.assertIn(emitted, order)
-        self.assertLess(order.index(emitted), order.index(("clear", path)))
-        self.assertEqual(payloads, [done])
-        self.assertIn(4242, pid_lists[0])
+        self.assertEqual(payloads, [])
+        self.assertNotIn(("emit", path, "idle", ""), order)
+        self.assertLess(order.index(("held",)), order.index(("clear", path)))
+        self.assertIn(done, _read_ready(master, 0.5))
         released = [(item[0], item[1][:2]) for item in order if item[0] == "herdr"]
         self.assertIn(("herdr", ("release-agent", "t7")), released)
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
+
+
+_SETSID_DRIVER = """\
+import os
+import subprocess
+import sys
+
+mode = sys.argv[1]
+proto = sys.argv[2]
+held = int(sys.argv[3])
+path = sys.argv[4]
+result = sys.argv[5]
+os.environ["HC_TERMINAL_ID"] = "t7"
+os.environ["HERDR_ENV"] = ""
+os.environ["HERDR_PANE_ID"] = ""
+os.environ["HERDR_KIRO_LOG"] = path + ".log"
+os.environ["HERDR_BIN_PATH"] = os.path.join(os.path.dirname(path), "missing-herdr")
+os.environ["XDG_STATE_HOME"] = os.path.dirname(path)
+sys.path.insert(0, proto)
+import herdr_kiro_state as hook
+
+if mode == "mid":
+    os.set_inheritable(held, True)
+    with open(result + ".err", "w", encoding="utf-8") as err:
+        proc = subprocess.Popen(
+            [sys.executable, __file__, "leaf", proto, str(held), path, result],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=err,
+            start_new_session=True,
+            pass_fds=(held,),
+        )
+        code = proc.wait(timeout=20)
+    raise SystemExit(code)
+
+hook._pane_fd = held
+ok = hook.finish_if_unchanged(
+    "t7",
+    path,
+    {"generation": 3, "busy": {"sess": 1}},
+    "owner exit",
+)
+with open(result, "w", encoding="utf-8") as handle:
+    handle.write("ok\\n" if ok else "miss\\n")
+raise SystemExit(0 if ok else 1)
+"""
 
 
 class ReapedExitTests(unittest.TestCase):
@@ -438,7 +510,7 @@ class ReapedExitTests(unittest.TestCase):
             hook.update(path, seed)
         return snap
 
-    def test_missed_saved_write_keeps_owners_and_the_watcher(self):
+    def _run_missed_exit(self, busy_at):
         # A failed exit write must not drop the owner, call release-agent, or
         # leave this watcher while its pid is still in the state file.
         # A reaped pid is absent from the process table and kill returns ESRCH.
@@ -446,6 +518,11 @@ class ReapedExitTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
         self._seed_owner(path)
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+        raw["busy"]["sess"] = busy_at
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(raw, handle)
         stolen = 42424242
         waits = {"n": 0}
         during = {}
@@ -508,9 +585,21 @@ class ReapedExitTests(unittest.TestCase):
         ):
             _remembered_tty("/dev/pts/7")
             hook._watch_loop("t7", path)
-        seen = during.get("state") or {}
+        return waits["n"], during.get("state") or {}, calls
+
+    def test_missed_saved_write_keeps_owners_and_the_watcher(self):
+        waits, seen, calls = self._run_missed_exit(time.time())
         self.assertEqual(
-            [waits["n"], seen.get("owners"), seen.get("watcher"), [item[0] for item in calls]],
+            [waits, seen.get("owners"), seen.get("watcher"), [item[0] for item in calls]],
+            [2, {"sess": 4242}, os.getpid(), []],
+        )
+
+    def test_missed_write_keeps_an_owner_older_than_the_stale_window(self):
+        # retain_dead_owner used to keep the row only while now - seen < 1800.
+        # A missed write with a stamp 1801s old dropped the owner and kept the watcher.
+        waits, seen, calls = self._run_missed_exit(time.time() - 1801)
+        self.assertEqual(
+            [waits, seen.get("owners"), seen.get("watcher"), [item[0] for item in calls]],
             [2, {"sess": 4242}, os.getpid(), []],
         )
 
@@ -631,6 +720,238 @@ class ReapedExitTests(unittest.TestCase):
         self.assertEqual(device_opens, [])
         self.assertGreaterEqual(len(proc_opens), 1)
         self.assertIn(done, got)
+
+    def _write_state(self, path, state):
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+
+    def test_failed_held_write_does_not_count_another_tty(self):
+        # A miss on the held fd stays a miss. write_to_pane succeeding
+        # must not release the owner or clear the watcher.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-held-miss-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        self._seed_owner(path)
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        hook._pane_fd = os.dup(slave)
+        calls = []
+        painted = []
+
+        def boom(_fd, _payload):
+            raise OSError(errno.EIO, "closed")
+
+        def paint(_payload, _pids):
+            painted.append(True)
+            return "/dev/pts/7"
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("side-effecting command")
+
+        def reaped(_pid):
+            return None
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.object(hook, "process_snapshot", reaped),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+            mock.patch.object(osc, "_write_all", boom),
+            mock.patch.object(osc, "write_to_pane", paint),
+            mock.patch.object(hook.subprocess, "run", refuse),
+            mock.patch.object(hook.subprocess, "check_output", refuse),
+            mock.patch.object(hook.subprocess, "Popen", refuse),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            ok = hook.finish_if_unchanged("t7", path, {"generation": 3, "busy": {"sess": 1}}, "owner exit")
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(
+            [ok, saved.get("owners"), saved.get("watcher"), painted, [item[0] for item in calls]],
+            [False, {"sess": 4242}, os.getpid(), [], []],
+        )
+
+    def test_reused_pid_does_not_receive_the_exit_write(self):
+        # A live process has the owner's pid and a different start token.
+        # state=done goes to the fd held from the original tty, or the write
+        # misses. The new process's tty stays empty.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-reuse-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        held_master, held_slave = os.openpty()
+        new_master, new_slave = os.openpty()
+        self.addCleanup(os.close, held_master)
+        self.addCleanup(os.close, new_master)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=new_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(_stop, proc)
+        hook._pane_fd = os.dup(held_slave)
+        os.close(held_slave)
+        os.close(new_slave)
+        state = hook.fresh_state()
+        state["watcher"] = os.getpid()
+        state["generation"] = 3
+        state["busy"] = {"sess": time.time()}
+        state["owners"] = {"sess": proc.pid}
+        state["owner_started"] = {"sess": "not-the-real-lstart"}
+        state["reported"] = "working"
+        state["seq"] = 4
+        self._write_state(path, state)
+        calls = []
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        with (
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            ok = hook.finish_if_unchanged(
+                "t7",
+                path,
+                {"generation": 3, "busy": {"sess": state["busy"]["sess"]}},
+                "owner exit",
+            )
+        new_got = _read_ready(new_master, 0.3)
+        held_got = _read_ready(held_master, 0.3)
+        self.assertNotIn(done, new_got)
+        self.assertIn(done, held_got)
+        self.assertTrue(ok)
+        self.assertIn(("release-agent",), [item[:1] for item in calls])
+
+    def test_setsid_watcher_does_not_write_the_parent_pty(self):
+        # A setsid watcher with stdio on /dev/null still has a parent pty.
+        # The exit must not paint that parent. The held fd is the write.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-setsid-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        result = os.path.join(directory, "result")
+        driver = os.path.join(directory, "driver.py")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(_SETSID_DRIVER)
+        parent_master, parent_slave = os.openpty()
+        held_master, held_slave = os.openpty()
+        self.addCleanup(os.close, parent_master)
+        self.addCleanup(os.close, held_master)
+        state = hook.fresh_state()
+        state["watcher"] = 0
+        state["generation"] = 3
+        state["busy"] = {"sess": time.time()}
+        state["owners"] = {"sess": 1}
+        state["owner_started"] = {"sess": "not-the-real-lstart"}
+        state["reported"] = "working"
+        state["seq"] = 4
+        self._write_state(path, state)
+        proto = os.path.dirname(os.path.abspath(hook.__file__))
+        proc = subprocess.Popen(
+            [sys.executable, driver, "mid", proto, str(held_slave), path, result],
+            stdin=subprocess.DEVNULL,
+            stdout=parent_slave,
+            stderr=subprocess.PIPE,
+            pass_fds=(held_slave,),
+        )
+        os.close(parent_slave)
+        os.close(held_slave)
+        try:
+            _out, err = proc.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+            raise
+        detail = err.decode("utf-8", "replace")
+        err_path = result + ".err"
+        if os.path.exists(err_path):
+            with open(err_path, encoding="utf-8") as handle:
+                detail = detail + handle.read()
+        self.assertEqual(proc.returncode, 0, detail)
+        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        parent_got = _read_ready(parent_master, 0.3)
+        held_got = _read_ready(held_master, 0.3)
+        self.assertNotIn(done, parent_got, detail)
+        self.assertIn(done, held_got, detail)
+
+    def test_empty_owner_started_does_not_hold_the_live_pid(self):
+        # An empty start token must not attach the hold to whatever process
+        # now has that pid, and the exit must not write that process's tty.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-empty-start-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(_stop, proc)
+        os.close(slave)
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["generation"] = 3
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": proc.pid}
+            state["owner_started"] = {"sess": ""}
+            state["chat_pid"] = 0
+            state["reported"] = "working"
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        stolen = 42424242
+        waits = {"n": 0}
+        seen = {}
+        real_kill = hook.os.kill
+
+        def fake_kill(pid, sig):
+            if int(pid) == stolen:
+                raise OSError(errno.ESRCH, "gone")
+            return real_kill(pid, sig)
+
+        def fake_wait(_self, _pids, _timeout):
+            waits["n"] += 1
+            if waits["n"] == 2:
+                seen["fd"] = hook._pane_fd
+
+                def steal(state):
+                    state["watcher"] = stolen
+
+                hook.update(path, steal)
+            if waits["n"] > 3:
+                raise AssertionError("watcher did not leave after the slot moved")
+            return False
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
+            mock.patch.object(hook, "pane_text", lambda _pane: ""),
+            mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook.os, "kill", fake_kill),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            hook._watch_loop("t7", path)
+        self.assertEqual([seen.get("fd", 0), _read_ready(master, 0.2)], [-1, b""])
 
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and
