@@ -537,7 +537,8 @@ def send_report(pane: str, path: str, kind: str) -> bool:
         return tui_ok
     rule_id = ""
     if kind == "blocked":
-        rule_id = str(screen_view(pane_text(pane)).get("id") or "")
+        blocked_screen = pane_text(pane) or ""
+        rule_id = str(screen_view(blocked_screen).get("id") or "")
     osc_ok = emit_osc(path, kind, rule_id)
     if in_tui():
         return tui_ok
@@ -620,11 +621,14 @@ def _hc_screen() -> str | None:
     return text
 
 
-def pane_text(pane: str) -> str:
+def pane_text(pane: str) -> str | None:
+    """Visible text. None when an App read fails, which is not an empty screen.
+
+    A successful empty `hc read` is "" and can still end the turn. TUI reads
+    stay strings, including "" when the pane read fails.
+    """
     if in_app():
-        text = _hc_screen()
-        if text is not None:
-            return text
+        return _hc_screen()
     try:
         return subprocess.check_output(
             [herdr_bin(), "pane", "read", pane, "--source", "visible", "--lines", "80"],
@@ -1211,7 +1215,7 @@ def gone_confirmed(since, now: float, hits: int, owners_died: bool) -> bool:
 
 
 def workflow_banner(pane: str) -> bool:
-    return workflow_banner_from(pane_text(pane))
+    return workflow_banner_from(pane_text(pane) or "")
 
 
 _TABLE = None
@@ -1956,7 +1960,13 @@ def _watch_loop(pane: str, path: str) -> None:
                     log("watcher exit slot held")
                 return
             screen = pane_text(pane)
-            view = screen_view(screen)
+            # None is a failed App read. Explain would call that an idle screen.
+            app_read_failed = in_app() and screen is None
+            if screen is None:
+                screen = ""
+                view = _unknown_screen()
+            else:
+                view = screen_view(screen)
             if not view.get("ok"):
                 blocked = approval_text(screen) or held == "blocked"
                 banner = workflow_banner_from(screen) or (held == "working" and not blocked)
@@ -2019,9 +2029,11 @@ def _watch_loop(pane: str, path: str) -> None:
                     return
                 continue
             # The App has no herdr pane to explain. An empty read still ends the
-            # turn once the grace has passed. A real screen keeps the TUI rules.
-            app_quiet = in_app() and not screen.strip() and not banner
-            if action == "idle" and (screen_is_quiet(screen) or app_quiet):
+            # turn once the grace has passed. A failed read is not that screen:
+            # skip app_quiet and the idle report so a held working banner counts.
+            # A real screen keeps the TUI rules.
+            app_quiet = in_app() and not app_read_failed and not screen.strip() and not banner
+            if not app_read_failed and action == "idle" and (screen_is_quiet(screen) or app_quiet):
                 if reported != "idle":
                     reported, misses = note_report(pane, path, "idle", reported, misses)
                     if reported is None and misses >= 30:
@@ -2108,7 +2120,7 @@ def main() -> int:
     state = update(path, fold)
     log(f"state event={event} busy={len(state['busy'])} grace_until={state['grace_until']:.3f}")
     ensure_watcher(pane, path)
-    screen = pane_text(pane)
+    screen = pane_text(pane) or ""
     action = next_action(
         len(state["busy"]),
         float(state["grace_until"]),
