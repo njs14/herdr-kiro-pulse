@@ -1,6 +1,6 @@
 id = "herdr-kiro"
 name = "Kiro workflow state"
-version = "0.13.3"
+version = "0.1.0"
 min_herdr_version = "0.9.5"
 description = "Report a Kiro CLI V3 session to the Herdr App with OSC 7501, and keep the Herdr TUI path working."
 platforms = ["linux", "macos"]
