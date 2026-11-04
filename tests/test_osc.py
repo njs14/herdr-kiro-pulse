@@ -5,6 +5,7 @@ The bytes have to land on the pane pty, which is the owner's stdout, and
 the captured pipe must stay empty.
 """
 
+import errno
 import json
 import os
 import select
@@ -39,6 +40,10 @@ def _scratch(prefix):
     fd, path = tempfile.mkstemp(prefix=prefix)
     os.close(fd)
     return path
+
+
+def _remembered_tty(value):
+    vars(hook)["_pane_tty"] = value
 
 
 class OscMapTests(unittest.TestCase):
@@ -403,18 +408,21 @@ class AppExitOscTests(unittest.TestCase):
 
 
 class ReapedExitTests(unittest.TestCase):
-    def test_reaped_owner_exit_writes_done_to_the_tty_from_the_live_report(self):
-        # The watcher calls this after the pid is gone. write_to_pane returns
-        # "" because /proc/<pid>/fd is gone. The device from the last live
-        # report still accepts state=done. No process is spawned.
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-dead-tty-")
-        self.addCleanup(shutil.rmtree, directory, True)
-        path = os.path.join(directory, "t7.json")
-        device = "/dev/pts/7"
-        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
-        delivered = []
-        gone = {"value": False}
+    def setUp(self):
+        self._release_held_fd()
+        _remembered_tty("")
 
+    def tearDown(self):
+        self._release_held_fd()
+        _remembered_tty("")
+
+    def _release_held_fd(self):
+        fd = getattr(hook, "_pane_fd", -1)
+        if isinstance(fd, int) and fd >= 0:
+            os.close(fd)
+            hook._pane_fd = -1
+
+    def _seed_owner(self, path):
         def seed(state):
             state["watcher"] = os.getpid()
             state["generation"] = 3
@@ -428,19 +436,124 @@ class ReapedExitTests(unittest.TestCase):
         snap = {"ppid": 1, "lstart": "alive", "comm": "kiro-cli"}
         with mock.patch.object(hook, "process_snapshot", lambda _pid: snap):
             hook.update(path, seed)
+        return snap
 
-        def write_to_pane(_payload, pids):
-            if gone["value"]:
-                return ""
-            if 4242 in pids:
-                return device
-            return ""
+    def test_missed_saved_write_keeps_owners_and_the_watcher(self):
+        # A failed exit write must not drop the owner, call release-agent, or
+        # leave this watcher while its pid is still in the state file.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-miss-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        snap = self._seed_owner(path)
+        stolen = 42424242
+        waits = {"n": 0}
+        during = {}
+        calls = []
+        real_kill = hook.os.kill
 
-        def write_path(_open_path, dev, payload):
-            if dev == device and payload == done:
-                delivered.append(bytes(payload))
-                return True
+        def fake_kill(pid, sig):
+            if int(pid) in (4242, stolen):
+                raise OSError(errno.ESRCH, "gone")
+            return real_kill(pid, sig)
+
+        def fake_wait(_self, _pids, _timeout):
+            waits["n"] += 1
+            if waits["n"] == 2:
+                with open(path, encoding="utf-8") as handle:
+                    during["state"] = json.load(handle)
+
+                def steal(state):
+                    state["watcher"] = stolen
+
+                hook.update(path, steal)
+            if waits["n"] > 3:
+                raise AssertionError("watcher did not leave after the slot moved")
             return False
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("side-effecting command")
+
+        def write_path(*_args):
+            return False
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+            mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
+            mock.patch.object(hook, "pane_text", lambda _pane: ""),
+            mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook.os, "kill", fake_kill),
+            mock.patch.object(osc, "write_to_pane", lambda _payload, _pids: ""),
+            mock.patch.object(osc, "_tty_opens", lambda _pid: iter(())),
+            mock.patch.object(osc, "_write_path", write_path),
+            mock.patch.object(hook.subprocess, "run", refuse),
+            mock.patch.object(hook.subprocess, "check_output", refuse),
+            mock.patch.object(hook.subprocess, "Popen", refuse),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            _remembered_tty("/dev/pts/7")
+            hook._watch_loop("t7", path)
+        seen = during.get("state") or {}
+        self.assertEqual(
+            [waits["n"], seen.get("owners"), seen.get("watcher"), [item[0] for item in calls]],
+            [2, {"sess": 4242}, os.getpid(), []],
+        )
+
+    def _deliver_reaped(self, path, snap, master, slave, slave_name, *, forget_hook):
+        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        proc_link = "/proc/4242/fd/1"
+        phase = {"dead": False, "watch": False, "n": 0}
+        device_opens = []
+        proc_opens = []
+        real_open = os.open
+        real_kill = hook.os.kill
+        real_send = hook.send_report
+
+        def open_path(file, flags, *args, **kwargs):
+            text = file.decode() if isinstance(file, bytes) else file
+            if text == proc_link:
+                proc_opens.append(text)
+                return os.dup(slave)
+            if text == slave_name:
+                device_opens.append(text)
+            return real_open(file, flags, *args, **kwargs)
+
+        def fake_kill(pid, _sig):
+            if int(pid) == 4242:
+                if phase["dead"]:
+                    raise OSError(errno.ESRCH, "gone")
+                return None
+            return real_kill(pid, _sig)
+
+        def fake_wait(_self, _pids, _timeout):
+            phase["n"] += 1
+            if phase["n"] > 2:
+                raise AssertionError("watcher stayed after the owner exit")
+            phase["dead"] = phase["n"] == 2
+            return False
+
+        def tty_opens(pid):
+            if int(pid) == 4242 and not phase["dead"]:
+                yield proc_link, slave_name
+
+        def write_to_pane(_payload, _pids):
+            if phase["watch"] or phase["dead"]:
+                return ""
+            return slave_name
+
+        def send_report(*args, **kwargs):
+            if phase["watch"]:
+                return True
+            return real_send(*args, **kwargs)
 
         def refuse(*_args, **_kwargs):
             raise AssertionError("side-effecting command")
@@ -452,21 +565,66 @@ class ReapedExitTests(unittest.TestCase):
             "HERDR_KIRO_LOG": path + ".log",
         }
         with (
-            mock.patch.object(hook, "herdr", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "send_report", send_report),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
+            mock.patch.object(hook, "pane_text", lambda _pane: ""),
+            mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook.os, "kill", fake_kill),
+            mock.patch.object(osc, "_tty_opens", tty_opens),
             mock.patch.object(osc, "write_to_pane", write_to_pane),
-            mock.patch.object(osc, "_write_path", write_path),
+            mock.patch.object(os, "open", open_path),
             mock.patch.object(hook.subprocess, "run", refuse),
             mock.patch.object(hook.subprocess, "check_output", refuse),
             mock.patch.object(hook.subprocess, "Popen", refuse),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            self.assertTrue(hook.send_report("t7", path, "working"))
-            gone["value"] = True
-            busy = {"sess": time.time()}
-            ok = hook.finish_if_unchanged("t7", path, {"generation": 3, "busy": busy}, "owner exit")
-        self.assertTrue(ok)
-        self.assertEqual(delivered, [done])
+            if forget_hook:
+                self.assertTrue(hook.send_report("t7", path, "working"))
+                _remembered_tty("")
+                self._release_held_fd()
+            else:
+                _remembered_tty(slave_name)
+            phase["watch"] = True
+            hook._watch_loop("t7", path)
+        return _read_ready(master, 1.0), device_opens, proc_opens, done
+
+    def test_reaped_owner_exit_writes_done_to_the_tty_from_the_live_report(self):
+        # The exit write has to be a descriptor opened while the owner was
+        # alive. Opening the saved /dev/pts/N paints a pty allocated later.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-held-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        snap = self._seed_owner(path)
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        got, device_opens, proc_opens, done = self._deliver_reaped(
+            path, snap, master, slave, os.ttyname(slave), forget_hook=False
+        )
+        self.assertEqual(device_opens, [])
+        self.assertGreaterEqual(len(proc_opens), 1)
+        self.assertIn(done, got)
+
+    def test_watcher_writes_a_fd_it_opened_after_the_hook_returns(self):
+        # send_report remembers a device in this process, then returns. The
+        # watcher is another interpreter and does not inherit that global.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-split-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        snap = self._seed_owner(path)
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        got, device_opens, proc_opens, done = self._deliver_reaped(
+            path, snap, master, slave, os.ttyname(slave), forget_hook=True
+        )
+        self.assertEqual(device_opens, [])
+        self.assertGreaterEqual(len(proc_opens), 1)
+        self.assertIn(done, got)
 
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and
