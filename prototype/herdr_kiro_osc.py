@@ -80,20 +80,43 @@ def write_pid(payload: bytes, pid: int) -> str:
     return ""
 
 
-def write_to_pane(payload: bytes, pids: list[int]) -> str:
-    """Write payload to the first pane tty among pids, this process, and its parents."""
+def write_to_pane(payload: bytes, pids: list[int], *, skip: list[int] | None = None) -> str:
+    """Write payload to the first pane tty among pids, then this process and its parents.
+
+    `skip` holds recorded pids that a start token does not identify. An empty
+    token matches any live pid. Those pids are not written. The walk stops at
+    the first one, so a later ancestor's pty is not written either.
+    """
+    blocked: set[int] = set()
+    for pid in skip or []:
+        try:
+            number = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if number > 1:
+            blocked.add(number)
     seen: set[int] = set()
-    ordered: list[int] = []
-    for pid in list(pids) + _self_chain():
+    for pid in pids:
+        try:
+            number = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if number <= 1 or number in seen or number in blocked:
+            continue
+        seen.add(number)
+        found = write_pid(payload, number)
+        if found:
+            return found
+    for pid in _self_chain():
         try:
             number = int(pid)
         except (TypeError, ValueError):
             continue
         if number <= 1 or number in seen:
             continue
+        if number in blocked:
+            return ""
         seen.add(number)
-        ordered.append(number)
-    for number in ordered:
         found = write_pid(payload, number)
         if found:
             return found

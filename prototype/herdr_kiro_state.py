@@ -184,7 +184,7 @@ def fresh_state() -> dict:
     }
 
 
-def normalize(state: dict, now: float) -> dict:
+def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> dict:
     raw_busy = state.get("busy")
     raw_owners = state.get("owners")
     raw_started = state.get("owner_started")
@@ -201,10 +201,14 @@ def normalize(state: dict, now: float) -> dict:
         except (TypeError, ValueError):
             continue
         key = str(session)
-        if owner_is_dead(owners.get(key), owner_started.get(key)):
+        # A missed App exit write still has to name this pid. The tick that
+        # notices the reap runs before that write. The stale-stamp cutoff
+        # must not drop that pid while the write is still pending.
+        dead = owner_is_dead(owners.get(key), owner_started.get(key))
+        if dead and not retain_dead_owner:
             dropped_dead = True
             continue
-        if now - seen < STALE_SECS:
+        if now - seen < STALE_SECS or (retain_dead_owner and dead):
             kept[key] = seen
             if owners.get(key):
                 kept_owners[key] = owners.get(key)
@@ -410,7 +414,7 @@ def write_seq_floor(path: str, seq: int) -> None:
         handle.write(str(seq))
 
 
-def update(path: str, fn):
+def update(path: str, fn, *, retain_dead_owner: bool = False):
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
@@ -425,7 +429,7 @@ def update(path: str, fn):
         if not isinstance(loaded, dict):
             loaded = fresh_state()
         now = time.time()
-        state = normalize(loaded, now)
+        state = normalize(loaded, now, retain_dead_owner=retain_dead_owner)
         floor = read_seq_floor(path)
         if state["seq"] < floor:
             state["seq"] = floor
@@ -434,7 +438,7 @@ def update(path: str, fn):
             state["seq"] = int(time.time())
         fn(state)
         died = bool(state.get("owners_died")) and not state.get("busy")
-        state = normalize(state, time.time())
+        state = normalize(state, time.time(), retain_dead_owner=retain_dead_owner)
         if died and not state["busy"]:
             state["owners_died"] = True
         if state["seq"] < floor:
@@ -479,29 +483,145 @@ def herdr(*args: str) -> bool:
     return completed.returncode == 0
 
 
-def _report_pids(path: str) -> list:
+def _status_targets(path: str) -> tuple[list[int], list[int]]:
+    """Pids a start token identifies, and recorded pids the pane walk must skip.
+
+    An empty token matches any live pid. The walk has to stop at that pid, not
+    only leave it out of the explicit list: the next ancestor with a pty would
+    otherwise receive the status. When one record identifies the pid and another
+    does not, the match wins.
+    """
     try:
         with open(path, encoding="utf-8") as handle:
             state = json.loads(handle.read() or "{}")
     except (OSError, ValueError, TypeError):
-        return []
+        return [], []
     if not isinstance(state, dict):
-        return []
-    pids = []
+        return [], []
+    allowed: list[int] = []
+    blocked: list[int] = []
     owners = state.get("owners") or {}
+    started_map = state.get("owner_started") if isinstance(state.get("owner_started"), dict) else {}
     if isinstance(owners, dict):
-        for value in owners.values():
+        for key, value in owners.items():
             try:
-                pids.append(int(value))
+                pid = int(value)
             except (TypeError, ValueError):
                 continue
+            raw = started_map.get(key) or ""
+            token = raw if isinstance(raw, str) else ""
+            if pid > 1 and token and alive(pid, token):
+                allowed.append(pid)
+            elif pid > 1:
+                blocked.append(pid)
     try:
         chat = int(state.get("chat_pid") or 0)
     except (TypeError, ValueError):
         chat = 0
-    if chat:
-        pids.append(chat)
-    return pids
+    raw_chat = state.get("chat_started") or ""
+    chat_token = raw_chat if isinstance(raw_chat, str) else ""
+    if chat > 1 and chat_token and alive(chat, chat_token):
+        allowed.append(chat)
+    elif chat > 1:
+        blocked.append(chat)
+    identified = set(allowed)
+    skip: list[int] = []
+    seen: set[int] = set()
+    for pid in blocked:
+        if pid in identified or pid in seen:
+            continue
+        seen.add(pid)
+        skip.append(pid)
+    return allowed, skip
+
+
+# Fd this process opened from /proc/<owner>/fd while that owner was alive.
+# The watcher opens it in this interpreter. The exit writes this fd.
+_pane_fd = -1
+_HELD_FLAGS = (
+    os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+    os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+)
+
+
+def _open_held(open_path: str) -> int:
+    for flag in _HELD_FLAGS:
+        try:
+            return os.open(open_path, flag)
+        except OSError:
+            continue
+    return -1
+
+
+def _hold_live_owner(pid: int, started: str) -> None:
+    """Dup the tty fd this owner still has open.
+
+    An empty start token matches any live process at this pid, so it does
+    not identify the owner. Do not hold that process's tty.
+    """
+    global _pane_fd
+    if _pane_fd >= 0 or pid <= 1 or not started or not alive(pid, started):
+        return
+    prefix = f"/proc/{pid}/fd/"
+    for open_path, _device in herdr_kiro_osc._tty_opens(pid):
+        if not str(open_path).startswith(prefix):
+            continue
+        fd = _open_held(open_path)
+        if fd < 0:
+            continue
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            continue
+        if not stat.S_ISCHR(info.st_mode):
+            os.close(fd)
+            continue
+        _pane_fd = fd
+        return
+
+
+def _close_held_fd() -> None:
+    global _pane_fd
+    fd = _pane_fd
+    _pane_fd = -1
+    if fd >= 0:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
+def _write_held_fd() -> bool:
+    """Write idle's wire state=done through the fd opened while the owner lived."""
+    fd = _pane_fd
+    if fd < 0:
+        return False
+    payload = herdr_kiro_osc.encode(herdr_kiro_osc.fields_for("idle"))
+    try:
+        herdr_kiro_osc._write_all(fd, payload)
+    except OSError:
+        log("osc missed done")
+        return False
+    log("osc done via held")
+    return True
+
+
+def _watcher_still_us(path: str) -> bool:
+    """True when this pid is still the watcher recorded in the state file.
+
+    Read the file directly. update() would normalize, and that drops a dead owner.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.loads(handle.read() or "{}")
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    try:
+        watcher = int(loaded.get("watcher") or 0)
+    except (TypeError, ValueError):
+        return False
+    return watcher == os.getpid()
 
 
 def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
@@ -514,7 +634,8 @@ def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
     except ValueError:
         log("refusing osc")
         return False
-    written = herdr_kiro_osc.write_to_pane(payload, _report_pids(path))
+    allowed, blocked = _status_targets(path)
+    written = herdr_kiro_osc.write_to_pane(payload, allowed, skip=blocked)
     if written:
         log(f"osc {fields['state']} via {written}")
         return True
@@ -1704,6 +1825,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
+    retain_owner = reason != "idle" and in_app()
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
@@ -1715,9 +1837,13 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
         if reason == "idle" and current.get("busy"):
             current["retiring"] = False
             return
+        # The held fd is the only exit write. Another tty is not success,
+        # and there is no path open when this process holds no fd.
+        if reason != "idle" and in_app() and not _write_held_fd():
+            return
         decision["ok"] = release_if_current(current, generation, keys)
 
-    update(path, apply)
+    update(path, apply, retain_dead_owner=retain_owner)
     if not decision["ok"]:
         return False
     still = {"ok": False}
@@ -1883,7 +2009,7 @@ def _watch_loop(pane: str, path: str) -> None:
         state["watcher"] = os.getpid()
         state["watcher_started"] = started
 
-    update(path, claim)
+    update(path, claim, retain_dead_owner=in_app())
     write_pidfile(path, os.getpid(), started)
     log(f"watcher loop pane={pane}")
     reported = None
@@ -1902,7 +2028,7 @@ def _watch_loop(pane: str, path: str) -> None:
         while True:
             owner_watch.wait(known_owners, TICK_SECS)
             begin_tick()
-            state = update(path, lambda _state: None)
+            state = update(path, lambda _state: None, retain_dead_owner=in_app())
             if slot_holder_gone(state):
                 log("watcher exit slot holder gone")
                 return
@@ -1940,9 +2066,12 @@ def _watch_loop(pane: str, path: str) -> None:
                     pid = int(owner)
                 except (TypeError, ValueError):
                     continue
-                if alive(pid, started_by_pid.get(pid) or ""):
-                    owner_alive = True
-                    break
+                started = started_by_pid.get(pid) or ""
+                if not alive(pid, started):
+                    continue
+                owner_alive = True
+                _hold_live_owner(pid, started)
+                break
             if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
                 owner_alive = True
             pane_kiro = kiro_in_pane(list(known_owners))
@@ -1959,9 +2088,14 @@ def _watch_loop(pane: str, path: str) -> None:
                 gone_since = None
                 gone_hits = 0
             if owner_dead or kind is not None or _pids_exited(known_outers):
-                if not finish_if_unchanged(pane, path, state, "owner exit"):
+                if finish_if_unchanged(pane, path, state, "owner exit"):
+                    return
+                # This pid is still in the file after a missed write. Retry later.
+                if not _watcher_still_us(path):
                     log("watcher exit slot held")
-                return
+                    return
+                time.sleep(TICK_SECS)
+                continue
             screen = pane_text(pane)
             # None is a failed App read. Explain would call that an idle screen.
             app_read_failed = in_app() and screen is None
@@ -2056,6 +2190,7 @@ def _watch_loop(pane: str, path: str) -> None:
                 return
     finally:
         owner_watch.close()
+        _close_held_fd()
 
 
 def session_of(payload: dict, ppid: int = 0) -> str:
