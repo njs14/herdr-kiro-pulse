@@ -845,6 +845,10 @@ class ReapedExitTests(unittest.TestCase):
         held_master, held_slave = os.openpty()
         self.addCleanup(os.close, parent_master)
         self.addCleanup(os.close, held_master)
+        # macOS drops unread pty output when the last slave fd closes.
+        # Keep these open through the read. Do not reopen the device path.
+        self.addCleanup(os.close, parent_slave)
+        self.addCleanup(os.close, held_slave)
         state = hook.fresh_state()
         state["watcher"] = 0
         state["generation"] = 3
@@ -862,8 +866,6 @@ class ReapedExitTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             pass_fds=(held_slave,),
         )
-        os.close(parent_slave)
-        os.close(held_slave)
         try:
             _out, err = proc.communicate(timeout=20)
         except subprocess.TimeoutExpired:
