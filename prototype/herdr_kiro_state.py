@@ -219,8 +219,13 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
                 kept_owners[key] = owners.get(key)
                 if owner_started.get(key):
                     kept_started[key] = owner_started.get(key)
-                if owner_ident.get(key):
-                    kept_ident[key] = owner_ident.get(key)
+                raw_ident = owner_ident.get(key)
+                if isinstance(raw_ident, str) and fine_start(raw_ident):
+                    kept_ident[key] = raw_ident
+    raw_chat = state.get("chat_ident")
+    chat_ident = raw_chat if isinstance(raw_chat, str) else ""
+    if not fine_start(chat_ident):
+        chat_ident = ""
     try:
         seq = int(state.get("seq") or 0)
     except (TypeError, ValueError):
@@ -271,7 +276,7 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
         "owners_died": owners_died,
         "chat_pid": int(state.get("chat_pid") or 0),
         "chat_started": state.get("chat_started") or "",
-        "chat_ident": state.get("chat_ident") if isinstance(state.get("chat_ident"), str) else "",
+        "chat_ident": chat_ident,
     }
 
 
@@ -294,15 +299,20 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
         return
     state["owner_started"][key] = started
     # Whole-second lstart matches a pid reused in that same second. The pid
-    # file stores hires_start. The exit write uses this same token.
+    # file stores hires_start. A sec: token is that one-second value, so it
+    # is not this owner. A later event must not leave one in place.
     ident = hires_start(int(owner))
-    if not fine_start(ident):
-        return
     idents = state.get("owner_ident")
     if not isinstance(idents, dict):
         idents = {}
         state["owner_ident"] = idents
-    idents[key] = ident
+    if fine_start(ident):
+        idents[key] = ident
+        return
+    current = idents.get(key) or ""
+    if isinstance(current, str) and fine_start(current):
+        return
+    idents.pop(key, None)
 
 
 def finish_if_idle(state: dict, now: float) -> None:
@@ -511,14 +521,15 @@ def herdr(*args: str) -> bool:
     return completed.returncode == 0
 
 
-def _status_targets(path: str, *, done: bool = False) -> tuple[list[int], list[int]]:
+def _status_targets(path: str) -> tuple[list[int], list[int]]:
     """Pids a hires token identifies, and recorded pids the pane walk must skip.
 
     The token is the one the pid file stores. An empty token does not identify
-    a live pid, and a whole-second lstart does not either. The walk has to stop
-    at that pid, not only leave it out of the explicit list: the next ancestor
-    with a pty would otherwise receive the status. When one record identifies
-    the pid and another does not, the match wins.
+    a live pid, and neither does sec: plus whole-second lstart. Working and
+    done both require a finer token. The walk has to stop at that pid, not
+    only leave it out of the explicit list: the next ancestor with a pty would
+    otherwise receive the status. When one record identifies the pid and
+    another does not, the match wins.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -540,9 +551,9 @@ def _status_targets(path: str, *, done: bool = False) -> tuple[list[int], list[i
                 continue
             raw = idents.get(key) or ""
             token = raw if isinstance(raw, str) else ""
-            # state=done needs a token finer than one second. ``sec:`` plus
-            # lstart matches a pid reused in that same second.
-            identified = bool(token) and alive(pid, token) and (fine_start(token) if done else True)
+            # sec: plus lstart matches a pid reused in that same second.
+            # It does not paint state=working or state=done.
+            identified = fine_start(token) and alive(pid, token)
             if pid > 1 and identified:
                 allowed.append(pid)
             elif pid > 1:
@@ -553,7 +564,7 @@ def _status_targets(path: str, *, done: bool = False) -> tuple[list[int], list[i
         chat = 0
     raw_chat = state.get("chat_ident") or ""
     chat_token = raw_chat if isinstance(raw_chat, str) else ""
-    chat_ok = bool(chat_token) and alive(chat, chat_token) and (fine_start(chat_token) if done else True)
+    chat_ok = fine_start(chat_token) and alive(chat, chat_token)
     if chat > 1 and chat_ok:
         allowed.append(chat)
     elif chat > 1:
@@ -683,7 +694,7 @@ def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
     except ValueError:
         log("refusing osc")
         return False
-    allowed, blocked = _status_targets(path, done=kind == "idle")
+    allowed, blocked = _status_targets(path)
     written = herdr_kiro_osc.write_to_pane(payload, allowed, skip=blocked)
     if written:
         log(f"osc {fields['state']} via {written}")
@@ -1546,8 +1557,8 @@ def fine_start(token: str) -> bool:
     """True when this token is finer than one second.
 
     The non-tick path stores ``sec:`` plus whole-second lstart. A pid reused
-    in that same second produces the same string, so it is not an identity
-    and it does not allow the exit write.
+    in that same second produces the same string. That token is not an owner,
+    and it does not paint that pid.
     """
     return isinstance(token, str) and bool(token) and not token.startswith("sec:")
 
@@ -1630,8 +1641,10 @@ def ownership(dest: str) -> str:
 def owner_is_dead(owner: object, started: object = "") -> bool:
     """True when this pid is not the recorded process.
 
-    `started` is the hires token the pid file stores. An empty token is not
-    that process. A live process is never dead because of its parent.
+    `started` is the hires token. An empty token is not proof the process
+    exited, so the row stays and a later event can record one. A ``sec:``
+    token is whole-second lstart, so it is not that process. A live process
+    is never dead because of its parent.
     """
     if not isinstance(owner, (int, str)) or not owner:
         return False
@@ -1645,20 +1658,19 @@ def owner_is_dead(owner: object, started: object = "") -> bool:
     if snap.get("error"):
         return False
     token = started if isinstance(started, str) else ""
-    # A missing token is not proof the process exited. The row stays so a
-    # later event can record one. It still cannot hold the tty or paint done.
     if not token:
         return False
+    if not fine_start(token):
+        return True
     return hires_start(pid) != token
 
 
-def alive(pid: int, started: str = "") -> bool:
-    """True when this pid is still the process `started` names.
+def _process_matches(pid: int, started: str) -> bool:
+    """True when this pid exists and its hires token equals `started`.
 
-    `started` is the hires token. An empty token does not match a live pid,
-    and neither does a whole-second lstart.
+    This includes a ``sec:`` token. The watcher slot uses it. An owner does not.
     """
-    if pid <= 0 or not started:
+    if pid <= 0 or not isinstance(started, str) or not started:
         return False
     snap = process_snapshot(pid)
     if snap is None:
@@ -1670,6 +1682,16 @@ def alive(pid: int, started: str = "") -> bool:
             return False
         return False
     return hires_start(pid) == started
+
+
+def alive(pid: int, started: str = "") -> bool:
+    """True when this pid is still the process a fine start token names.
+
+    A ``sec:`` token does not make this pid the owner.
+    """
+    if not fine_start(started):
+        return False
+    return _process_matches(pid, started)
 
 
 def agent_lookup(pane: str) -> str:
@@ -1856,7 +1878,7 @@ def ensure_watcher(pane: str, path: str) -> None:
         retiring = bool(state.get("retiring"))
         if claimed and retiring:
             return
-        if not retiring and (claimed or alive(pid, state.get("watcher_started") or "")):
+        if not retiring and (claimed or _process_matches(pid, state.get("watcher_started") or "")):
             return
         state["watcher"] = -1
         state["watcher_at"] = now

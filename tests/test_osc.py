@@ -1280,14 +1280,14 @@ class ReapedExitTests(unittest.TestCase):
         self.assertNotIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
         self.assertEqual(got, b"")
 
-    def _paint_exit(self, mode):
-        """Hold this live pty, then run the owner-exit write.
+    def _sec_status(self, role):
+        """Drive the watch loop with no Linux start ticks.
 
-        mode "empty" stores no token. mode "sec" stores sec: plus this
-        pid's own lstart. Both open the tty on 33dae57 and the exit paints
-        state=done.
+        role "owner" stores sec: plus this pid's lstart as owner_ident.
+        role "chat" stores that same string as chat_ident. send_report is
+        the real function. On 02ae3c4 that tty receives state=working.
         """
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-exit-ident-")
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-sec-status-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
         master, slave = os.openpty()
@@ -1301,69 +1301,40 @@ class ReapedExitTests(unittest.TestCase):
         )
         self.addCleanup(_stop, proc)
         lstart = _live_start(proc.pid)
-        named = os.ttyname(slave)
         stamp = time.time()
+        with mock.patch.object(hook, "_linux_start_ticks", return_value=None):
+            ident = hook.hires_start(proc.pid)
+            self.assertEqual(ident, "sec:" + lstart)
+            self.assertFalse(hook.fine_start(ident))
 
-        def seed(state):
-            state["watcher"] = os.getpid()
-            state["generation"] = 3
-            state["busy"] = {"sess": stamp}
-            state["owners"] = {"sess": proc.pid}
-            state["owner_started"] = {"sess": lstart}
-            state["owner_ident"] = {}
-            state["chat_pid"] = 0
-            state["reported"] = "working"
-            state["seq"] = 4
+            def seed(state):
+                state["watcher"] = os.getpid()
+                state["generation"] = 3
+                state["busy"] = {"sess": stamp}
+                state["owners"] = {} if role == "chat" else {"sess": proc.pid}
+                state["owner_started"] = {} if role == "chat" else {"sess": lstart}
+                state["owner_ident"] = {} if role == "chat" else {"sess": ident}
+                state["chat_pid"] = proc.pid if role == "chat" else 0
+                state["chat_started"] = lstart if role == "chat" else ""
+                state["chat_ident"] = ident if role == "chat" else ""
+                state["reported"] = None
+                state["seq"] = 4
 
-        hook.update(path, seed)
-
-        def opens(_pid):
-            yield f"/proc/{proc.pid}/fd/1", named
-
-        def open_held(_path):
-            return os.dup(slave)
-
-        env = {
-            "HC_TERMINAL_ID": "t7",
-            "HERDR_ENV": "",
-            "HERDR_PANE_ID": "",
-            "HERDR_KIRO_LOG": path + ".log",
-        }
-        with (
-            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
-            mock.patch.object(osc, "_tty_opens", opens),
-            mock.patch.object(hook, "_open_held", open_held),
-            mock.patch.object(hook, "herdr", lambda *_args: True),
-            mock.patch.dict(os.environ, env, clear=False),
-        ):
-            if mode == "sec":
-                ident = hook.hires_start(proc.pid)
-                self.assertEqual(ident, "sec:" + lstart)
-            elif mode == "empty":
-                ident = ""
-            else:
-                raise AssertionError(mode)
-            hook._hold_live_owner(proc.pid, lstart, ident)
-            hook.finish_if_unchanged(
-                "t7",
-                path,
-                {"generation": 3, "busy": {"sess": stamp}},
-                "owner exit",
-            )
+            self._run_status_loop(path, seed)
+            hook.emit_osc(path, "idle")
         got = _read_ready(master, 0.3)
+        self.assertNotIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
         self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
         self.assertEqual(got, b"")
-        self.assertLess(hook._pane_fd, 0)
 
     def test_empty_token_does_not_paint_done(self):
-        # owner_ident is missing. The hold must not treat that as a match
-        # and the exit must not write state=done.
-        self._paint_exit("empty")
+        # A fine start token is unavailable. owner_ident is sec: plus this
+        # pid's lstart. The watch loop must not paint that tty.
+        self._sec_status("owner")
 
     def test_sec_lstart_collision_does_not_paint_done(self):
-        # The non-tick token is sec: plus this pid's whole-second lstart.
-        # Comparing it with the same path is not an identity.
-        self._paint_exit("sec")
+        # chat_ident is that same sec: string. The watch loop must not paint.
+        self._sec_status("chat")
 
     def test_setsid_watcher_does_not_write_the_parent_pty(self):
         # A setsid watcher with stdio on /dev/null still has a parent pty.
@@ -1680,6 +1651,8 @@ class AncestorReportTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertGreater(owner_pid, 1)
         token = _live_start(owner_pid) if kind == "match" else ""
+        ident = hook.hires_start(owner_pid) if kind == "match" else ""
+        fine = kind == "match" and hook.fine_start(ident)
         # update() normalizes with this process's ps cache. A stale cache
         # treats the new owner as dead and drops it before the watcher starts.
         hook.begin_tick()
@@ -1690,7 +1663,7 @@ class AncestorReportTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {} if kind == "chat" else {"sess": owner_pid}
             state["owner_started"] = {} if kind != "match" else {"sess": token}
-            state["owner_ident"] = {} if kind != "match" else {"sess": hook.hires_start(owner_pid)}
+            state["owner_ident"] = {} if not fine else {"sess": ident}
             state["chat_pid"] = owner_pid if kind == "chat" else 0
             state["chat_started"] = ""
             state["reported"] = None
@@ -1716,7 +1689,9 @@ class AncestorReportTests(unittest.TestCase):
             # the pty stays empty.
             if "osc missed " in logged or "osc working via" in logged or "osc done" in logged:
                 break
-            if kind != "match" and "watcher loop" in logged:
+            # A sec: token is not an identity. The watcher starts and the pty
+            # stays empty, the same as an empty token.
+            if not fine and "watcher loop" in logged:
                 break
             time.sleep(0.05)
         else:
@@ -1725,7 +1700,7 @@ class AncestorReportTests(unittest.TestCase):
                 with open(err_path, encoding="utf-8") as handle:
                     detail = detail + handle.read()
             self.fail("no osc attempt\n" + detail)
-        if kind != "match":
+        if not fine:
             time.sleep(0.3)
         got = _read_ready(master, 0.3)
 
@@ -1739,12 +1714,12 @@ class AncestorReportTests(unittest.TestCase):
             _kill_pidfiles(result)
             proc.kill()
             proc.wait(timeout=5)
-        return got, logged, os.ttyname(slave)
+        return got, logged, os.ttyname(slave), ident
 
     def test_empty_owner_token_on_a_live_ancestor_stays_empty(self):
         # setsid watcher, hook still alive, owner is the hook's parent.
         # owner_started is empty. That pty must get no status bytes.
-        got, logged, device = self._status("owner")
+        got, logged, device, _ident = self._status("owner")
         self.assertEqual(got, b"", logged)
         self.assertNotIn(b"state=working", got)
         self.assertNotIn(b"state=done", got)
@@ -1754,7 +1729,7 @@ class AncestorReportTests(unittest.TestCase):
 
     def test_empty_chat_token_on_a_live_ancestor_stays_empty(self):
         # Same tree. The pid is chat_pid and chat_started is empty.
-        got, logged, device = self._status("chat")
+        got, logged, device, _ident = self._status("chat")
         self.assertEqual(got, b"", logged)
         self.assertNotIn(b"state=working", got)
         self.assertNotIn(b"state=done", got)
@@ -1763,13 +1738,22 @@ class AncestorReportTests(unittest.TestCase):
         self.assertNotIn(device, logged)
 
     def test_matching_ancestor_token_receives_working(self):
-        # A start token that matches still goes through write_to_pane,
+        # A fine start token that matches still goes through write_to_pane,
         # including when that pid is an ancestor of the setsid watcher.
-        got, logged, device = self._status("match")
-        self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got, logged)
+        # sec: plus lstart is not that token, so the pty stays empty.
+        got, logged, device, ident = self._status("match")
+        if hook.fine_start(ident):
+            self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got, logged)
+            self.assertNotIn(b"state=done", got)
+            self.assertIn("osc working via ", logged)
+            self.assertIn(device, logged)
+            return
+        self.assertEqual(got, b"", logged)
+        self.assertNotIn(b"state=working", got)
         self.assertNotIn(b"state=done", got)
-        self.assertIn("osc working via ", logged)
-        self.assertIn(device, logged)
+        self.assertNotIn("osc working via", logged)
+        self.assertNotIn("osc done", logged)
+        self.assertNotIn(device, logged)
 
 
 # The recorded pid sits between the setsid watcher and a parent that has its
@@ -1905,6 +1889,8 @@ class AboveSkippedPidTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertGreater(mid_pid, 1)
         token = _live_start(mid_pid) if kind == "match" else ""
+        ident = hook.hires_start(mid_pid) if kind == "match" else ""
+        fine = kind == "match" and hook.fine_start(ident)
         hook.begin_tick()
 
         def seed(state):
@@ -1913,7 +1899,7 @@ class AboveSkippedPidTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {} if kind == "chat" else {"sess": mid_pid}
             state["owner_started"] = {} if kind != "match" else {"sess": token}
-            state["owner_ident"] = {} if kind != "match" else {"sess": hook.hires_start(mid_pid)}
+            state["owner_ident"] = {} if not fine else {"sess": ident}
             state["chat_pid"] = mid_pid if kind == "chat" else 0
             state["chat_started"] = ""
             state["reported"] = None
@@ -1935,7 +1921,7 @@ class AboveSkippedPidTests(unittest.TestCase):
                     logged = handle.read()
             if "osc missed " in logged or "osc working via" in logged or "osc done" in logged:
                 break
-            if kind != "match" and "watcher loop" in logged:
+            if not fine and "watcher loop" in logged:
                 break
             time.sleep(0.05)
         else:
@@ -1944,7 +1930,7 @@ class AboveSkippedPidTests(unittest.TestCase):
                 with open(err_path, encoding="utf-8") as handle:
                     detail = detail + handle.read()
             self.fail("no osc attempt\n" + detail)
-        if kind != "match":
+        if not fine:
             time.sleep(0.3)
         parent_got = _read_ready(parent_master, 0.3)
         grand_got = _read_ready(grand_master, 0.3)
@@ -1960,12 +1946,12 @@ class AboveSkippedPidTests(unittest.TestCase):
             _kill_pidfiles(result, _ABOVE_PIDS)
             proc.kill()
             proc.wait(timeout=5)
-        return parent_got, grand_got, mid_got, logged, os.ttyname(parent_slave), os.ttyname(mid_slave)
+        return parent_got, grand_got, mid_got, logged, os.ttyname(parent_slave), os.ttyname(mid_slave), ident
 
     def test_empty_owner_token_does_not_write_the_parent_pty(self):
         # The recorded pid is in the middle. Its parent holds a different pty.
         # An empty owner_started must not paint that parent, or the grandparent.
-        parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev = self._report("owner")
+        parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev, _ident = self._report("owner")
         self.assertEqual(parent_got, b"", logged)
         self.assertEqual(grand_got, b"", logged)
         self.assertEqual(mid_got, b"", logged)
@@ -1975,7 +1961,7 @@ class AboveSkippedPidTests(unittest.TestCase):
 
     def test_empty_chat_token_does_not_write_the_parent_pty(self):
         # No owner row. chat_pid is that middle process and chat_started is empty.
-        parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev = self._report("chat")
+        parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev, _ident = self._report("chat")
         self.assertEqual(parent_got, b"", logged)
         self.assertEqual(grand_got, b"", logged)
         self.assertEqual(mid_got, b"", logged)
@@ -1984,13 +1970,20 @@ class AboveSkippedPidTests(unittest.TestCase):
         self.assertNotIn(parent_dev, logged)
 
     def test_matching_token_writes_its_pty_not_the_parent(self):
-        # A matching start token still writes that pid's pty, and not the parent's.
-        parent_got, grand_got, mid_got, logged, parent_dev, mid_dev = self._report("match")
-        self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", mid_got, logged)
+        # A fine matching token still writes that pid's pty, and not the parent's.
+        # sec: plus lstart writes neither.
+        parent_got, grand_got, mid_got, logged, parent_dev, mid_dev, ident = self._report("match")
         self.assertEqual(parent_got, b"", logged)
         self.assertEqual(grand_got, b"", logged)
-        self.assertIn(mid_dev, logged)
         self.assertNotIn(parent_dev, logged)
+        if hook.fine_start(ident):
+            self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", mid_got, logged)
+            self.assertIn(mid_dev, logged)
+            return
+        self.assertEqual(mid_got, b"", logged)
+        self.assertNotIn(b"state=working", mid_got)
+        self.assertNotIn(b"state=done", mid_got)
+        self.assertNotIn("osc working via", logged)
 
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and

@@ -22,6 +22,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "prototype"))
 import herdr_kiro_state as hook
 
 
+def pin_owner(pid, start="100.000000"):
+    """Report a fine start token for this pid while the patch is active."""
+    real = hook.hires_start
+
+    def hires(asked):
+        try:
+            if int(asked) == int(pid):
+                return start
+        except (TypeError, ValueError):
+            return real(asked)
+        return real(asked)
+
+    return mock.patch.object(hook, "hires_start", side_effect=hires)
+
+
 def effective(reports, drop_at, moment):
     """Status Herdr would show. A drop forgets working reports issued before it."""
     chosen = None
@@ -378,9 +393,15 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
             self.assertFalse(hook.alive(50, started="sec:THEN"))
-            self.assertTrue(hook.alive(50, started="sec:NOW"))
+            self.assertFalse(hook.alive(50, started="sec:NOW"))
             self.assertFalse(hook.alive(50, started="NOW"))
             self.assertFalse(hook.alive(50, started=""))
+        with (
+            mock.patch.object(hook, "process_snapshot", snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+        ):
+            self.assertTrue(hook.alive(50, started="100.000000"))
+            self.assertFalse(hook.alive(50, started="200.000000"))
 
     def test_release_authority_reports_success(self):
         directory = tempfile.mkdtemp()
@@ -408,6 +429,9 @@ class GraceTests(unittest.TestCase):
         holder = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: holder.poll() is not None or holder.kill())
         hook.begin_tick()
+        pinned = pin_owner(holder.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
@@ -450,6 +474,9 @@ class GraceTests(unittest.TestCase):
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         reports = []
+        pinned = pin_owner(owner.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
@@ -499,6 +526,9 @@ class GraceTests(unittest.TestCase):
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
         hook.begin_tick()
+        pinned = pin_owner(owner.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
@@ -805,9 +835,15 @@ class GraceTests(unittest.TestCase):
         snap = {"ppid": 1, "lstart": "then", "comm": "kiro-cli-chat"}
         with (
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+        ):
+            self.assertFalse(hook.owner_is_dead(50, "100.000000"))
+            self.assertTrue(hook.owner_is_dead(50, "200.000000"))
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
-            self.assertFalse(hook.owner_is_dead(50, "sec:then"))
+            self.assertTrue(hook.owner_is_dead(50, "sec:then"))
             self.assertTrue(hook.owner_is_dead(50, "then"))
             self.assertFalse(hook.owner_is_dead(50, ""))
 
@@ -817,6 +853,9 @@ class GraceTests(unittest.TestCase):
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
         hook.begin_tick()
+        pinned = pin_owner(owner.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
@@ -909,23 +948,47 @@ class GraceTests(unittest.TestCase):
             state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
         self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
 
+    def test_later_prompt_drops_a_sec_owner_ident(self):
+        # A stored sec: token is not the owner. The next prompt must not
+        # leave it in place, and alive stays false for that token.
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": 50}
+        state["owner_started"] = {"sess": "10"}
+        state["owner_ident"] = {"sess": "sec:10"}
+        state["generation"] = 1
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "hires_start", lambda _pid: "sec:10"),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+        ):
+            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
+            self.assertFalse(hook.alive(50, "sec:10"))
+        self.assertIn("sess", state["busy"])
+        self.assertNotIn("sess", state["owner_ident"])
+
     def test_chat_pid_death_is_owner_exit_after_confirm(self):
         state = hook.fresh_state()
         state["owners"] = {"sess": 50}
         state["owner_started"] = {"sess": "outer"}
-        state["owner_ident"] = {"sess": "sec:outer"}
+        state["owner_ident"] = {"sess": "100.000000"}
         state["chat_pid"] = 60
         state["chat_started"] = "chat"
-        state["chat_ident"] = "sec:chat"
+        state["chat_ident"] = "200.000000"
 
         def snap(pid):
             if pid == 50:
                 return {"ppid": 1, "lstart": "outer", "comm": "kiro-cli"}
             return None
 
+        def hires(pid):
+            if int(pid) == 50:
+                return "100.000000"
+            return ""
+
         with (
             mock.patch.object(hook, "process_snapshot", snap),
-            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
+            mock.patch.object(hook, "hires_start", hires),
             mock.patch.object(hook, "chat_under", lambda _pid: None),
         ):
             kind, hits = hook.tracked_exit(state, 0)
@@ -941,6 +1004,9 @@ class GraceTests(unittest.TestCase):
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
         hook.begin_tick()
+        pinned = pin_owner(owner.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
@@ -977,6 +1043,9 @@ class GraceTests(unittest.TestCase):
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
         hook.begin_tick()
+        pinned = pin_owner(owner.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
@@ -1042,6 +1111,9 @@ class GraceTests(unittest.TestCase):
         dead.kill()
         dead.wait(timeout=5)
         hook.begin_tick()
+        pinned = pin_owner(owner.pid)
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
         def seed(state):
             state["busy"] = {"sess": time.time()}
