@@ -81,7 +81,7 @@ Kiro CLI 3.0 is the supported CLI. Interactive chat starts on V3. A saved `chat.
 ./uninstall.sh
 ```
 
-`./doctor.sh` prints versions and whether the installed files still match the hashes this package wrote. It does not unlink the plugin and it does not delete files. `./uninstall.sh` removes the hook and `kiro.toml` only when this package still owns them, puts a saved `.original` back when one exists, and writes `uninstalled` in the lifecycle file. If the server is down it appends `pending_unlink=herdr-kiro`. The next `startup.sh` clears that line once `herdr plugin list` succeeds and the plugin is gone.
+`./doctor.sh` prints versions and whether the installed files still match the hashes this package wrote. It does not unlink the plugin, and it does not delete the hook or `kiro.toml`. It does remove a watcher pid file whose process is gone. `./uninstall.sh` removes the hook and `kiro.toml` only when this package still owns them, puts a saved `.original` back when one exists, and writes `uninstalled` in the lifecycle file. If the server is down it appends `pending_unlink=herdr-kiro`. The next `startup.sh` clears that line once `herdr plugin list` succeeds and the plugin is gone.
 
 Rebuild the demo with Node.js 22, FFmpeg, and the `hyperframes` package pinned in `package.json`:
 

@@ -46,8 +46,7 @@ def wrap_terminal(text, width):
 
 class DetectionTests(unittest.TestCase):
     def setUp(self):
-        if shutil.which("herdr") is None:
-            self.skipTest("herdr is not on PATH")
+        self.assertTrue(shutil.which("herdr"), "herdr is not on PATH")
         self.base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.base, True)
         config = os.path.join(self.base, "herdr", "agent-detection")

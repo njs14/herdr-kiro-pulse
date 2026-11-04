@@ -10,7 +10,7 @@ Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A s
 
 `tests/run_py39.sh` runs those tests on Python 3.9. The hook uses `from __future__ import annotations`, so `int | None` is not evaluated at import.
 
-Cases that call `herdr` skip when `herdr` is not on `PATH`. CI installs herdr 0.9.5, so those cases run there. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`.
+Cases that call `herdr` fail when `herdr` is not on `PATH`. CI installs herdr 0.9.5. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`.
 
 `python3 harness/run_suite.py` is the live workflow check. It needs a session, a Kiro pane, and `KIRO_API_KEY` in that environment. A passing case has no `error` key, and:
 

@@ -2016,9 +2016,9 @@ class AncestorReportTests(unittest.TestCase):
         self.assertNotIn(device, logged)
 
     def test_matching_ancestor_token_receives_working(self):
-        # A fine start token that matches still goes through write_to_pane,
-        # including when that pid is an ancestor of the setsid watcher.
-        # sec: plus lstart is not that token, so the pty stays empty.
+        # emit_osc sends state=working and state=done through _paint_proven
+        # and paint_status, which call write_pid. write_to_pane is the
+        # blocked path. sec: plus lstart is not that token, so the pty stays empty.
         got, logged, device, ident = self._status("match")
         if hook.fine_start(ident):
             self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got, logged)

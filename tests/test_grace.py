@@ -5,6 +5,7 @@ prompt, about 0.2s after Stop, and it keeps the old sequence. Re-sending
 working after that drop is what holds the pane for the grace period.
 """
 
+import errno
 import json
 import os
 import shlex
@@ -742,8 +743,7 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(hook.report_for(quiet, "idle"), None)
 
     def test_widget_screen_is_blocked_and_not_reported_working(self):
-        if shutil.which("herdr") is None:
-            self.skipTest("herdr is not on PATH")
+        self.assertTrue(shutil.which("herdr"), "herdr is not on PATH")
         screen = (
             " ▶ approve-probe running 0/1 · ctrl+x expand · ctrl+g monitor\n"
             " ⚠ 1 tool approval pending\n"
@@ -1222,13 +1222,15 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(state["grace_until"], 2.0 + hook.SETTLE_SECS)
 
     def test_sigterm_removes_the_rules_dir_and_a_dead_pid_leftover(self):
-        dead = 4_000_000
-        try:
-            os.kill(dead, 0)
-        except OSError:
-            pass
-        else:
-            self.skipTest(f"pid {dead} is alive")
+        dead = None
+        for candidate in range(4_194_303, 4_190_000, -1):
+            try:
+                os.kill(candidate, 0)
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    dead = candidate
+                    break
+        self.assertIsNotNone(dead, "no dead pid in range")
         stale = f"/tmp/herdr-kiro-rules-{dead}-leftover"
         os.makedirs(stale, exist_ok=True)
         with open(os.path.join(stale, "herdr-kiro-owned"), "w", encoding="utf-8") as handle:
