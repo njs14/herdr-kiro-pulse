@@ -2,7 +2,7 @@ id = "herdr-kiro"
 name = "Kiro workflow state"
 version = "0.13.2"
 min_herdr_version = "0.9.5"
-description = "Keep a Kiro CLI V3 workflow pane working in herdr, and report a visible blocker as blocked."
+description = "Report a Kiro CLI V3 session to the Herdr App with OSC 7501, and keep the Herdr TUI path working."
 platforms = ["linux", "macos"]
 
 # GitHub `herdr plugin install` runs build before it registers the plugin.

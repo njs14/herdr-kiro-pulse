@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Keep a herdr pane working for the whole Kiro workflow, then idle after a grace period.
+"""Report a Kiro CLI V3 pane to the Herdr App, and still to Herdr TUI.
+
+The App reads OSC 7501 from the pane tty. herdr-core sets HC_TERMINAL_ID on
+that program. The hook writes state=working, state=blocked, or state=done
+there. A finished turn stays state=done after the pane is seen. The Agents
+sidebar keeps a focused row under Done until that row is left, and this
+hook cannot set that hold. Herdr TUI is separate: HERDR_ENV and HERDR_PANE_ID
+still drive `herdr pane report-agent`. A finished turn stays an idle report
+on the TUI, which herdr 0.9.5 shows as done until the pane is seen.
 
 Workflow steps are separate Kiro sessions. The parent pane paints its idle prompt
 while they run, so screen detection calls the pane idle. Each step session
@@ -9,7 +17,8 @@ Herdr also drops a custom hook's working authority when a foreground turn
 repaints from the "Kiro is working" footer to the idle prompt, about 0.2s
 after Stop, and it remembers the sequence number. A single idle report 3s
 later arrives after the pane is already idle. This process re-sends working
-until the grace ends, then reports idle, releases, and exits.
+until the grace ends, then reports idle. That idle report stays in place
+while kiro-cli is running. Owner exit still releases.
 """
 
 from __future__ import annotations
@@ -25,12 +34,15 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+
+import herdr_kiro_osc
 
 __version__ = "0.13.2"
 SOURCE = "hook:kiro"
@@ -435,6 +447,17 @@ def update(path: str, fn):
         return state
 
 
+def in_tui() -> bool:
+    """True when this process was started inside a Herdr TUI pane."""
+    pane = os.environ.get("HERDR_PANE_ID") or ""
+    return os.environ.get("HERDR_ENV") == "1" and pane_id_ok(pane)
+
+
+def in_app() -> bool:
+    """True when this process was started inside a herdr-core terminal."""
+    return pane_id_ok(os.environ.get("HC_TERMINAL_ID") or "")
+
+
 def herdr_bin() -> str:
     """The herdr that launched this plugin, or `herdr` on PATH."""
     return os.environ.get("HERDR_BIN_PATH") or "herdr"
@@ -455,6 +478,49 @@ def herdr(*args: str) -> bool:
     return completed.returncode == 0
 
 
+def _report_pids(path: str) -> list:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.loads(handle.read() or "{}")
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    pids = []
+    owners = state.get("owners") or {}
+    if isinstance(owners, dict):
+        for value in owners.values():
+            try:
+                pids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    try:
+        chat = int(state.get("chat_pid") or 0)
+    except (TypeError, ValueError):
+        chat = 0
+    if chat:
+        pids.append(chat)
+    return pids
+
+
+def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
+    """Write one App report. Unknown is not a protocol state, so it is a no-op."""
+    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    if fields is None:
+        return True
+    try:
+        payload = herdr_kiro_osc.encode(fields)
+    except ValueError:
+        log("refusing osc")
+        return False
+    written = herdr_kiro_osc.write_to_pane(payload, _report_pids(path))
+    if written:
+        log(f"osc {fields['state']} via {written}")
+        return True
+    log(f"osc missed {fields['state']}")
+    return False
+
+
 def send_report(pane: str, path: str, kind: str) -> bool:
     if not pane_id_ok(pane):
         log("refusing report")
@@ -466,7 +532,16 @@ def send_report(pane: str, path: str, kind: str) -> bool:
     # place while kiro-cli is running. release-agent after it drops done:
     # an idle screen settles to idle with no completion, and a working
     # footer returns to working before that later idle screen also settles idle.
-    return emit_report(pane, path, kind)
+    tui_ok = emit_report(pane, path, kind)
+    if not in_app():
+        return tui_ok
+    rule_id = ""
+    if kind == "blocked":
+        rule_id = str(screen_view(pane_text(pane)).get("id") or "")
+    osc_ok = emit_osc(path, kind, rule_id)
+    if in_tui():
+        return tui_ok
+    return osc_ok
 
 
 def emit_report(pane: str, path: str, kind: str) -> bool:
@@ -512,7 +587,44 @@ def release_authority(pane: str, path: str) -> bool:
     )
 
 
+def _hc_bin() -> str:
+    return os.environ.get("HC_BIN") or shutil.which("hc") or shutil.which("herdr-core") or ""
+
+
+def _hc_screen() -> str | None:
+    """The pane text from `hc read`, or None when core cannot be asked."""
+    terminal = os.environ.get("HC_TERMINAL_ID") or ""
+    binary = _hc_bin()
+    if not pane_id_ok(terminal) or not binary:
+        return None
+    try:
+        completed = subprocess.run(
+            [binary, "--json", "read", terminal],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or not (completed.stdout or "").strip():
+        return None
+    try:
+        data = json.loads(completed.stdout)
+    except (ValueError, TypeError):
+        return None
+    text = data.get("text") if isinstance(data, dict) else None
+    if not isinstance(text, str):
+        return None
+    return text
+
+
 def pane_text(pane: str) -> str:
+    if in_app():
+        text = _hc_screen()
+        if text is not None:
+            return text
     try:
         return subprocess.check_output(
             [herdr_bin(), "pane", "read", pane, "--source", "visible", "--lines", "80"],
@@ -1906,7 +2018,10 @@ def _watch_loop(pane: str, path: str) -> None:
                 if reported is None and misses >= 30:
                     return
                 continue
-            if action == "idle" and screen_is_quiet(screen):
+            # The App has no herdr pane to explain. An empty read still ends the
+            # turn once the grace has passed. A real screen keeps the TUI rules.
+            app_quiet = in_app() and not screen.strip() and not banner
+            if action == "idle" and (screen_is_quiet(screen) or app_quiet):
                 if reported != "idle":
                     reported, misses = note_report(pane, path, "idle", reported, misses)
                     if reported is None and misses >= 30:
@@ -1969,8 +2084,10 @@ def main() -> int:
     if not isinstance(payload, dict):
         payload = {}
     pane = os.environ.get("HERDR_PANE_ID") or ""
-    if os.environ.get("HERDR_ENV") != "1" or not pane_id_ok(pane):
-        return 0
+    if not in_tui():
+        pane = os.environ.get("HC_TERMINAL_ID") or ""
+        if not pane_id_ok(pane):
+            return 0
     try:
         path = state_path(pane)
     except ValueError:

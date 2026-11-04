@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+The hook reports a Kiro CLI V3 session to the Herdr App with OSC 7501 on the pane tty. `hc` is herdr-core and has no status-set command. A finished turn is `state=done` on the App and still `idle` on the Herdr TUI, and that OSC word stays `done` after the pane is seen. The painted Agents section keeps a focused row under Done until that row is left. `herdr-app ls` already reports idle for that row. `settled: false` means the tab is listed. The TUI report is not followed by `release-agent` while kiro-cli is running. Question-panel rules use `kind=question`. Other blockers use `kind=permission`. On macOS the pane device comes from the process's stdout fd. A setsid hook has no controlling terminal, so `ps -o tty=` is not that device.
+
 ## 0.13.2
 
 A sidecar is trusted only when `lstat` shows a regular file owned by this uid that is not group- or world-writable, the protected file is a regular file owned by this uid, and the read uses `O_NOFOLLOW`. A symlink or another user's sidecar does not make uninstall delete the file. Pane ids that start with `-` are rejected. startup refuses to chmod a symlinked state directory. The watcher test accepts the macOS `sec:<epoch>` start token. Two sample logs no longer use a `/workspace` path prefix.

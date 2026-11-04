@@ -35,6 +35,10 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 3. `Driving it with verify-herdr-kiro` starts with `Preconditions:` and uses labeled bullets that pair each user action with an exact command and observable result.
 4. `Gotchas` lists traps that can waste or invalidate a verification run.
 
+## What this map does not drive
+
+`tests/test_osc.py` is the OSC 7501 proof. CI runs it. It is not a `drive.py` recipe, and `paint` does not emit OSC 7501. A finished turn stays `state=done` on that wire. These feature files drive the Herdr TUI stand-in. A live Herdr App check is a Kiro session inside an App terminal. The painted Agents section stays under Done while that row is focused, and the check selects another tab. It is not verified here.
+
 ## Features
 
 - [Idle prompt](./idle.md) covers the settled prompt before a turn.
