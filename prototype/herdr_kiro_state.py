@@ -16,8 +16,7 @@ inherits HERDR_PANE_ID and fires the same hooks.
 
 Herdr also drops a custom hook's working authority when a foreground turn
 repaints from the "Kiro is working" footer to the idle prompt, about 0.2s
-after Stop, and it remembers the sequence number. A single idle report 3s
-later arrives after the pane is already idle. This process re-sends working
+after Stop, and it remembers the sequence number. This process re-sends working
 until the grace ends, then reports idle. That idle report stays in place
 while kiro-cli is running. Owner exit still releases.
 """
@@ -49,8 +48,7 @@ __version__ = "0.1.0"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
-# A 3 second hook grace only delayed the idle report. Half a second still covers
-# the gap before the next step's SessionStart.
+# Half a second still covers the gap before the next step's SessionStart.
 SETTLE_SECS = 0.5
 STALE_SECS = 1800.0
 TICK_SECS = 0.2
@@ -60,7 +58,7 @@ IDLE_CLEAR_SECS = 2.0
 # One agent_not_found reading is not enough to end a live run.
 GONE_CONFIRM_SECS = 1.5
 GONE_CONFIRM_HITS = 3
-RELEASE_DELAY: float = 2.0
+IDLE_DELAY: float = 2.0
 TAIL_LINES = 30
 BUSY_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
 # Stop fires after a turn. SessionEnd fires when that loaded session is torn down.
@@ -1035,8 +1033,7 @@ def remove_tree(path: str) -> None:
     """Delete a directory tree without following a symlinked directory.
 
     Opens each directory with O_NOFOLLOW and unlinks names through that
-    descriptor. A symlink is removed as a link. Errors are ignored, matching
-    the old rmtree ignore_errors behavior on Python 3.9.
+    descriptor. A symlink is removed as a link. Errors are ignored.
     """
     parent = os.path.dirname(path) or "."
     name = os.path.basename(path)
@@ -1279,13 +1276,6 @@ def _on_term(signum, _frame):
     raise SystemExit(128 + signum)
 
 
-def clear_explain_cache() -> None:
-    """Drop the cached explain env so the next call builds a new rules directory."""
-    global _EXPLAIN_ENV, _RULES_DIR
-    _EXPLAIN_ENV = None
-    _RULES_DIR = None
-
-
 def explain_env() -> dict:
     """Point herdr at the toml next to this script. The temp dir is removed on exit."""
     global _EXPLAIN_ENV
@@ -1362,13 +1352,6 @@ def screen_view(text: str) -> dict:
     return view
 
 
-def highest_rule(text: str):
-    view = screen_view(text)
-    if not view.get("id"):
-        return None
-    return {"id": view["id"], "state": view["state"]}
-
-
 def blocker_visible(text: str) -> bool:
     """True when herdr's winning rule for this screen is blocked."""
     if approval_text(text):
@@ -1421,16 +1404,6 @@ def report_for(screen: str, action: str):
     if action == "working":
         return "working"
     return None
-
-
-def release_stuck(state: dict) -> None:
-    """End every slot. Used when the screen has been idle, or the owner has died."""
-    state["busy"] = {}
-    state["owners"] = {}
-    state["owner_started"] = {}
-    state["aggregate"] = 0
-    state["grace_until"] = 0.0
-    state["grace_started"] = 0.0
 
 
 def release_if_current(state: dict, generation: int, keys) -> bool:
@@ -1722,18 +1695,6 @@ def watcher_identity(pid: int):
     return {"start": hires_start(pid), "comm": snap.get("comm") or "", "error": False}
 
 
-def watcher_matches(pid: int, uid: str, started: str, comm: str) -> bool:
-    """True when this uid's pid file still names the same process."""
-    if str(uid) != str(os.getuid()):
-        return False
-    if not started or not comm:
-        return False
-    ident = watcher_identity(pid)
-    if not ident or ident.get("error"):
-        return False
-    return ident["start"] == started and ident["comm"] == comm
-
-
 def read_owned_hash(marker_path: str):
     """sha256 from an owned sidecar, '' when the marker has no hash, else None.
 
@@ -1900,18 +1861,6 @@ def command_name(comm: str) -> str:
     if name.startswith("-"):
         name = name[1:]
     return name
-
-
-def kiro_ancestor() -> tuple:
-    """Pid and start time of the outer kiro-cli above this hook.
-
-    The walk meets kiro-cli-chat first. That child stays alive after SIGTERM to
-    the outer kiro-cli, so the owner has to be the outermost kiro-cli.
-    """
-    outer_pid, outer_started, _chat_pid, _chat_started = kiro_lineage()
-    if outer_pid:
-        return outer_pid, outer_started
-    return _chat_pid, _chat_started
 
 
 def kiro_lineage() -> tuple:
@@ -2423,7 +2372,7 @@ def _watch_loop(pane: str, path: str) -> None:
                     if reported is None and misses >= 30:
                         return
                     log("watcher idle")
-                held = quiet_since is not None and now - quiet_since >= RELEASE_DELAY
+                held = quiet_since is not None and now - quiet_since >= IDLE_DELAY
                 if reported == "idle" and not state["busy"] and held and finish_if_unchanged(pane, path, state, "idle"):
                     return
                 continue

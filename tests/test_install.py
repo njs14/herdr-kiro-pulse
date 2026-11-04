@@ -169,21 +169,34 @@ class InstallTests(unittest.TestCase):
             handle.write("import time\ntime.sleep(60)\n")
         watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file])
         decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file])
+        wrong_start = subprocess.Popen([sys.executable, script, "--watch", "start", state_file])
+        wrong_uid = subprocess.Popen([sys.executable, script, "--watch", "uid", state_file])
         self.addCleanup(lambda: watcher.poll() is not None or watcher.kill())
         self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
+        self.addCleanup(lambda: wrong_start.poll() is not None or wrong_start.kill())
+        self.addCleanup(lambda: wrong_uid.poll() is not None or wrong_uid.kill())
         hook.begin_tick()
         ident = hook.watcher_identity(watcher.pid)
         self.assertIsNotNone(ident)
         # Linux is fractional seconds. Other platforms tag whole seconds with sec:.
         self.assertRegex(ident["start"], r"^(?:\d+\.\d+|sec:\d+)$")
         decoy_ident = hook.watcher_identity(decoy.pid)
+        start_ident = hook.watcher_identity(wrong_start.pid)
+        uid_ident = hook.watcher_identity(wrong_uid.pid)
         self.assertIsNotNone(decoy_ident)
+        self.assertIsNotNone(start_ident)
+        self.assertIsNotNone(uid_ident)
+        other_uid = 0 if os.getuid() != 0 else 1
         pid_dir = os.path.join(state, "pids")
         os.makedirs(pid_dir)
         with open(os.path.join(pid_dir, str(watcher.pid)), "w", encoding="utf-8") as handle:
             handle.write("{}\n{}\n{}\n".format(os.getuid(), ident["start"], ident["comm"]))
         with open(os.path.join(pid_dir, str(decoy.pid)), "w", encoding="utf-8") as handle:
             handle.write("{}\n{}\n{}\n".format(os.getuid(), decoy_ident["start"], "not-the-comm"))
+        with open(os.path.join(pid_dir, str(wrong_start.pid)), "w", encoding="utf-8") as handle:
+            handle.write("{}\n{}\n{}\n".format(os.getuid(), "1", start_ident["comm"]))
+        with open(os.path.join(pid_dir, str(wrong_uid.pid)), "w", encoding="utf-8") as handle:
+            handle.write("{}\n{}\n{}\n".format(other_uid, uid_ident["start"], uid_ident["comm"]))
         env = dict(os.environ)
         env["HOME"] = home
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
@@ -212,8 +225,14 @@ class InstallTests(unittest.TestCase):
         watcher.wait(timeout=5)
         self.assertIsNotNone(watcher.returncode)
         self.assertIsNone(decoy.poll())
+        self.assertIsNone(wrong_start.poll())
+        self.assertIsNone(wrong_uid.poll())
         decoy.kill()
+        wrong_start.kill()
+        wrong_uid.kill()
         decoy.wait(timeout=5)
+        wrong_start.wait(timeout=5)
+        wrong_uid.wait(timeout=5)
 
     def test_uninstall_keeps_a_user_edited_file(self):
         base = tempfile.mkdtemp()

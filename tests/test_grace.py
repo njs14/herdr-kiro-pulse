@@ -38,6 +38,11 @@ def pin_owner(pid, start="100.000000"):
     return mock.patch.object(hook, "hires_start", side_effect=hires)
 
 
+def reset_explain_env():
+    hook._EXPLAIN_ENV = None
+    hook._RULES_DIR = None
+
+
 def effective(reports, drop_at, moment):
     """Status Herdr would show. A drop forgets working reports issued before it."""
     chosen = None
@@ -260,8 +265,8 @@ class GraceTests(unittest.TestCase):
         def report(*_args, **_kwargs):
             return True
 
-        previous_delay = hook.RELEASE_DELAY
-        hook.RELEASE_DELAY = 0
+        previous_delay = hook.IDLE_DELAY
+        hook.IDLE_DELAY = 0
         try:
             with (
                 mock.patch.object(hook, "pane_text", read),
@@ -272,7 +277,7 @@ class GraceTests(unittest.TestCase):
             ):
                 hook.watch_loop("w1:p1", path)
         finally:
-            hook.RELEASE_DELAY = previous_delay
+            hook.IDLE_DELAY = previous_delay
         self.assertEqual(reads["n"], 1)
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
@@ -754,9 +759,9 @@ class GraceTests(unittest.TestCase):
         )
         self.assertTrue(hook.blocker_visible(screen))
         self.assertTrue(hook.workflow_banner_from(screen))
-        winner = hook.highest_rule(screen)
-        self.assertEqual(winner["state"], "blocked")
-        self.assertEqual(winner["id"], "crew_approval")
+        view = hook.screen_view(screen)
+        self.assertEqual(view["state"], "blocked")
+        self.assertEqual(view["id"], "crew_approval")
         self.assertEqual(hook.report_for(screen, "working"), "blocked")
 
     def test_duplicate_start_clears_when_the_screen_stays_idle(self):
@@ -766,7 +771,7 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(state["aggregate"], 2)
         quiet = "› ask a question or describe a task\n"
         self.assertTrue(hook.screen_is_quiet(quiet))
-        hook.release_stuck(state)
+        self.assertTrue(hook.release_if_current(state, state["generation"], list(state["busy"])))
         self.assertEqual(state["aggregate"], 0)
         self.assertEqual(state["busy"], {})
         self.assertEqual(hook.next_action(0, state["grace_until"], False, 3), "idle")
@@ -801,7 +806,7 @@ class GraceTests(unittest.TestCase):
             return chain.get(pid)
 
         with mock.patch.object(hook.os, "getppid", return_value=10), mock.patch.object(hook, "process_snapshot", snap):
-            self.assertEqual(hook.kiro_ancestor(), (9, "outer"))
+            self.assertEqual(hook.kiro_lineage(), (9, "outer", 10, "chat"))
 
     def test_kqueue_wait_reports_a_process_exit(self):
         seen = {}
@@ -1237,7 +1242,7 @@ class GraceTests(unittest.TestCase):
             handle.write(f"uid {os.getuid()}\n")
         previous_env = hook._EXPLAIN_ENV
         previous_dir = hook._RULES_DIR
-        hook.clear_explain_cache()
+        reset_explain_env()
         rules = ""
         try:
             hook.explain_env()
@@ -1354,7 +1359,7 @@ class GraceTests(unittest.TestCase):
         previous_env = hook._EXPLAIN_ENV
         previous_dir = hook._RULES_DIR
         hook._SCREEN_CACHE.clear()
-        hook.clear_explain_cache()
+        reset_explain_env()
         os.environ["XDG_STATE_HOME"] = os.path.join(base, "xdg")
         rules = ""
         try:
@@ -1375,7 +1380,7 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(view["id"], "live_prompt_idle")
         self.assertFalse(os.path.exists(seen["path"]))
 
-    def test_hires_start_is_finer_than_a_second_and_comm_must_match(self):
+    def test_hires_start_is_finer_than_a_second(self):
         hook.begin_tick()
         ident = hook.watcher_identity(os.getpid())
         self.assertIsNotNone(ident)
@@ -1384,10 +1389,6 @@ class GraceTests(unittest.TestCase):
         else:
             self.assertRegex(ident["start"], r"^\d+\.\d{6}$")
         self.assertTrue(ident["comm"])
-        self.assertTrue(hook.watcher_matches(os.getpid(), str(os.getuid()), ident["start"], ident["comm"]))
-        self.assertFalse(hook.watcher_matches(os.getpid(), str(os.getuid()), ident["start"], "not-the-comm"))
-        self.assertFalse(hook.watcher_matches(os.getpid(), str(os.getuid()), "1", ident["comm"]))
-        self.assertFalse(hook.watcher_matches(os.getpid(), "0", ident["start"], ident["comm"]))
 
     def test_macos_start_token_comes_from_ps(self):
         pid = 4242
