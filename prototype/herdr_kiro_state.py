@@ -492,12 +492,20 @@ def _report_pids(path: str) -> list:
         return []
     pids = []
     owners = state.get("owners") or {}
+    started_map = state.get("owner_started") if isinstance(state.get("owner_started"), dict) else {}
     if isinstance(owners, dict):
-        for value in owners.values():
+        for key, value in owners.items():
             try:
-                pids.append(int(value))
+                pid = int(value)
             except (TypeError, ValueError):
                 continue
+            # An empty token matches any live pid. That process is not the owner,
+            # so a status write must not land on its tty.
+            raw = started_map.get(key) or ""
+            token = raw if isinstance(raw, str) else ""
+            if not token or not alive(pid, token):
+                continue
+            pids.append(pid)
     try:
         chat = int(state.get("chat_pid") or 0)
     except (TypeError, ValueError):

@@ -955,6 +955,83 @@ class ReapedExitTests(unittest.TestCase):
             hook._watch_loop("t7", path)
         self.assertEqual([seen.get("fd", 0), _read_ready(master, 0.2)], [-1, b""])
 
+    def test_empty_owner_started_does_not_receive_a_status_write(self):
+        # send_report stays real. An empty start token is not that live pid,
+        # so the watch loop must not write state=working, or any other status,
+        # onto its pty.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-empty-report-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(_stop, proc)
+        device = os.ttyname(slave)
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["generation"] = 3
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": proc.pid}
+            state["owner_started"] = {"sess": ""}
+            state["chat_pid"] = 0
+            state["reported"] = None
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        stolen = 42424242
+        waits = {"n": 0}
+        real_kill = hook.os.kill
+
+        def fake_kill(pid, sig):
+            if int(pid) == stolen:
+                raise OSError(errno.ESRCH, "gone")
+            return real_kill(pid, sig)
+
+        def fake_wait(_self, _pids, _timeout):
+            waits["n"] += 1
+            if waits["n"] == 2:
+
+                def steal(state):
+                    state["watcher"] = stolen
+
+                hook.update(path, steal)
+            if waits["n"] > 3:
+                raise AssertionError("watcher did not leave after the slot moved")
+            return False
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+            "XDG_STATE_HOME": directory,
+            "HERDR_BIN_PATH": os.path.join(directory, "missing-herdr"),
+        }
+        with (
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook.os, "kill", fake_kill),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            hook._watch_loop("t7", path)
+        got = _read_ready(master, 0.3)
+        self.assertNotIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got)
+        self.assertNotIn(b"\x1b]7501;state=done:app=kiro\x1b\\", got)
+        self.assertEqual(got, b"")
+        log_path = path + ".log"
+        logged = ""
+        if os.path.exists(log_path):
+            with open(log_path, encoding="utf-8") as handle:
+                logged = handle.read()
+        self.assertNotIn(device, logged)
+
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and
 # rank() lines 133-136. The painted section is this rank. herdr-app ls is
