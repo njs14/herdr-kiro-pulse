@@ -13,11 +13,11 @@ The App reads status only from OSC 7501 on the program's own output. `hc` is the
 - a question panel is `state=blocked:kind=question:app=kiro-cli`
 - a finished turn is `state=done:app=kiro-cli`
 
-Kiro CLI 3.0 sends `app=kiro-cli`. An older session still sends `app=kiro`. Both are this program.
+The hook writes `app=kiro-cli`. A status whose app is `kiro` is still this program.
 
 `herdr-app ls` shows `blocked` as needing you. It shows `done` while the turn is unseen, and idle once `herdr.seen` is that turn. The painted Agents section is a separate hold: a focused row that was under Done stays under Done after that list status is idle, and selecting another tab in the same space moves the row to Idle. A finished turn stays `state=done` on the wire.
 
-The Herdr TUI path is unchanged. `HERDR_ENV=1` and `HERDR_PANE_ID` still call `herdr pane report-agent` with `working`, `idle`, `blocked`, or `unknown`. A finished turn is an `idle` report. herdr 0.9.5 shows that unseen idle as done. The hook does not call `release-agent` while `kiro-cli` is running.
+The Herdr TUI path is unchanged. `HERDR_ENV=1` and `HERDR_PANE_ID` still call `herdr pane report-agent` with `working`, `idle`, or `blocked`. A finished turn is an `idle` report. herdr 0.9.5 shows that unseen idle as done. The hook does not call `release-agent` while `kiro-cli` is running.
 
 Stock Kiro detection reads the idle prompt and calls the pane idle, including when `▶ name running` is still painted above that prompt. On the TUI, this plugin reports the pane from the workflow and from those dialogs. herdr 0.9.5 does not merge a local detection file with the remote one, so installing this replaces upstream Kiro rules until you uninstall.
 
@@ -101,7 +101,7 @@ The stock idle rule matches `› ask a question or describe a task` on the botto
 
 - A line that starts with `▶`, then a name, then `running`, and contains `ctrl+x`, is working. `ctrl+g` may be on the next line.
 - `Allow once` / `Deny once`, the subagent widget, and `Trust this workspace?` are blocked, and they beat the banner.
-- The hook releases the pane when the recorded `kiro-cli` or `kiro-cli-chat` process has exited. `Stop` and `SessionEnd` end a turn or a session. They are not process exit.
+- The hook releases the pane when the recorded `kiro-cli` process has exited, or when the recorded `kiro-cli-chat` process has exited and no replacement is under a living outer. A gone `kiro-cli-chat` with a replacement under a living outer is not an exit. `Stop` and `SessionEnd` end a turn or a session. They are not process exit.
 
 Stay on the stock file if you want herdr to keep applying newer remote Kiro rules. Switch to this if the idle pane during a workflow is the failure you are fixing. The rule-by-rule list is [docs/kiro-detection-diff.md](docs/kiro-detection-diff.md).
 

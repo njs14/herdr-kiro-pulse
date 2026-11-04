@@ -63,7 +63,7 @@ CI can run, with herdr 0.9.5 installed and no Kiro key:
 
 `tests.test_osc` is the OSC 7501 check CI can run. It opens a pty, writes the sequence the way the hook does, and reads those bytes on the master. It does not start herdr-app, herdr-core, or `hc`. `drive.py` is the Herdr TUI stand-in. It paints a herdr 0.9.5 pane and reads `herdr agent get`. It does not write OSC 7501 and it is not a Herdr App check.
 
-A live Herdr App check is separate. It uses an already-installed App and core and starts `kiro-cli chat` inside an App terminal. `hc --json get` reports `app` `kiro-cli` on CLI 3.0 and `kiro` from an older session. Both are this program. `herdr-app ls` reports idle once `herdr.seen` equals the turn. The painted Agents section keeps that row under Done while the row is focused, and the check selects another tab in the same space. The window does not have to be frontmost. The check uses `echo` or `true` when a tool approval is required. This skill does not run that check.
+A live Herdr App check is separate. It uses an already-installed App and core and starts `kiro-cli chat` inside an App terminal. `hc --json get` reports `app` `kiro-cli`. The hook writes that app. A status whose app is `kiro` is still this program. `herdr-app ls` reports idle once `herdr.seen` equals the turn. The painted Agents section keeps that row under Done while the row is focused, and the check selects another tab in the same space. The window does not have to be frontmost. The check uses `echo` or `true` when a tool approval is required. This skill does not run that check.
 
 These three are CI checks. They do not need herdr or a Kiro key:
 

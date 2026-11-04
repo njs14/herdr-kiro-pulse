@@ -14,7 +14,7 @@ import shutil
 import stat
 import subprocess
 
-# CLI 3.0 reports app=kiro-cli. Older sessions still send app=kiro.
+# The hook writes app=kiro-cli. An incoming status whose app is kiro is still this program.
 APP = "kiro-cli"
 KIRO_APPS = frozenset({"kiro", "kiro-cli"})
 _STATES = {"idle", "working", "done", "blocked", "error", "clear"}
@@ -29,7 +29,7 @@ _FLAG_SETS = (
 
 
 def is_kiro_app(name: object) -> bool:
-    """True for the OSC app name Kiro sends, on CLI 3.0 and on older sessions."""
+    """True when an incoming status app is kiro-cli or kiro."""
     return isinstance(name, str) and name in KIRO_APPS
 
 

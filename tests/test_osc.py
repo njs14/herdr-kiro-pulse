@@ -117,7 +117,7 @@ class OscMapTests(unittest.TestCase):
         self.assertIsNone(osc.fields_for("unknown"))
 
     def test_kiro_cli_and_kiro_are_both_the_app(self):
-        # CLI 3.0 reports app=kiro-cli. An older session still sends app=kiro.
+        # fields_for always sends app=kiro-cli. An incoming app of kiro is still this program.
         self.assertTrue(osc.is_kiro_app("kiro-cli"))
         self.assertTrue(osc.is_kiro_app("kiro"))
         self.assertFalse(osc.is_kiro_app("claude"))
@@ -961,8 +961,6 @@ class ReapedExitTests(unittest.TestCase):
         )
 
     def test_missed_write_keeps_an_owner_older_than_the_stale_window(self):
-        # retain_dead_owner used to keep the row only while now - seen < 1800.
-        # A missed write with a stamp 1801s old dropped the owner and kept the watcher.
         waits, seen, calls = self._run_missed_exit(time.time() - 1801)
         self.assertEqual(
             [waits, seen.get("owners"), seen.get("watcher"), [item[0] for item in calls]],

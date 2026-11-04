@@ -19,7 +19,7 @@ Preconditions:
 - The finished-turn recipe has run in this same launch through `wait done idle live_prompt_idle`, and `seen` has not run yet.
 - The evidence directory for this launch still exists.
 
-- **Let the old release window pass.** Wait 12 seconds after the unseen wait returns. Two seconds used to be the release delay.
+- **Let the old release window pass.** Wait 12 seconds after the unseen wait returns.
 - **Read the pane again.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py status --save release.json`. The saved JSON has `agent_status` `done`, `explain_state` `idle`, `explain_rule` `live_prompt_idle`, and the same `completion_seq` as the unseen wait.
 - **Read the log.** Open `$evidence/hook.log` from the launch JSON. It has no `release-agent` line for this idle turn. `watcher exit idle` may be present. A `release-agent` line while the painter or `kiro-cli` is still the foreground process fails the check.
 - **Mark seen and read again.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py seen`, then `python3 .cursor/skills/verify-herdr-kiro/drive.py status --save seen.json`. `agent_status` is `idle`. `explain_state` is `idle` and `explain_rule` is `live_prompt_idle`. `completion_seq` is unchanged.

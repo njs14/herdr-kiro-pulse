@@ -2,7 +2,7 @@
 
 Do not print `KIRO_API_KEY`. Do not write it into logs. `harness/run_suite.py` writes under `logs/`, and that directory is gitignored.
 
-Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A saved `chat.agentEngine` of `v2` still selects V2. A headless run that omits `--trust-all-tools` stays on V2, so `harness/run_suite.py` passes that flag. The approval check is interactive and does not pass it. `hc --json get` reports `app` `kiro-cli` on CLI 3.0. An older session still sends `app=kiro`. Both are this program.
+Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A saved `chat.agentEngine` of `v2` still selects V2. A headless run that omits `--trust-all-tools` stays on V2, so `harness/run_suite.py` passes that flag. The approval check is interactive and does not pass it. `hc --json get` reports `app` `kiro-cli`. The hook writes that app. A status whose app is `kiro` is still this program.
 
 ## What passing looks like
 

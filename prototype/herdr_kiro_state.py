@@ -60,9 +60,6 @@ IDLE_CLEAR_SECS = 2.0
 # One agent_not_found reading is not enough to end a live run.
 GONE_CONFIRM_SECS = 1.5
 GONE_CONFIRM_HITS = 3
-# Releasing the hook the instant the prompt returns makes herdr report unknown
-# for about 3 seconds. Report idle first and release only after this delay, so
-# a run can settle idle before that hand-off.
 RELEASE_DELAY: float = 2.0
 TAIL_LINES = 30
 BUSY_EVENTS = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"}
@@ -861,7 +858,7 @@ def send_report(pane: str, path: str, kind: str) -> bool:
     if not pane_id_ok(pane):
         log("refusing report")
         return False
-    if kind not in ("working", "idle", "blocked", "unknown"):
+    if kind not in ("working", "idle", "blocked"):
         raise ValueError(kind)
     # herdr 0.9.5 stores an unseen Working or Blocked -> Idle report as done.
     # agent explain still returns the screen rule. Leave this idle report in
@@ -1379,10 +1376,6 @@ def blocker_visible(text: str) -> bool:
     return screen_view(text).get("state") == "blocked"
 
 
-def banner_visible(text: str) -> bool:
-    return screen_view(text).get("id") == "workflow_banner_working"
-
-
 def screen_is_settled(text: str) -> bool:
     """No workflow banner, no approval, and no working footer.
 
@@ -1561,10 +1554,6 @@ def gone_confirmed(since, now: float, hits: int, owners_died: bool) -> bool:
     if since is None:
         return False
     return hits >= GONE_CONFIRM_HITS and now - since >= GONE_CONFIRM_SECS
-
-
-def workflow_banner(pane: str) -> bool:
-    return workflow_banner_from(pane_text(pane) or "")
 
 
 _TABLE = None
@@ -1904,17 +1893,6 @@ def kiro_in_pane(owner_ids) -> bool:
                 return True
             cursor = parent
     return False
-
-
-def owners_status(state: dict) -> str:
-    owners = state.get("owners") or {}
-    if not owners:
-        return "none"
-    idents = _ident_map(state)
-    for key, owner in owners.items():
-        if not owner_is_dead(owner, idents.get(key) or ""):
-            return "alive"
-    return "dead"
 
 
 def command_name(comm: str) -> str:
