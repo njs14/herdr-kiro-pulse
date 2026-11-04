@@ -1400,6 +1400,187 @@ class GraceTests(unittest.TestCase):
             self.assertEqual(pane.status(), "idle")
             self.assertEqual(pane.completion, "idle")
 
+    def test_app_hc_read_failure_does_not_emit_done_via_app_quiet(self):
+        # A failed App read is not an empty screen. app_quiet must not report
+        # idle for that tick, and a held working banner still counts. A later
+        # successful empty read may report idle. That hook word is not a release.
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        hook.update(path, lambda state: state.update({"busy": {}, "grace_until": 0, "reported": "working"}))
+        banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
+        pending = [None, banner, None, ""]
+        reports = []
+        releases = []
+        pane_reads = {"n": 0}
+        clock = {"now": 1000.0}
+
+        def hc_screen():
+            clock["now"] += 10
+            if not pending:
+                raise SystemExit("once")
+            return pending.pop(0)
+
+        def view(text):
+            if "running" in (text or ""):
+                return {"state": "working", "id": "workflow_banner_working", "ok": True}
+            return {"state": "idle", "id": None, "ok": True}
+
+        def pane_read(*_args, **_kwargs):
+            pane_reads["n"] += 1
+            raise subprocess.SubprocessError("pane read")
+
+        def report(*args, **_kwargs):
+            reports.append(args[2])
+            return True
+
+        def release(*_args, **_kwargs):
+            releases.append("release")
+            return True
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": os.path.join(directory, "hook.log"),
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "_hc_screen", hc_screen),
+            mock.patch.object(hook.subprocess, "check_output", pane_read),
+            mock.patch.object(hook, "process_table", lambda: {}),
+            mock.patch.object(hook, "herdr", lambda *_args, **_kwargs: True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "screen_view", view),
+            mock.patch.object(hook, "send_report", report),
+            mock.patch.object(hook, "release_authority", release),
+            mock.patch.object(hook.time, "time", lambda: clock["now"]),
+            mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
+            self.assertRaises(SystemExit),
+        ):
+            hook.watch_loop("t7", path)
+        self.assertEqual(reports[0], "working")
+        self.assertEqual(reports[-1], "idle")
+        self.assertEqual(reports.count("idle"), 1)
+        self.assertEqual(pane_reads["n"], 0)
+        self.assertEqual(releases, [])
+
+    def test_tui_inside_app_failed_read_is_not_app_quiet(self):
+        # A failed herdr pane read is "". With HC_TERMINAL_ID also set, that
+        # string must not count as an empty App screen. The TUI quiet rule
+        # still reports idle when the prompt is up, and that report does not
+        # write OSC or release. HC_TERMINAL_ID alone still skips a failed hc read.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-quiet-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: state.update({"busy": {}, "grace_until": 0, "reported": "working"}))
+        prompt = "ask a question or describe a task\n"
+        both = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w1:p1",
+            "HERDR_BIN_PATH": "",
+            "HERDR_SESSION": "",
+            "HERDR_KIRO_LOG": os.path.join(directory, "hook.log"),
+            "XDG_STATE_HOME": directory,
+        }
+        clock = {"now": 1000.0}
+        reads = {"n": 0}
+        hc = {"n": 0}
+        calls = []
+        osc = []
+
+        def pane_read(*_args, **_kwargs):
+            reads["n"] += 1
+            clock["now"] += 10
+            if reads["n"] > 4:
+                raise SystemExit("once")
+            if reads["n"] == 1:
+                raise subprocess.SubprocessError("pane read")
+            return prompt
+
+        def hc_screen():
+            hc["n"] += 1
+            raise AssertionError("hc read")
+
+        def fake_herdr(*args):
+            calls.append((reads["n"], tuple(args)))
+            return True
+
+        def capture(payload, _pids):
+            osc.append(payload)
+            return "/dev/pts/0"
+
+        def view(_text):
+            return {"state": "idle", "id": None, "ok": True}
+
+        def refuse_run(*_args, **_kwargs):
+            raise AssertionError("command")
+
+        with (
+            mock.patch.dict(os.environ, both, clear=False),
+            mock.patch.object(hook, "_hc_screen", hc_screen),
+            mock.patch.object(hook.subprocess, "check_output", pane_read),
+            mock.patch.object(hook.subprocess, "run", refuse_run),
+            mock.patch.object(hook, "process_table", lambda: {}),
+            mock.patch.object(hook, "herdr", fake_herdr),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "screen_view", view),
+            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
+            mock.patch.object(hook.time, "time", lambda: clock["now"]),
+            mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
+        ):
+            hook.watch_loop("w1:p1", path)
+        idle = [(tick, args[args.index("--state") + 1]) for tick, args in calls if args[0] == "report-agent"]
+        self.assertEqual(idle, [(2, "idle")])
+        self.assertEqual([args[1] for _tick, args in calls if args[0] == "report-agent"], ["w1:p1"])
+        self.assertFalse(any(args[0] == "release-agent" for _tick, args in calls))
+        self.assertEqual(osc, [])
+        self.assertEqual(hc["n"], 0)
+
+        app_dir = tempfile.mkdtemp(prefix="herdr-kiro-app-quiet-")
+        self.addCleanup(shutil.rmtree, app_dir, True)
+        app_path = os.path.join(app_dir, "t7.json")
+        hook.update(app_path, lambda state: state.update({"busy": {}, "grace_until": 0, "reported": "working"}))
+        app = dict(both)
+        app["HERDR_ENV"] = ""
+        app["HERDR_PANE_ID"] = ""
+        app["HERDR_KIRO_LOG"] = os.path.join(app_dir, "hook.log")
+        app["XDG_STATE_HOME"] = app_dir
+        calls.clear()
+        osc.clear()
+        hc["n"] = 0
+        clock["now"] = 1000.0
+
+        def hc_fail():
+            hc["n"] += 1
+            clock["now"] += 10
+            if hc["n"] > 1:
+                raise SystemExit("once")
+            return
+
+        def refuse_pane(*_args, **_kwargs):
+            raise AssertionError("pane read")
+
+        with (
+            mock.patch.dict(os.environ, app, clear=False),
+            mock.patch.object(hook, "_hc_screen", hc_fail),
+            mock.patch.object(hook.subprocess, "check_output", refuse_pane),
+            mock.patch.object(hook.subprocess, "run", refuse_run),
+            mock.patch.object(hook, "process_table", lambda: {}),
+            mock.patch.object(hook, "herdr", fake_herdr),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "screen_view", view),
+            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
+            mock.patch.object(hook.time, "time", lambda: clock["now"]),
+            mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
+            self.assertRaises(SystemExit),
+        ):
+            hook.watch_loop("t7", app_path)
+        self.assertEqual(calls, [])
+        self.assertEqual(osc, [])
+        self.assertGreaterEqual(hc["n"], 1)
+
 
 class _ScreenCompletion:
     """Background pane. Hook overrides fallback until release exposes it."""

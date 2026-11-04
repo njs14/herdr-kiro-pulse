@@ -325,6 +325,132 @@ class OscHookTests(unittest.TestCase):
             self.assertTrue(hook.send_report("w1:p1", path, "idle"))
         self.assertEqual([args[args.index("--state") + 1] for args in calls], ["idle"])
 
+    def test_tui_inside_the_app_skips_hc_read_and_osc(self):
+        # A TUI server inside an App terminal inherits HC_TERMINAL_ID.
+        # That pane reads itself and must not write OSC. HC_TERMINAL_ID
+        # alone still uses hc read, and a failed read is not an empty screen.
+        # Hook word idle stays state=done. An idle finish does not release.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-both-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: state.update({"reported": "working", "seq": 4, "generation": 1}))
+        tui_text = "ask a question or describe a task\n"
+        outer_text = "outer terminal\n"
+        both = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w1:p1",
+            "HERDR_BIN_PATH": "",
+            "HERDR_KIRO_LOG": os.path.join(directory, "hook.log"),
+            "XDG_STATE_HOME": directory,
+        }
+        app = dict(both)
+        app["HERDR_ENV"] = ""
+        app["HERDR_PANE_ID"] = ""
+        hc = {"n": 0}
+        reads = []
+        osc_writes = []
+        calls = []
+        views = []
+        herdr_ok = {"value": False}
+
+        def hc_screen():
+            hc["n"] += 1
+            return outer_text
+
+        def pane_read(argv, **_kwargs):
+            reads.append(list(argv))
+            return tui_text
+
+        def fake_herdr(*args):
+            calls.append(tuple(args))
+            return herdr_ok["value"]
+
+        def capture(payload, _pids):
+            osc_writes.append(payload)
+            return "/dev/pts/0"
+
+        def view(text):
+            views.append(text)
+            return {"state": "blocked", "id": "question_panel", "ok": True}
+
+        with (
+            mock.patch.dict(os.environ, both, clear=False),
+            mock.patch.object(hook, "_hc_screen", hc_screen),
+            mock.patch.object(hook.subprocess, "check_output", pane_read),
+        ):
+            self.assertEqual(hook.pane_text("w1:p1"), tui_text)
+        self.assertEqual(hc["n"], 0)
+        self.assertEqual(reads, [["herdr", "pane", "read", "w1:p1", "--source", "visible", "--lines", "80"]])
+
+        hc["n"] = 0
+        reads.clear()
+        with (
+            mock.patch.dict(os.environ, both, clear=False),
+            mock.patch.object(hook, "herdr", fake_herdr),
+            mock.patch.object(hook, "_hc_screen", hc_screen),
+            mock.patch.object(hook.subprocess, "check_output", pane_read),
+            mock.patch.object(hook, "screen_view", view),
+            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
+        ):
+            self.assertFalse(hook.send_report("w1:p1", path, "idle"))
+            self.assertFalse(hook.send_report("w1:p1", path, "blocked"))
+            herdr_ok["value"] = True
+            self.assertTrue(hook.send_report("w1:p1", path, "idle"))
+        self.assertEqual(osc_writes, [])
+        self.assertEqual(hc["n"], 0)
+        self.assertEqual(reads, [])
+        self.assertEqual(views, [])
+        self.assertEqual([row[0] for row in calls], ["report-agent", "report-agent", "report-agent"])
+        self.assertEqual([row[1] for row in calls], ["w1:p1", "w1:p1", "w1:p1"])
+        self.assertEqual([row[row.index("--state") + 1] for row in calls], ["idle", "blocked", "idle"])
+        self.assertNotIn("release-agent", [row[0] for row in calls])
+
+        def hc_fail():
+            hc["n"] += 1
+            return
+
+        def hc_empty():
+            hc["n"] += 1
+            return ""
+
+        def refuse_pane(*_args, **_kwargs):
+            raise AssertionError("pane read")
+
+        hc["n"] = 0
+        with (
+            mock.patch.dict(os.environ, app, clear=False),
+            mock.patch.object(hook, "_hc_screen", hc_fail),
+            mock.patch.object(hook.subprocess, "check_output", refuse_pane),
+        ):
+            self.assertIsNone(hook.pane_text("t7"))
+        self.assertEqual(hc["n"], 1)
+
+        hc["n"] = 0
+        with (
+            mock.patch.dict(os.environ, app, clear=False),
+            mock.patch.object(hook, "_hc_screen", hc_empty),
+            mock.patch.object(hook.subprocess, "check_output", refuse_pane),
+        ):
+            self.assertEqual(hook.pane_text("t7"), "")
+        self.assertEqual(hc["n"], 1)
+
+        calls.clear()
+        osc_writes.clear()
+        herdr_ok["value"] = True
+        with (
+            mock.patch.dict(os.environ, app, clear=False),
+            mock.patch.object(hook, "herdr", fake_herdr),
+            mock.patch.object(hook, "_hc_screen", hc_fail),
+            mock.patch.object(hook.subprocess, "check_output", refuse_pane),
+            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
+        ):
+            self.assertTrue(hook.send_report("t7", path, "idle"))
+            self.assertTrue(hook.finish_if_unchanged("t7", path, {"generation": 1, "busy": {}}, "idle"))
+        self.assertEqual(osc_writes, [b"\x1b]7501;state=done:app=kiro\x1b\\"])
+        self.assertEqual([row[row.index("--state") + 1] for row in calls if row[0] == "report-agent"], ["idle"])
+        self.assertFalse(any(row[0] == "release-agent" for row in calls))
+
     def test_a_second_idle_report_stays_done(self):
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
