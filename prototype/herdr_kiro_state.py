@@ -503,6 +503,61 @@ def _report_pids(path: str) -> list:
     return pids
 
 
+# Device from the last write_to_pane that landed while an owner was alive.
+# A reaped pid has no /proc/<pid>/fd, and this process has no controlling tty.
+_pane_tty = ""
+
+
+def _owner_still_alive(path: str) -> bool:
+    """True when the state file still names an owner pid that has not been reaped."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.loads(handle.read() or "{}")
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    owners = loaded.get("owners") or {}
+    started = loaded.get("owner_started") or {}
+    if not isinstance(owners, dict):
+        return False
+    if not isinstance(started, dict):
+        started = {}
+    for key, owner in owners.items():
+        try:
+            pid = int(owner)
+        except (TypeError, ValueError):
+            continue
+        if pid > 1 and not owner_is_dead(pid, started.get(key) or ""):
+            return True
+    return False
+
+
+def _remember_pane_tty(path: str, device: str) -> None:
+    global _pane_tty
+    if device and _owner_still_alive(path):
+        _pane_tty = device
+
+
+def _write_saved_tty() -> bool:
+    """Write idle's wire state=done to the device remembered from a live report."""
+    device = _pane_tty
+    if not device:
+        return False
+    fields = herdr_kiro_osc.fields_for("idle")
+    if not fields:
+        return False
+    try:
+        payload = herdr_kiro_osc.encode(fields)
+    except ValueError:
+        log("refusing osc")
+        return False
+    if herdr_kiro_osc._write_path(device, device, payload):
+        log(f"osc {fields['state']} via {device}")
+        return True
+    return False
+
+
 def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
     """Write one App report. Unknown is not a protocol state, so it is a no-op."""
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
@@ -515,6 +570,7 @@ def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
         return False
     written = herdr_kiro_osc.write_to_pane(payload, _report_pids(path))
     if written:
+        _remember_pane_tty(path, written)
         log(f"osc {fields['state']} via {written}")
         return True
     log(f"osc missed {fields['state']}")
@@ -1697,6 +1753,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
+    exit_osc = {"ok": True}
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
@@ -1709,7 +1766,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
             current["retiring"] = False
             return
         if reason != "idle" and in_app():
-            emit_osc(path, "idle")
+            exit_osc["ok"] = emit_osc(path, "idle") or _write_saved_tty()
         decision["ok"] = release_if_current(current, generation, keys)
 
     update(path, apply)
@@ -1734,6 +1791,9 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     # after that idle drops done on herdr 0.9.5. Owner exit still releases.
     if reason != "idle":
         release_authority(pane, path)
+    if not exit_osc["ok"]:
+        log("watcher exit osc missed")
+        return False
     clear_watcher(path)
     log("watcher exit " + reason)
     return True

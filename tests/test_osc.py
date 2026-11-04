@@ -402,6 +402,73 @@ class AppExitOscTests(unittest.TestCase):
             self.assertEqual(json.load(handle)["watcher"], 0)
 
 
+class ReapedExitTests(unittest.TestCase):
+    def test_reaped_owner_exit_writes_done_to_the_tty_from_the_live_report(self):
+        # The watcher calls this after the pid is gone. write_to_pane returns
+        # "" because /proc/<pid>/fd is gone. The device from the last live
+        # report still accepts state=done. No process is spawned.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-dead-tty-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        device = "/dev/pts/7"
+        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        delivered = []
+        gone = {"value": False}
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["generation"] = 3
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": 4242}
+            state["owner_started"] = {"sess": "alive"}
+            state["chat_pid"] = 0
+            state["reported"] = "working"
+            state["seq"] = 4
+
+        snap = {"ppid": 1, "lstart": "alive", "comm": "kiro-cli"}
+        with mock.patch.object(hook, "process_snapshot", lambda _pid: snap):
+            hook.update(path, seed)
+
+        def write_to_pane(_payload, pids):
+            if gone["value"]:
+                return ""
+            if 4242 in pids:
+                return device
+            return ""
+
+        def write_path(_open_path, dev, payload):
+            if dev == device and payload == done:
+                delivered.append(bytes(payload))
+                return True
+            return False
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("side-effecting command")
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.object(hook, "herdr", lambda *_args, **_kwargs: True),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(osc, "write_to_pane", write_to_pane),
+            mock.patch.object(osc, "_write_path", write_path),
+            mock.patch.object(hook.subprocess, "run", refuse),
+            mock.patch.object(hook.subprocess, "check_output", refuse),
+            mock.patch.object(hook.subprocess, "Popen", refuse),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            self.assertTrue(hook.send_report("t7", path, "working"))
+            gone["value"] = True
+            busy = {"sess": time.time()}
+            ok = hook.finish_if_unchanged("t7", path, {"generation": 3, "busy": busy}, "owner exit")
+        self.assertTrue(ok)
+        self.assertEqual(delivered, [done])
+
+
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and
 # rank() lines 133-136. The painted section is this rank. herdr-app ls is
 # Model::status, which is already idle once the turn has been seen.
