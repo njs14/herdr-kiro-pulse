@@ -1380,7 +1380,7 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(view["id"], "live_prompt_idle")
         self.assertFalse(os.path.exists(seen["path"]))
 
-    def test_hires_start_is_finer_than_a_second(self):
+    def test_watcher_identity_start_is_hires_or_tagged_seconds(self):
         hook.begin_tick()
         ident = hook.watcher_identity(os.getpid())
         self.assertIsNotNone(ident)

@@ -1254,9 +1254,9 @@ class ReapedExitTests(unittest.TestCase):
         self.assertLess(hook._pane_fd, 0)
 
     def test_same_second_reuse_does_not_receive_the_exit_write(self):
-        # owner_started is whole-second lstart, so a pid reused in that same
-        # second still matches. The pid file uses hires_start. The exit write
-        # has to use that identity, and this tty must stay empty.
+        # owner_started is whole-second lstart. owner_ident is sec: plus a
+        # string that is not this process. That token is not proof, so the
+        # exit write does not reach this tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-same-second-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1381,9 +1381,8 @@ class ReapedExitTests(unittest.TestCase):
 
     def test_same_second_lstart_does_not_receive_status(self):
         # owner_started matches this pid's whole-second lstart and owner_ident
-        # is empty. That pid stays the owner today, and the watch loop writes
-        # its tty. send_report is the real function. Neither state=done nor
-        # state=working may land there.
+        # is empty. That is not a proven owner. send_report is the real
+        # function. Neither state=done nor state=working may land on this tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-lstart-status-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1421,8 +1420,8 @@ class ReapedExitTests(unittest.TestCase):
         self.assertEqual(got, b"")
 
     def test_same_second_chat_lstart_does_not_receive_status(self):
-        # chat_started is that same whole-second lstart. The watch loop treats
-        # the pid as the owner and emit_osc writes its tty.
+        # chat_started is that same whole-second lstart and chat_ident is empty.
+        # That is not a proven owner, so emit_osc does not write this tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-chat-lstart-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")

@@ -306,9 +306,9 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     if not started:
         return
     state["owner_started"][key] = started
-    # Whole-second lstart matches a pid reused in that same second. The pid
-    # file stores hires_start. A sec: token is that one-second value, so it
-    # is not this owner. A later event must not leave one in place.
+    # Whole-second lstart matches a pid reused in that same second. owner_ident
+    # keeps hires_start only when that token is finer than one second. A sec:
+    # token is that one-second value, so it is not this owner.
     ident = hires_start(int(owner))
     idents = state.get("owner_ident")
     if not isinstance(idents, dict):
@@ -553,12 +553,12 @@ def herdr(*args: str) -> bool:
 def _status_targets(path: str) -> tuple[list[int], list[int]]:
     """Pids a hires token identifies, and recorded pids the pane walk must skip.
 
-    The token is the one the pid file stores. An empty token does not identify
-    a live pid, and neither does sec: plus whole-second lstart. Working and
-    done both require a finer token. The walk has to stop at that pid, not
-    only leave it out of the explicit list: the next ancestor with a pty would
-    otherwise receive the status. When one record identifies the pid and
-    another does not, the match wins.
+    The token is owner_ident. An empty token does not identify a live pid, and
+    neither does sec: plus whole-second lstart. Working and done both require
+    a finer token. The walk has to stop at that pid, not only leave it out of
+    the explicit list: the next ancestor with a pty would otherwise receive
+    the status. When one record identifies the pid and another does not, the
+    match wins.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -632,11 +632,10 @@ def _open_held(open_path: str) -> int:
 def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
     """Dup the tty fd this owner still has open.
 
-    An empty hires token does not identify the owner. Do not hold that
-    process's tty. Whole-second lstart still matches a pid reused in that
-    same second, so the hold uses the token the pid file stores. The fd has
-    to be the named tty. Any other character device, including a replaced
-    fd 1, is closed.
+    An empty token does not identify the owner. sec: plus whole-second lstart
+    matches a pid reused in that same second, so it is not proof and this
+    function does not hold that tty. The fd has to be the named tty. Any
+    other character device, including a replaced fd 1, is closed.
     """
     global _pane_fd, _held_ident
     del started
@@ -1928,8 +1927,9 @@ def write_pidfile(state_file: str, pid: int, started: str) -> None:
     os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(directory, DIR_MODE)
-    # `started` stays on the state record as whole-second lstart. The pid file
-    # stores a finer token so a pid reused in that same second does not match.
+    # The pid file stores hires_start. A finer token does not match a pid reused
+    # in that same second. Where /proc is absent, the token is sec: plus
+    # whole-second lstart, and a same-second reuse matches it.
     del started
     token = hires_start(pid)
     snap = process_snapshot(pid)
