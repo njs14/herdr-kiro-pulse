@@ -441,15 +441,21 @@ class ReapedExitTests(unittest.TestCase):
     def test_missed_saved_write_keeps_owners_and_the_watcher(self):
         # A failed exit write must not drop the owner, call release-agent, or
         # leave this watcher while its pid is still in the state file.
+        # A reaped pid is absent from the process table and kill returns ESRCH.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-miss-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
-        snap = self._seed_owner(path)
+        self._seed_owner(path)
         stolen = 42424242
         waits = {"n": 0}
         during = {}
         calls = []
         real_kill = hook.os.kill
+
+        def reaped(pid):
+            if int(pid) == 4242:
+                return None
+            return {"ppid": 1, "lstart": "alive", "comm": "kiro-cli"}
 
         def fake_kill(pid, sig):
             if int(pid) in (4242, stolen):
@@ -483,7 +489,7 @@ class ReapedExitTests(unittest.TestCase):
             "HERDR_KIRO_LOG": path + ".log",
         }
         with (
-            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "process_snapshot", reaped),
             mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
             mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),

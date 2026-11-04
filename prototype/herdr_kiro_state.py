@@ -183,7 +183,7 @@ def fresh_state() -> dict:
     }
 
 
-def normalize(state: dict, now: float) -> dict:
+def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> dict:
     raw_busy = state.get("busy")
     raw_owners = state.get("owners")
     raw_started = state.get("owner_started")
@@ -200,7 +200,9 @@ def normalize(state: dict, now: float) -> dict:
         except (TypeError, ValueError):
             continue
         key = str(session)
-        if owner_is_dead(owners.get(key), owner_started.get(key)):
+        # A missed App exit write still has to name this pid. The tick that
+        # notices the reap runs before that write, so this pass can keep it.
+        if not retain_dead_owner and owner_is_dead(owners.get(key), owner_started.get(key)):
             dropped_dead = True
             continue
         if now - seen < STALE_SECS:
@@ -409,7 +411,7 @@ def write_seq_floor(path: str, seq: int) -> None:
         handle.write(str(seq))
 
 
-def update(path: str, fn):
+def update(path: str, fn, *, retain_dead_owner: bool = False):
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
@@ -424,7 +426,7 @@ def update(path: str, fn):
         if not isinstance(loaded, dict):
             loaded = fresh_state()
         now = time.time()
-        state = normalize(loaded, now)
+        state = normalize(loaded, now, retain_dead_owner=retain_dead_owner)
         floor = read_seq_floor(path)
         if state["seq"] < floor:
             state["seq"] = floor
@@ -433,7 +435,7 @@ def update(path: str, fn):
             state["seq"] = int(time.time())
         fn(state)
         died = bool(state.get("owners_died")) and not state.get("busy")
-        state = normalize(state, time.time())
+        state = normalize(state, time.time(), retain_dead_owner=retain_dead_owner)
         if died and not state["busy"]:
             state["owners_died"] = True
         if state["seq"] < floor:
@@ -1789,6 +1791,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
+    retain_owner = reason != "idle" and in_app()
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
@@ -1804,7 +1807,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
             return
         decision["ok"] = release_if_current(current, generation, keys)
 
-    update(path, apply)
+    update(path, apply, retain_dead_owner=retain_owner)
     if not decision["ok"]:
         return False
     still = {"ok": False}
@@ -1970,7 +1973,7 @@ def _watch_loop(pane: str, path: str) -> None:
         state["watcher"] = os.getpid()
         state["watcher_started"] = started
 
-    update(path, claim)
+    update(path, claim, retain_dead_owner=in_app())
     write_pidfile(path, os.getpid(), started)
     log(f"watcher loop pane={pane}")
     reported = None
@@ -1990,7 +1993,7 @@ def _watch_loop(pane: str, path: str) -> None:
         while True:
             owner_watch.wait(known_owners, TICK_SECS)
             begin_tick()
-            state = update(path, lambda _state: None)
+            state = update(path, lambda _state: None, retain_dead_owner=in_app())
             if slot_holder_gone(state):
                 log("watcher exit slot holder gone")
                 return
