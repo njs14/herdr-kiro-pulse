@@ -90,9 +90,9 @@ def write_pid(payload: bytes, pid: int) -> str:
 def write_to_pane(payload: bytes, pids: list[int], *, skip: list[int] | None = None) -> str:
     """Write payload to the first pane tty among pids, then this process and its parents.
 
-    `skip` holds recorded pids that a start token does not identify. An empty
-    token matches any live pid. Those pids are not written. The walk stops at
-    the first one, so a later ancestor's pty is not written either.
+    `skip` holds recorded pids that a start token does not identify. Those
+    pids are not written. The walk stops at the first one, so a later
+    ancestor's pty is not written either.
     """
     blocked: set[int] = set()
     for pid in skip or []:
