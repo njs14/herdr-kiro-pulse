@@ -582,7 +582,9 @@ def _status_targets(path: str) -> tuple[list[int], list[int]]:
 
 # Fd this process opened from /proc/<owner>/fd while that owner was alive.
 # The watcher opens it in this interpreter. The exit writes this fd.
+# The token is the identity that proved the owner when the fd was opened.
 _pane_fd = -1
+_held_ident = ""
 _HELD_FLAGS = (
     os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
     os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
@@ -607,11 +609,11 @@ def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
     to be the named tty. Any other character device, including a replaced
     fd 1, is closed.
     """
-    global _pane_fd
+    global _pane_fd, _held_ident
     del started
     # An empty token is not a mismatch of ``if ident and``. A ``sec:`` token
     # compares equal for a pid reused in that same second. Neither may hold.
-    if _pane_fd >= 0 or pid <= 1 or not fine_start(ident) or not alive(pid, ident):
+    if _pane_fd >= 0 or not identity_proven(pid, ident):
         return
     prefix = f"/proc/{pid}/fd/"
     for open_path, named in herdr_kiro_osc._tty_opens(pid):
@@ -638,16 +640,124 @@ def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
             os.close(fd)
             continue
         _pane_fd = fd
+        _held_ident = ident
         return
 
 
 def _close_held_fd() -> None:
-    global _pane_fd
+    global _pane_fd, _held_ident
     fd = _pane_fd
     _pane_fd = -1
+    _held_ident = ""
     if fd >= 0:
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def identity_proven(pid: int, token: object) -> bool:
+    """True when `token` is finer than this pid's whole-second start and names it.
+
+    An empty token does not prove the pid. ``sec:`` plus lstart is that
+    whole-second start, so it does not prove the pid either.
+    """
+    if not isinstance(token, str) or not fine_start(token):
+        return False
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 1:
+        return False
+    snap = process_snapshot(number)
+    if snap and not snap.get("error"):
+        started = snap.get("lstart") or ""
+        if started and (token == started or token == "sec:" + started):
+            return False
+    return alive(number, token)
+
+
+def _recorded_identities(path: str) -> list[tuple[int, str]]:
+    """Owner and chat pids with the token currently stored for each."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.loads(handle.read() or "{}")
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    found: list[tuple[int, str]] = []
+    owners = state.get("owners") or {}
+    raw_idents = state.get("owner_ident")
+    idents = raw_idents if isinstance(raw_idents, dict) else {}
+    if isinstance(owners, dict):
+        for key, value in owners.items():
+            try:
+                pid = int(value)
+            except (TypeError, ValueError):
+                continue
+            raw = idents.get(key) or ""
+            token = raw if isinstance(raw, str) else ""
+            if pid > 1:
+                found.append((pid, token))
+    try:
+        chat = int(state.get("chat_pid") or 0)
+    except (TypeError, ValueError):
+        chat = 0
+    raw_chat = state.get("chat_ident") or ""
+    chat_token = raw_chat if isinstance(raw_chat, str) else ""
+    if chat > 1:
+        found.append((chat, chat_token))
+    return found
+
+
+def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id: str = "") -> bool:
+    """Write state=working or state=done for one proven owner.
+
+    This is the only write of those two states. The target is `pid`, or the
+    fd opened for that pid while the token proved it. A process whose token
+    is missing or only whole-second is not eligible, and dropping its row
+    does not make some other process eligible.
+    """
+    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    if fields is None or fields.get("state") not in ("working", "done"):
+        return False
+    # A held fd was opened only after identity_proven succeeded. The process
+    # may already be gone, so the stored token is the proof.
+    proven = fine_start(token) if held_fd >= 0 else identity_proven(pid, token)
+    if not proven:
+        return False
+    try:
+        payload = herdr_kiro_osc.encode(fields)
+    except ValueError:
+        log("refusing osc")
+        return False
+    if held_fd >= 0:
+        try:
+            herdr_kiro_osc._write_all(held_fd, payload)
+        except OSError:
+            log("osc missed done")
+            return False
+        log("osc done via held")
+        return True
+    device = herdr_kiro_osc.write_pid(payload, pid)
+    if not device:
+        return False
+    log(f"osc {fields['state']} via {device}")
+    return True
+
+
+def _paint_proven(path: str, kind: str, rule_id: str = "") -> bool:
+    """Paint each recorded pid whose token proves it. Paint nothing else."""
+    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    if fields is None or fields.get("state") not in ("working", "done"):
+        return False
+    painted = False
+    for pid, token in _recorded_identities(path):
+        if paint_status(kind, pid, token, rule_id=rule_id):
+            painted = True
+    if not painted:
+        log(f"osc missed {fields['state']}")
+    return painted
 
 
 def _write_held_fd() -> bool:
@@ -655,14 +765,7 @@ def _write_held_fd() -> bool:
     fd = _pane_fd
     if fd < 0:
         return False
-    payload = herdr_kiro_osc.encode(herdr_kiro_osc.fields_for("idle"))
-    try:
-        herdr_kiro_osc._write_all(fd, payload)
-    except OSError:
-        log("osc missed done")
-        return False
-    log("osc done via held")
-    return True
+    return paint_status("idle", 0, _held_ident, held_fd=fd)
 
 
 def _watcher_still_us(path: str) -> bool:
@@ -689,6 +792,8 @@ def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None:
         return True
+    if fields.get("state") in ("working", "done"):
+        return _paint_proven(path, kind, rule_id)
     try:
         payload = herdr_kiro_osc.encode(fields)
     except ValueError:
