@@ -72,8 +72,8 @@ def _read_pidfile(path):
     return int(text)
 
 
-def _kill_pidfiles(result):
-    for suffix in (".watch", ".hook", ".owner"):
+def _kill_pidfiles(result, suffixes=(".watch", ".hook", ".owner")):
+    for suffix in suffixes:
         pid = _read_pidfile(result + suffix)
         if pid > 1:
             with contextlib.suppress(OSError):
@@ -641,7 +641,7 @@ class ReapedExitTests(unittest.TestCase):
             [2, {"sess": 4242}, os.getpid(), []],
         )
 
-    def _deliver_reaped(self, path, snap, master, slave, slave_name, *, forget_hook):
+    def _deliver_reaped(self, path, snap, master, slave, slave_name):
         done = b"\x1b]7501;state=done:app=kiro\x1b\\"
         proc_link = "/proc/4242/fd/1"
         phase = {"dead": False, "watch": False, "n": 0}
@@ -649,7 +649,6 @@ class ReapedExitTests(unittest.TestCase):
         proc_opens = []
         real_open = os.open
         real_kill = hook.os.kill
-        real_send = hook.send_report
 
         def open_path(file, flags, *args, **kwargs):
             text = file.decode() if isinstance(file, bytes) else file
@@ -683,11 +682,6 @@ class ReapedExitTests(unittest.TestCase):
                 return ""
             return slave_name
 
-        def send_report(*args, **kwargs):
-            if phase["watch"]:
-                return True
-            return real_send(*args, **kwargs)
-
         def refuse(*_args, **_kwargs):
             raise AssertionError("side-effecting command")
 
@@ -700,7 +694,7 @@ class ReapedExitTests(unittest.TestCase):
         with (
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "herdr", lambda *_args: True),
-            mock.patch.object(hook, "send_report", send_report),
+            mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
             mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
             mock.patch.object(hook, "pane_text", lambda _pane: ""),
@@ -715,12 +709,7 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook.subprocess, "Popen", refuse),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            if forget_hook:
-                self.assertTrue(hook.send_report("t7", path, "working"))
-                _remembered_tty("")
-                self._release_held_fd()
-            else:
-                _remembered_tty(slave_name)
+            _remembered_tty(slave_name)
             phase["watch"] = True
             hook._watch_loop("t7", path)
         return _read_ready(master, 1.0), device_opens, proc_opens, done
@@ -735,26 +724,7 @@ class ReapedExitTests(unittest.TestCase):
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
         self.addCleanup(os.close, slave)
-        got, device_opens, proc_opens, done = self._deliver_reaped(
-            path, snap, master, slave, os.ttyname(slave), forget_hook=False
-        )
-        self.assertEqual(device_opens, [])
-        self.assertGreaterEqual(len(proc_opens), 1)
-        self.assertIn(done, got)
-
-    def test_watcher_writes_a_fd_it_opened_after_the_hook_returns(self):
-        # send_report remembers a device in this process, then returns. The
-        # watcher is another interpreter and does not inherit that global.
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-split-")
-        self.addCleanup(shutil.rmtree, directory, True)
-        path = os.path.join(directory, "t7.json")
-        snap = self._seed_owner(path)
-        master, slave = os.openpty()
-        self.addCleanup(os.close, master)
-        self.addCleanup(os.close, slave)
-        got, device_opens, proc_opens, done = self._deliver_reaped(
-            path, snap, master, slave, os.ttyname(slave), forget_hook=True
-        )
+        got, device_opens, proc_opens, done = self._deliver_reaped(path, snap, master, slave, os.ttyname(slave))
         self.assertEqual(device_opens, [])
         self.assertGreaterEqual(len(proc_opens), 1)
         self.assertIn(done, got)
@@ -930,6 +900,8 @@ class ReapedExitTests(unittest.TestCase):
         path = os.path.join(directory, "t7.json")
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
+        # macOS drops unread pty output when the last slave fd closes.
+        self.addCleanup(os.close, slave)
         proc = subprocess.Popen(
             ["sleep", "30"],
             stdin=subprocess.DEVNULL,
@@ -937,22 +909,23 @@ class ReapedExitTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         self.addCleanup(_stop, proc)
-        os.close(slave)
+        stamp = time.time()
 
         def seed(state):
             state["watcher"] = os.getpid()
             state["generation"] = 3
-            state["busy"] = {"sess": time.time()}
+            state["busy"] = {"sess": stamp}
             state["owners"] = {"sess": proc.pid}
             state["owner_started"] = {"sess": ""}
             state["chat_pid"] = 0
             state["reported"] = "working"
             state["seq"] = 4
 
+        # A warm ps cache would drop this live pid before the hold runs.
+        hook.begin_tick()
         hook.update(path, seed)
         stolen = 42424242
         waits = {"n": 0}
-        seen = {}
         real_kill = hook.os.kill
 
         def fake_kill(pid, sig):
@@ -963,7 +936,13 @@ class ReapedExitTests(unittest.TestCase):
         def fake_wait(_self, _pids, _timeout):
             waits["n"] += 1
             if waits["n"] == 2:
-                seen["fd"] = hook._pane_fd
+                # The first iteration already tried to hold. This is the exit write.
+                hook.finish_if_unchanged(
+                    "t7",
+                    path,
+                    {"generation": 3, "busy": {"sess": stamp}},
+                    "owner exit",
+                )
 
                 def steal(state):
                     state["watcher"] = stolen
@@ -991,7 +970,10 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.dict(os.environ, env, clear=False),
         ):
             hook._watch_loop("t7", path)
-        self.assertEqual([seen.get("fd", 0), _read_ready(master, 0.2)], [-1, b""])
+        got = _read_ready(master, 0.3)
+        self.assertNotIn(b"\x1b]7501;state=done:app=kiro\x1b\\", got)
+        self.assertNotIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got)
+        self.assertEqual(got, b"")
 
     def test_empty_owner_started_does_not_receive_a_status_write(self):
         # send_report stays real. An empty start token is not that live pid,
@@ -1022,6 +1004,8 @@ class ReapedExitTests(unittest.TestCase):
             state["reported"] = None
             state["seq"] = 4
 
+        # A warm ps cache treats this new sleep as dead and the write never runs.
+        hook.begin_tick()
         hook.update(path, seed)
         stolen = 42424242
         waits = {"n": 0}
@@ -1251,6 +1235,220 @@ class AncestorReportTests(unittest.TestCase):
         self.assertNotIn(b"state=done", got)
         self.assertIn("osc working via ", logged)
         self.assertIn(device, logged)
+
+
+# The recorded pid sits between the setsid watcher and a parent that has its
+# own pty. A second pty is on the grandparent. send_report stays real.
+_ABOVE_DRIVER = """\
+import os
+import subprocess
+import sys
+import time
+import traceback
+
+mode = sys.argv[1]
+proto = sys.argv[2]
+path = sys.argv[3]
+result = sys.argv[4]
+os.environ["HC_TERMINAL_ID"] = "t7"
+os.environ["HERDR_ENV"] = ""
+os.environ["HERDR_PANE_ID"] = ""
+os.environ["HERDR_KIRO_LOG"] = path + ".log"
+os.environ["HERDR_BIN_PATH"] = os.path.join(os.path.dirname(path), "missing-herdr")
+os.environ["XDG_STATE_HOME"] = os.path.dirname(path)
+
+
+def _pidfile(name):
+    with open(result + "." + name, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+
+
+def _wait_go():
+    go = result + ".go"
+    deadline = time.time() + 15
+    while time.time() < deadline and not os.path.exists(go):
+        time.sleep(0.02)
+
+
+if mode == "grand":
+    _pidfile("grand")
+    parent_fd = int(sys.argv[5])
+    mid_fd = int(sys.argv[6])
+    os.set_inheritable(parent_fd, True)
+    os.set_inheritable(mid_fd, True)
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "parent", proto, path, result, str(mid_fd)],
+        stdin=subprocess.DEVNULL,
+        stdout=parent_fd,
+        stderr=subprocess.DEVNULL,
+        pass_fds=(mid_fd,),
+    )
+    raise SystemExit(proc.wait(timeout=20))
+
+if mode == "parent":
+    _pidfile("parent")
+    mid_fd = int(sys.argv[5])
+    os.set_inheritable(mid_fd, True)
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "mid", proto, path, result],
+        stdin=subprocess.DEVNULL,
+        stdout=mid_fd,
+        stderr=subprocess.DEVNULL,
+    )
+    raise SystemExit(proc.wait(timeout=20))
+
+if mode == "mid":
+    _pidfile("mid")
+    _wait_go()
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "hook", proto, path, result],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    raise SystemExit(proc.wait(timeout=20))
+
+if mode == "hook":
+    _pidfile("hook")
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "watch", proto, path, result],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(result + ".watch", "w", encoding="utf-8") as handle:
+        handle.write(str(proc.pid))
+    raise SystemExit(proc.wait(timeout=20))
+
+sys.path.insert(0, proto)
+try:
+    import herdr_kiro_state as hook
+
+    hook._watch_loop("t7", path)
+except Exception:
+    with open(path + ".crash", "w", encoding="utf-8") as handle:
+        handle.write(traceback.format_exc())
+    raise
+"""
+
+_ABOVE_PIDS = (".watch", ".hook", ".mid", ".parent", ".grand")
+
+
+class AboveSkippedPidTests(unittest.TestCase):
+    def _report(self, kind):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-above-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        result = os.path.join(directory, "result")
+        driver = os.path.join(directory, "driver.py")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(_ABOVE_DRIVER)
+        grand_master, grand_slave = os.openpty()
+        parent_master, parent_slave = os.openpty()
+        mid_master, mid_slave = os.openpty()
+        for fd in (grand_master, grand_slave, parent_master, parent_slave, mid_master, mid_slave):
+            self.addCleanup(os.close, fd)
+        err_path = os.path.join(directory, "grand.err")
+        proto = os.path.dirname(os.path.abspath(hook.__file__))
+        with open(err_path, "w", encoding="utf-8") as err:
+            proc = subprocess.Popen(
+                [sys.executable, driver, "grand", proto, path, result, str(parent_slave), str(mid_slave)],
+                stdin=subprocess.DEVNULL,
+                stdout=grand_slave,
+                stderr=err,
+                pass_fds=(parent_slave, mid_slave),
+            )
+        self.addCleanup(_stop, proc)
+        self.addCleanup(_kill_pidfiles, result, _ABOVE_PIDS)
+        mid_pid = 0
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            mid_pid = _read_pidfile(result + ".mid")
+            if mid_pid > 1:
+                break
+            time.sleep(0.02)
+        self.assertGreater(mid_pid, 1)
+        token = _live_start(mid_pid) if kind == "match" else ""
+        hook.begin_tick()
+
+        def seed(state):
+            state["watcher"] = 0
+            state["generation"] = 3
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {} if kind == "chat" else {"sess": mid_pid}
+            state["owner_started"] = {} if kind != "match" else {"sess": token}
+            state["chat_pid"] = mid_pid if kind == "chat" else 0
+            state["chat_started"] = ""
+            state["reported"] = None
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        with open(result + ".go", "w", encoding="utf-8") as handle:
+            handle.write("go\n")
+        log_path = path + ".log"
+        crash_path = path + ".crash"
+        logged = ""
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if os.path.exists(crash_path):
+                with open(crash_path, encoding="utf-8") as handle:
+                    self.fail(handle.read())
+            if os.path.exists(log_path):
+                with open(log_path, encoding="utf-8") as handle:
+                    logged = handle.read()
+            if "osc missed " in logged or "osc working via" in logged or "osc done" in logged:
+                break
+            time.sleep(0.05)
+        else:
+            detail = logged
+            if os.path.exists(err_path):
+                with open(err_path, encoding="utf-8") as handle:
+                    detail = detail + handle.read()
+            self.fail("no osc attempt\n" + detail)
+        parent_got = _read_ready(parent_master, 0.3)
+        grand_got = _read_ready(grand_master, 0.3)
+        mid_got = _read_ready(mid_master, 0.3)
+
+        def steal(state):
+            state["watcher"] = 42424242
+
+        hook.update(path, steal)
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            _kill_pidfiles(result, _ABOVE_PIDS)
+            proc.kill()
+            proc.wait(timeout=5)
+        return parent_got, grand_got, mid_got, logged, os.ttyname(parent_slave), os.ttyname(mid_slave)
+
+    def test_empty_owner_token_does_not_write_the_parent_pty(self):
+        # The recorded pid is in the middle. Its parent holds a different pty.
+        # An empty owner_started must not paint that parent, or the grandparent.
+        parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev = self._report("owner")
+        self.assertEqual(parent_got, b"", logged)
+        self.assertEqual(grand_got, b"", logged)
+        self.assertEqual(mid_got, b"", logged)
+        self.assertIn("osc missed working", logged)
+        self.assertNotIn(parent_dev, logged)
+
+    def test_empty_chat_token_does_not_write_the_parent_pty(self):
+        # No owner row. chat_pid is that middle process and chat_started is empty.
+        parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev = self._report("chat")
+        self.assertEqual(parent_got, b"", logged)
+        self.assertEqual(grand_got, b"", logged)
+        self.assertEqual(mid_got, b"", logged)
+        self.assertIn("osc missed working", logged)
+        self.assertNotIn(parent_dev, logged)
+
+    def test_matching_token_writes_its_pty_not_the_parent(self):
+        # A matching start token still writes that pid's pty, and not the parent's.
+        parent_got, grand_got, mid_got, logged, parent_dev, mid_dev = self._report("match")
+        self.assertIn(b"\x1b]7501;state=working:app=kiro\x1b\\", mid_got, logged)
+        self.assertEqual(parent_got, b"", logged)
+        self.assertEqual(grand_got, b"", logged)
+        self.assertIn(mid_dev, logged)
+        self.assertNotIn(parent_dev, logged)
 
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and

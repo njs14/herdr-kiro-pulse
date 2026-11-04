@@ -485,10 +485,10 @@ def herdr(*args: str) -> bool:
 def _status_targets(path: str) -> tuple[list[int], list[int]]:
     """Pids a start token identifies, and recorded pids the pane walk must skip.
 
-    An empty token matches any live pid. Leaving that pid off the explicit list
-    is not enough: write_to_pane walks parents and writes the first tty, and the
-    spawning hook is still alive for the first report. Skip that pid in the walk
-    too. When one record identifies the pid and another does not, the match wins.
+    An empty token matches any live pid. The walk has to stop at that pid, not
+    only leave it out of the explicit list: the next ancestor with a pty would
+    otherwise receive the status. When one record identifies the pid and another
+    does not, the match wins.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -594,20 +594,13 @@ def _write_held_fd() -> bool:
     fd = _pane_fd
     if fd < 0:
         return False
-    fields = herdr_kiro_osc.fields_for("idle")
-    if not fields:
-        return False
-    try:
-        payload = herdr_kiro_osc.encode(fields)
-    except ValueError:
-        log("refusing osc")
-        return False
+    payload = herdr_kiro_osc.encode(herdr_kiro_osc.fields_for("idle"))
     try:
         herdr_kiro_osc._write_all(fd, payload)
     except OSError:
         log("osc missed done")
         return False
-    log(f"osc {fields['state']} via held")
+    log("osc done via held")
     return True
 
 
@@ -2022,7 +2015,6 @@ def _watch_loop(pane: str, path: str) -> None:
     known_owners = []
     known_outers = []
     chat_hits = 0
-    osc_missed = False
     gone_since = None
     gone_hits = 0
     try:
@@ -2071,9 +2063,7 @@ def _watch_loop(pane: str, path: str) -> None:
                 if not alive(pid, started):
                     continue
                 owner_alive = True
-                # An empty start token does not identify this process.
-                if started:
-                    _hold_live_owner(pid, started)
+                _hold_live_owner(pid, started)
                 break
             if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
                 owner_alive = True
@@ -2097,9 +2087,6 @@ def _watch_loop(pane: str, path: str) -> None:
                 if not _watcher_still_us(path):
                     log("watcher exit slot held")
                     return
-                if not osc_missed:
-                    log("watcher exit osc missed")
-                    osc_missed = True
                 time.sleep(TICK_SECS)
                 continue
             screen = pane_text(pane)
