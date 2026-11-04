@@ -373,9 +373,14 @@ class GraceTests(unittest.TestCase):
         def snap(_pid):
             return {"ppid": 1, "lstart": "NOW", "comm": "python"}
 
-        with mock.patch.object(hook, "process_snapshot", snap):
-            self.assertFalse(hook.alive(50, started="THEN"))
-            self.assertTrue(hook.alive(50, started="NOW"))
+        with (
+            mock.patch.object(hook, "process_snapshot", snap),
+            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
+        ):
+            self.assertFalse(hook.alive(50, started="sec:THEN"))
+            self.assertTrue(hook.alive(50, started="sec:NOW"))
+            self.assertFalse(hook.alive(50, started="NOW"))
+            self.assertFalse(hook.alive(50, started=""))
 
     def test_release_authority_reports_success(self):
         directory = tempfile.mkdtemp()
@@ -408,6 +413,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": holder.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 3
 
         hook.update(path, seed)
@@ -449,6 +455,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 1
 
         hook.update(path, seed)
@@ -497,6 +504,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 2
 
         hook.update(path, seed)
@@ -795,8 +803,13 @@ class GraceTests(unittest.TestCase):
 
     def test_a_live_process_with_init_as_parent_is_not_dead(self):
         snap = {"ppid": 1, "lstart": "then", "comm": "kiro-cli-chat"}
-        with mock.patch.object(hook, "process_snapshot", lambda _pid: snap):
-            self.assertFalse(hook.owner_is_dead(50, "then"))
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
+        ):
+            self.assertFalse(hook.owner_is_dead(50, "sec:then"))
+            self.assertTrue(hook.owner_is_dead(50, "then"))
+            self.assertFalse(hook.owner_is_dead(50, ""))
 
     def test_exit_prompt_text_does_not_release_a_live_owner(self):
         directory = tempfile.mkdtemp()
@@ -809,6 +822,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 1
 
         hook.update(path, seed)
@@ -865,12 +879,44 @@ class GraceTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
 
+    def test_later_busy_event_records_a_fine_token(self):
+        # The first event can see no start token. A later busy event for the
+        # session already in busy has to store a fine one. sec: plus lstart
+        # is not that token.
+        calls = {"n": 0}
+
+        def hires(_pid):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ""
+            return "100.000000"
+
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "hires_start", hires),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+        ):
+            state = hook.apply_event(
+                hook.fresh_state(),
+                "SessionStart",
+                "sess",
+                1.0,
+                owner=50,
+                owner_started="10",
+            )
+            self.assertEqual(state["owner_ident"], {})
+            self.assertEqual(state["owner_started"].get("sess"), "10")
+            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
+        self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
+
     def test_chat_pid_death_is_owner_exit_after_confirm(self):
         state = hook.fresh_state()
         state["owners"] = {"sess": 50}
         state["owner_started"] = {"sess": "outer"}
+        state["owner_ident"] = {"sess": "sec:outer"}
         state["chat_pid"] = 60
         state["chat_started"] = "chat"
+        state["chat_ident"] = "sec:chat"
 
         def snap(pid):
             if pid == 50:
@@ -879,6 +925,7 @@ class GraceTests(unittest.TestCase):
 
         with (
             mock.patch.object(hook, "process_snapshot", snap),
+            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
             mock.patch.object(hook, "chat_under", lambda _pid: None),
         ):
             kind, hits = hook.tracked_exit(state, 0)
@@ -899,6 +946,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 1
 
         hook.update(path, seed)
@@ -934,6 +982,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 4
 
         hook.update(path, seed)
@@ -998,6 +1047,7 @@ class GraceTests(unittest.TestCase):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_started"] = {"sess": ""}
+            state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 4
 
         hook.update(path, seed)
