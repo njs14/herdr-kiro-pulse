@@ -10,7 +10,7 @@ The idle prompt is the settled Kiro pane. `herdr agent get` and `herdr agent exp
 ## How to get to it (user POV)
 
 - Start `kiro-cli` in a herdr pane and wait until the prompt is sitting with no banner and no chooser.
-- On a Mac, start `kiro-cli chat --trust-workspace` in the throwaway workspace after the trust dialog is gone. CLI 3.0 starts that interactive chat on V3. Do not pass `--v3` or `--trust-all-tools`.
+- On a Mac, start `kiro-cli chat --trust-workspace` in the throwaway workspace after the trust dialog is gone. CLI 3.0 starts that interactive chat on V3. Do not pass `--trust-all-tools`.
 
 ## Driving it with verify-herdr-kiro
 

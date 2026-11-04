@@ -71,7 +71,7 @@ These three are CI checks. They do not need herdr or a Kiro key:
 - `uvx ruff format --check`
 - `uvx ty check`
 
-A live Mac run is still required for a real `kiro-cli`. It uses the same throwaway home and permissions file, starts `kiro-cli chat --trust-workspace` in the pane, and does not pass `--trust-all-tools` or `--v3`. CLI 3.0 starts that interactive chat on V3. The `ask` rule is what produces a real tool-approval dialog. `--trust-workspace` skips the trust dialog, so the trust drive on a Mac is a fresh workspace that has not been trusted yet, before that flag is used.
+A live Mac run is still required for a real `kiro-cli`. It uses the same throwaway home and permissions file, starts `kiro-cli chat --trust-workspace` in the pane, and does not pass `--trust-all-tools`. CLI 3.0 starts that interactive chat on V3. The `ask` rule is what produces a real tool-approval dialog. `--trust-workspace` skips the trust dialog, so the trust drive on a Mac is a fresh workspace that has not been trusted yet, before that flag is used.
 
 Stand-in steps a Mac run will not do:
 

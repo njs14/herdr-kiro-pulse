@@ -175,6 +175,7 @@ def fresh_state() -> dict:
         "grace_started": 0.0,
         "owners": {},
         "owner_started": {},
+        "owner_ident": {},
         "aggregate": 0,
         "generation": 0,
         "retiring": False,
@@ -188,12 +189,15 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
     raw_busy = state.get("busy")
     raw_owners = state.get("owners")
     raw_started = state.get("owner_started")
+    raw_ident = state.get("owner_ident")
     busy = raw_busy if isinstance(raw_busy, dict) else {}
     owners = raw_owners if isinstance(raw_owners, dict) else {}
     owner_started = raw_started if isinstance(raw_started, dict) else {}
+    owner_ident = raw_ident if isinstance(raw_ident, dict) else {}
     kept = {}
     kept_owners = {}
     kept_started = {}
+    kept_ident = {}
     dropped_dead = False
     for session, stamp in busy.items():
         try:
@@ -214,6 +218,8 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
                 kept_owners[key] = owners.get(key)
                 if owner_started.get(key):
                     kept_started[key] = owner_started.get(key)
+                if owner_ident.get(key):
+                    kept_ident[key] = owner_ident.get(key)
     try:
         seq = int(state.get("seq") or 0)
     except (TypeError, ValueError):
@@ -257,6 +263,7 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
         "grace_started": grace_started,
         "owners": kept_owners,
         "owner_started": kept_started,
+        "owner_ident": kept_ident,
         "aggregate": aggregate,
         "generation": int(state.get("generation") or 0),
         "retiring": bool(state.get("retiring")),
@@ -281,8 +288,19 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     if not owner:
         return
     state["owners"][key] = int(owner)
-    if started:
-        state["owner_started"][key] = started
+    if not started:
+        return
+    state["owner_started"][key] = started
+    # Whole-second lstart matches a pid reused in that same second. The pid
+    # file stores hires_start. The exit write uses this same token.
+    ident = hires_start(int(owner))
+    if not ident:
+        return
+    idents = state.get("owner_ident")
+    if not isinstance(idents, dict):
+        idents = {}
+        state["owner_ident"] = idents
+    idents[key] = ident
 
 
 def finish_if_idle(state: dict, now: float) -> None:
@@ -327,6 +345,7 @@ def apply_event(
                 nxt["busy"].pop(AGGREGATE, None)
                 nxt["owners"].pop(AGGREGATE, None)
                 nxt["owner_started"].pop(AGGREGATE, None)
+                nxt["owner_ident"].pop(AGGREGATE, None)
                 finish_if_idle(nxt, now)
             else:
                 nxt["busy"][AGGREGATE] = now
@@ -353,6 +372,7 @@ def apply_event(
             nxt["busy"].pop(session, None)
             nxt["owners"].pop(session, None)
             nxt["owner_started"].pop(session, None)
+            nxt["owner_ident"].pop(session, None)
         else:
             members = members_of(nxt["busy"], session)
             if members:
@@ -360,6 +380,7 @@ def apply_event(
                 nxt["busy"].pop(oldest, None)
                 nxt["owners"].pop(oldest, None)
                 nxt["owner_started"].pop(oldest, None)
+                nxt["owner_ident"].pop(oldest, None)
         if not nxt["busy"]:
             nxt["grace_until"] = now + SETTLE_SECS
             nxt["grace_started"] = now
@@ -553,18 +574,32 @@ def _open_held(open_path: str) -> int:
     return -1
 
 
-def _hold_live_owner(pid: int, started: str) -> None:
+def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
     """Dup the tty fd this owner still has open.
 
     An empty start token matches any live process at this pid, so it does
-    not identify the owner. Do not hold that process's tty.
+    not identify the owner. Do not hold that process's tty. A recorded
+    hires_start token has to match too: whole-second lstart still matches a
+    pid reused in that same second. The fd has to be the named tty. Any
+    other character device, including a replaced fd 1, is closed.
     """
     global _pane_fd
     if _pane_fd >= 0 or pid <= 1 or not started or not alive(pid, started):
         return
+    if ident and hires_start(pid) != ident:
+        return
     prefix = f"/proc/{pid}/fd/"
-    for open_path, _device in herdr_kiro_osc._tty_opens(pid):
+    for open_path, named in herdr_kiro_osc._tty_opens(pid):
         if not str(open_path).startswith(prefix):
+            continue
+        device = str(named)
+        if not herdr_kiro_osc._TTY.fullmatch(device):
+            continue
+        try:
+            expected = os.stat(device)
+        except OSError:
+            continue
+        if not stat.S_ISCHR(expected.st_mode):
             continue
         fd = _open_held(open_path)
         if fd < 0:
@@ -574,7 +609,7 @@ def _hold_live_owner(pid: int, started: str) -> None:
         except OSError:
             os.close(fd)
             continue
-        if not stat.S_ISCHR(info.st_mode):
+        if not stat.S_ISCHR(info.st_mode) or info.st_rdev != expected.st_rdev:
             os.close(fd)
             continue
         _pane_fd = fd
@@ -1825,7 +1860,11 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
-    retain_owner = reason != "idle" and in_app()
+    # A TUI pane that also has HC_TERMINAL_ID reads that pane. send_report
+    # already returns before emit_osc there, because those bytes land on the
+    # inner tty. The exit write follows that.
+    app_exit = reason != "idle" and in_app() and not in_tui()
+    retain_owner = app_exit
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
@@ -1839,7 +1878,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
             return
         # The held fd is the only exit write. Another tty is not success,
         # and there is no path open when this process holds no fd.
-        if reason != "idle" and in_app() and not _write_held_fd():
+        if app_exit and not _write_held_fd():
             return
         decision["ok"] = release_if_current(current, generation, keys)
 
@@ -2056,21 +2095,29 @@ def _watch_loop(pane: str, path: str) -> None:
             kind, chat_hits = tracked_exit(state, chat_hits)
             owner_alive = False
             started_by_pid = {}
+            ident_by_pid = {}
+            raw_ident = state.get("owner_ident")
+            idents = raw_ident if isinstance(raw_ident, dict) else {}
             for key, owner in (state.get("owners") or {}).items():
                 try:
-                    started_by_pid[int(owner)] = (state.get("owner_started") or {}).get(key) or ""
+                    pid_key = int(owner)
                 except (TypeError, ValueError):
                     continue
+                started_by_pid[pid_key] = (state.get("owner_started") or {}).get(key) or ""
+                ident_by_pid[pid_key] = idents.get(key) or ""
             for owner in (state.get("owners") or {}).values():
                 try:
                     pid = int(owner)
                 except (TypeError, ValueError):
                     continue
                 started = started_by_pid.get(pid) or ""
+                ident = ident_by_pid.get(pid) or ""
                 if not alive(pid, started):
                     continue
+                if ident and hires_start(pid) != ident:
+                    continue
                 owner_alive = True
-                _hold_live_owner(pid, started)
+                _hold_live_owner(pid, started, ident)
                 break
             if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
                 owner_alive = True

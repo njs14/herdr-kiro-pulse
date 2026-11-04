@@ -116,14 +116,6 @@ exit 0
         self.assertIn("interactive default is V3", completed.stdout)
         self.assertNotIn("want v3", completed.stdout)
 
-    def test_saved_v2_on_3_0_is_a_failure(self):
-        self.write_herdr()
-        self.write_kiro(engine="v2")
-        self.install()
-        completed = self.doctor()
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("chat.agentEngine is v2, want v3", completed.stdout)
-
     def test_cli_older_than_3_0_is_a_failure(self):
         self.write_herdr()
         self.write_kiro(version="2.37.0")

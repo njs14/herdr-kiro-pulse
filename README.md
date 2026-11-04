@@ -74,7 +74,7 @@ Kiro reads hooks when its process starts. After install:
 kiro-cli chat
 ```
 
-Kiro CLI 3.0 is the supported CLI. Interactive chat starts on V3 without `--v3`. A saved `chat.agentEngine` of `v2` still selects V2. `chat.enableWorkflows` has to be `true` for the workflow runs. Nothing in this package writes those settings, and nothing restarts a `kiro-cli` that is already running. Outside an App terminal (`HC_TERMINAL_ID`) and outside a TUI pane (`HERDR_ENV=1` and `HERDR_PANE_ID`) the hook exits without reporting.
+Kiro CLI 3.0 is the supported CLI. Interactive chat starts on V3. A saved `chat.agentEngine` of `v2` still selects V2. `chat.enableWorkflows` has to be `true` for the workflow runs. Nothing in this package writes those settings, and nothing restarts a `kiro-cli` that is already running. Outside an App terminal (`HC_TERMINAL_ID`) and outside a TUI pane (`HERDR_ENV=1` and `HERDR_PANE_ID`) the hook exits without reporting.
 
 ```bash
 ./doctor.sh

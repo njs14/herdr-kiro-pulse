@@ -4,7 +4,7 @@ The bundle includes `.git`. `git rev-parse HEAD` is the commit this tree was pac
 
 Do not print `KIRO_API_KEY`. Do not write it into logs.
 
-Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3 without `--v3`. A headless run that omits `--trust-all-tools` stays on V2. The approval check is interactive, so it does not pass `--v3` or `--trust-all-tools`. `harness/run_suite.py` keeps `--trust-all-tools` and does not pass `--v3`. `hc --json get` reports `app` `kiro-cli` on CLI 3.0. An older session still sends `app=kiro`. Both are this program. The tables further down were recorded on Kiro CLI 2.37.0.
+Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A headless run that omits `--trust-all-tools` stays on V2, so `harness/run_suite.py` keeps that flag. The approval check is interactive and does not pass `--trust-all-tools`. `hc --json get` reports `app` `kiro-cli` on CLI 3.0. An older session still sends `app=kiro`. Both are this program. The tables further down are records of earlier runs.
 
 ## What passing looks like
 

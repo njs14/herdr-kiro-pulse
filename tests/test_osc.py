@@ -976,6 +976,175 @@ class ReapedExitTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn(("release-agent",), [item[:1] for item in calls])
 
+    def test_tui_inside_app_does_not_write_the_exit_osc(self):
+        # HERDR_ENV and HC_TERMINAL_ID both survive into the watcher.
+        # Those exit bytes would land on the inner tty. A TUI pane must not
+        # get state=done from the owner-exit write.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-exit-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        hook._pane_fd = os.dup(slave)
+        stamp = time.time()
+        state = hook.fresh_state()
+        state["watcher"] = os.getpid()
+        state["generation"] = 3
+        state["busy"] = {"sess": stamp}
+        state["owners"] = {"sess": 4242}
+        state["owner_started"] = {"sess": "alive"}
+        state["seq"] = 4
+        self._write_state(path, state)
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "1",
+            "HERDR_PANE_ID": "w1:p1",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            ok = hook.finish_if_unchanged(
+                "t7",
+                path,
+                {"generation": 3, "busy": {"sess": stamp}},
+                "owner exit",
+            )
+        got = _read_ready(master, 0.3)
+        self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
+        self.assertEqual(got, b"")
+        self.assertTrue(ok)
+
+    def test_replaced_fd_is_not_the_held_tty(self):
+        # fstat of a character device is not enough. The held fd has to be
+        # the tty _tty_opens named. A replaced fd 1 must not get state=done.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-rdev-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        named_master, named_slave = os.openpty()
+        wrong_master, wrong_slave = os.openpty()
+        self.addCleanup(os.close, named_master)
+        self.addCleanup(os.close, named_slave)
+        self.addCleanup(os.close, wrong_master)
+        self.addCleanup(os.close, wrong_slave)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=named_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(_stop, proc)
+        hook.begin_tick()
+        snap = hook.process_snapshot(proc.pid)
+        lstart = (snap or {}).get("lstart") or ""
+        self.assertTrue(lstart)
+        named = os.ttyname(named_slave)
+
+        def opens(_pid):
+            yield f"/proc/{proc.pid}/fd/1", named
+
+        def open_held(_path):
+            return os.dup(wrong_slave)
+
+        with (
+            mock.patch.object(osc, "_tty_opens", opens),
+            mock.patch.object(hook, "_open_held", open_held),
+        ):
+            hook._hold_live_owner(proc.pid, lstart)
+            wrote = hook._write_held_fd()
+        wrong = _read_ready(wrong_master, 0.2)
+        named_got = _read_ready(named_master, 0.2)
+        self.assertFalse(wrote)
+        self.assertEqual(wrong, b"")
+        self.assertEqual(named_got, b"")
+        self.assertLess(hook._pane_fd, 0)
+
+    def test_same_second_reuse_does_not_receive_the_exit_write(self):
+        # owner_started is whole-second lstart, so a pid reused in that same
+        # second still matches. The pid file uses hires_start. The exit write
+        # has to use that identity, and this tty must stay empty.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-same-second-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(_stop, proc)
+        hook.begin_tick()
+        snap = hook.process_snapshot(proc.pid)
+        lstart = (snap or {}).get("lstart") or ""
+        self.assertTrue(lstart)
+        self.assertNotEqual(hook.hires_start(proc.pid), "sec:not-this-process")
+        stamp = time.time()
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["generation"] = 3
+            state["busy"] = {"sess": stamp}
+            state["owners"] = {"sess": proc.pid}
+            state["owner_started"] = {"sess": lstart}
+            state["owner_ident"] = {"sess": "sec:not-this-process"}
+            state["chat_pid"] = 0
+            state["reported"] = "working"
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        stolen = 42424242
+        waits = {"n": 0}
+        real_kill = hook.os.kill
+
+        def fake_kill(pid, sig):
+            if int(pid) == stolen:
+                raise OSError(errno.ESRCH, "gone")
+            return real_kill(pid, sig)
+
+        def fake_wait(_self, _pids, _timeout):
+            waits["n"] += 1
+            if waits["n"] == 2:
+                hook.finish_if_unchanged(
+                    "t7",
+                    path,
+                    {"generation": 3, "busy": {"sess": stamp}},
+                    "owner exit",
+                )
+
+                def steal(state):
+                    state["watcher"] = stolen
+
+                hook.update(path, steal)
+            if waits["n"] > 3:
+                raise AssertionError("watcher did not leave after the slot moved")
+            return False
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
+            mock.patch.object(hook, "pane_text", lambda _pane: ""),
+            mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook.os, "kill", fake_kill),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            hook._watch_loop("t7", path)
+        got = _read_ready(master, 0.3)
+        self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
+        self.assertEqual(got, b"")
+
     def test_setsid_watcher_does_not_write_the_parent_pty(self):
         # A setsid watcher with stdio on /dev/null still has a parent pty.
         # The exit must not paint that parent. The held fd is the write.
