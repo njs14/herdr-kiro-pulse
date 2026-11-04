@@ -2034,8 +2034,9 @@ def _watch_loop(pane: str, path: str) -> None:
             # The App has no herdr pane to explain. An empty read still ends the
             # turn once the grace has passed. A failed read is not that screen:
             # skip app_quiet and the idle report so a held working banner counts.
-            # A real screen keeps the TUI rules.
-            app_quiet = in_app() and not app_read_failed and not screen.strip() and not banner
+            # A TUI pane keeps the TUI quiet rule, even when HC_TERMINAL_ID is set.
+            # A failed pane read is "" and must not count as that empty App screen.
+            app_quiet = in_app() and not in_tui() and not app_read_failed and not screen.strip() and not banner
             if not app_read_failed and action == "idle" and (screen_is_quiet(screen) or app_quiet):
                 if reported != "idle":
                     reported, misses = note_report(pane, path, "idle", reported, misses)
