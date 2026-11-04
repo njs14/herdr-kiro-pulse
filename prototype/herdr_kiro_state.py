@@ -183,6 +183,8 @@ def fresh_state() -> dict:
         "chat_pid": 0,
         "chat_started": "",
         "chat_ident": "",
+        "proven_pid": 0,
+        "proven_ident": "",
     }
 
 
@@ -226,6 +228,15 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
     chat_ident = raw_chat if isinstance(raw_chat, str) else ""
     if not fine_start(chat_ident):
         chat_ident = ""
+    raw_proven = state.get("proven_ident")
+    proven_ident = raw_proven if isinstance(raw_proven, str) else ""
+    try:
+        proven_pid = int(state.get("proven_pid") or 0)
+    except (TypeError, ValueError):
+        proven_pid = 0
+    if not fine_start(proven_ident) or proven_pid <= 1:
+        proven_pid = 0
+        proven_ident = ""
     try:
         seq = int(state.get("seq") or 0)
     except (TypeError, ValueError):
@@ -277,6 +288,8 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
         "chat_pid": int(state.get("chat_pid") or 0),
         "chat_started": state.get("chat_started") or "",
         "chat_ident": chat_ident,
+        "proven_pid": proven_pid,
+        "proven_ident": proven_ident,
     }
 
 
@@ -313,6 +326,36 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     if isinstance(current, str) and fine_start(current):
         return
     idents.pop(key, None)
+
+
+def _keep_proven_pane(state: dict, key: str) -> None:
+    """Save a proven pane owner before END drops its row.
+
+    The idle report runs after that drop. state=done still has to reach the
+    tty this token proved. An empty token or a sec: token is not saved.
+    """
+    owners = state.get("owners")
+    if not isinstance(owners, dict):
+        return
+    try:
+        pid = int(owners.get(key) or 0)
+    except (TypeError, ValueError):
+        return
+    idents = state.get("owner_ident")
+    raw = idents.get(key) if isinstance(idents, dict) else ""
+    token = raw if isinstance(raw, str) else ""
+    if not identity_proven(pid, token):
+        return
+    state["proven_pid"] = pid
+    state["proven_ident"] = token
+
+
+def _pop_session(state: dict, key: str) -> None:
+    _keep_proven_pane(state, key)
+    state["busy"].pop(key, None)
+    state["owners"].pop(key, None)
+    state["owner_started"].pop(key, None)
+    state["owner_ident"].pop(key, None)
 
 
 def finish_if_idle(state: dict, now: float) -> None:
@@ -356,10 +399,7 @@ def apply_event(
                 count -= 1
             nxt["aggregate"] = count
             if count == 0:
-                nxt["busy"].pop(AGGREGATE, None)
-                nxt["owners"].pop(AGGREGATE, None)
-                nxt["owner_started"].pop(AGGREGATE, None)
-                nxt["owner_ident"].pop(AGGREGATE, None)
+                _pop_session(nxt, AGGREGATE)
                 finish_if_idle(nxt, now)
             else:
                 nxt["busy"][AGGREGATE] = now
@@ -386,18 +426,12 @@ def apply_event(
         nxt["grace_until"] = 0.0
     elif event in END_EVENTS:
         if session in nxt["busy"]:
-            nxt["busy"].pop(session, None)
-            nxt["owners"].pop(session, None)
-            nxt["owner_started"].pop(session, None)
-            nxt["owner_ident"].pop(session, None)
+            _pop_session(nxt, session)
         else:
             members = members_of(nxt["busy"], session)
             if members:
                 oldest = min(members, key=lambda item: (nxt["busy"][item], item))
-                nxt["busy"].pop(oldest, None)
-                nxt["owners"].pop(oldest, None)
-                nxt["owner_started"].pop(oldest, None)
-                nxt["owner_ident"].pop(oldest, None)
+                _pop_session(nxt, oldest)
         if not nxt["busy"]:
             nxt["grace_until"] = now + SETTLE_SECS
             nxt["grace_started"] = now
@@ -676,8 +710,11 @@ def identity_proven(pid: int, token: object) -> bool:
     return alive(number, token)
 
 
-def _recorded_identities(path: str) -> list[tuple[int, str]]:
-    """Owner and chat pids with the token currently stored for each."""
+def _recorded_identities(path: str, *, include_pane: bool = False) -> list[tuple[int, str]]:
+    """Owner and chat pids with the token currently stored for each.
+
+    `include_pane` adds the owner saved when Stop dropped a proven row.
+    """
     try:
         with open(path, encoding="utf-8") as handle:
             state = json.loads(handle.read() or "{}")
@@ -707,6 +744,15 @@ def _recorded_identities(path: str) -> list[tuple[int, str]]:
     chat_token = raw_chat if isinstance(raw_chat, str) else ""
     if chat > 1:
         found.append((chat, chat_token))
+    if include_pane:
+        raw_pane = state.get("proven_ident") or ""
+        pane_token = raw_pane if isinstance(raw_pane, str) else ""
+        try:
+            pane_pid = int(state.get("proven_pid") or 0)
+        except (TypeError, ValueError):
+            pane_pid = 0
+        if pane_pid > 1 and not any(pid == pane_pid for pid, _known in found):
+            found.append((pane_pid, pane_token))
     return found
 
 
@@ -747,12 +793,15 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
 
 
 def _paint_proven(path: str, kind: str, rule_id: str = "") -> bool:
-    """Paint each recorded pid whose token proves it. Paint nothing else."""
+    """Paint each recorded pid whose token proves it.
+
+    state=done also paints the pane owner saved from a proven row at Stop.
+    """
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None or fields.get("state") not in ("working", "done"):
         return False
     painted = False
-    for pid, token in _recorded_identities(path):
+    for pid, token in _recorded_identities(path, include_pane=fields.get("state") == "done"):
         if paint_status(kind, pid, token, rule_id=rule_id):
             painted = True
     if not painted:

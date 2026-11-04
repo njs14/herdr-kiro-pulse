@@ -1503,6 +1503,105 @@ class ReapedExitTests(unittest.TestCase):
         self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got, device)
         self.assertEqual(got, b"", device)
 
+    def test_stop_paints_done_on_the_proven_pty(self):
+        # The outer process holds the pty and a fine owner token. The inner
+        # chat has piped stdio and a fine chat token. Stop drops the owner
+        # row. The idle report still writes state=done on that pty.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-proven-stop-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        outer = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+        )
+        self.addCleanup(_stop, outer)
+        chat = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.addCleanup(_stop, chat)
+        for stream in (chat.stdin, chat.stdout, chat.stderr):
+            if stream is not None:
+                self.addCleanup(stream.close)
+        outer_start = "100.000000"
+        chat_start = "200.000000"
+        real_hires = hook.hires_start
+
+        def hires(pid):
+            try:
+                number = int(pid)
+            except (TypeError, ValueError):
+                return real_hires(pid)
+            if number == outer.pid:
+                return outer_start
+            if number == chat.pid:
+                return chat_start
+            return real_hires(pid)
+
+        def seed(state):
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": outer.pid}
+            state["owner_started"] = {"sess": _live_start(outer.pid)}
+            state["owner_ident"] = {"sess": outer_start}
+            state["chat_pid"] = chat.pid
+            state["chat_started"] = _live_start(chat.pid)
+            state["chat_ident"] = chat_start
+            state["grace_until"] = 0.0
+            state["watcher"] = os.getpid()
+            state["generation"] = 3
+            state["seq"] = 4
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_BIN_PATH": os.path.join(directory, "missing-herdr"),
+            "HERDR_KIRO_LOG": os.path.join(directory, "hook.log"),
+            "XDG_STATE_HOME": directory,
+        }
+        working = b"\x1b]7501;state=working:app=kiro-cli\x1b\\"
+        done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
+        with (
+            mock.patch.object(hook, "hires_start", hires),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            hook.update(path, seed)
+            self.assertTrue(hook.send_report("t7", path, "working"))
+            self.assertIn(working, _read_ready(master, 0.5))
+
+            def stop(current):
+                revised = hook.apply_event(
+                    current,
+                    "Stop",
+                    "sess",
+                    time.time(),
+                    outer.pid,
+                    _live_start(outer.pid),
+                    0,
+                    "",
+                )
+                current.clear()
+                current.update(revised)
+
+            stopped = hook.update(path, stop)
+            self.assertNotIn("sess", stopped["owners"])
+            self.assertEqual(stopped["chat_pid"], chat.pid)
+            self.assertEqual(stopped["chat_ident"], chat_start)
+            hook.send_report("t7", path, "idle")
+        device = os.ttyname(slave)
+        got = _read_ready(master, 0.5)
+        self.assertIn(done, got, device)
+        self.assertNotIn(working, got, device)
+
     def test_setsid_watcher_does_not_write_the_parent_pty(self):
         # A setsid watcher with stdio on /dev/null still has a parent pty.
         # The exit must not paint that parent. The held fd is the write.
