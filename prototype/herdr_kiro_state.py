@@ -45,7 +45,7 @@ import time
 
 import herdr_kiro_osc
 
-__version__ = "0.13.2"
+__version__ = "0.13.3"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.

@@ -1,6 +1,6 @@
 [project]
 name = "herdr-kiro"
-version = "0.13.2"
+version = "0.13.3"
 description = "herdr plugin that reports a Kiro CLI workflow pane"
 requires-python = ">=3.9"
 

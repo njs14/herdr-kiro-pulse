@@ -105,7 +105,7 @@ Stay on the stock file if you want herdr to keep applying newer remote Kiro rule
 
 ## Status
 
-Version 0.13.2, from `herdr-plugin.toml`. Actively changed. Not a stable API, and not published.
+Version 0.13.3, from `herdr-plugin.toml`. Actively changed. Not a stable API, and not published.
 
 Unit tests on this tree: 168 passed, 1 error, on Python 3.15.2, with herdr 0.9.5. The command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes from herdr 0.9.5 and Kiro CLI 2.37.0 are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 

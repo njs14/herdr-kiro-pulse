@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.3
 
 The hook reports a Kiro CLI V3 session to the Herdr App with OSC 7501 on the pane tty. A failed App screen read does not end the turn. A later empty read still reports idle, and the App shows that as state=done. A TUI pane that inherited HC_TERMINAL_ID reads that pane and does not write OSC. A failed read of that pane does not end the turn. `hc` is herdr-core and has no status-set command. A finished turn is `state=done` on the App and still `idle` on the Herdr TUI, and that OSC word stays `done` after the pane is seen. The painted Agents section keeps a focused row under Done until that row is left. `herdr-app ls` already reports idle for that row. `settled: false` means the tab is listed. The TUI report is not followed by `release-agent` while kiro-cli is running. Question-panel rules use `kind=question`. Other blockers use `kind=permission`. On macOS the pane device comes from the process's stdout fd. A setsid hook has no controlling terminal, so `ps -o tty=` is not that device. A non-idle watcher exit in the App writes that same `state=done` while the outer pid is still recorded.
 
