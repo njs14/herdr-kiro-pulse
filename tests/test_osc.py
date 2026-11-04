@@ -665,6 +665,54 @@ raise SystemExit(0 if ok else 1)
 """
 
 
+# The owner holds the pty. Its child calls send_report. write_to_pane walks
+# that child up to the owner, which is the tty the bytes land on.
+_SEC_REPORT_DRIVER = """\
+import os
+import subprocess
+import sys
+import time
+import traceback
+
+mode = sys.argv[1]
+proto = sys.argv[2]
+path = sys.argv[3]
+result = sys.argv[4]
+
+if mode == "owner":
+    with open(result + ".owner", "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+    go = result + ".go"
+    deadline = time.time() + 15
+    while time.time() < deadline and not os.path.exists(go):
+        time.sleep(0.02)
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "report", proto, path, result],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    raise SystemExit(proc.wait(timeout=20))
+
+os.environ["HC_TERMINAL_ID"] = "t7"
+os.environ["HERDR_ENV"] = ""
+os.environ["HERDR_PANE_ID"] = ""
+os.environ["HERDR_KIRO_LOG"] = path + ".log"
+os.environ["HERDR_BIN_PATH"] = os.path.join(os.path.dirname(path), "missing-herdr")
+os.environ["XDG_STATE_HOME"] = os.path.dirname(path)
+sys.path.insert(0, proto)
+try:
+    import herdr_kiro_state as hook
+
+    hook.send_report("t7", path, "working")
+    hook.send_report("t7", path, "idle")
+except Exception:
+    with open(path + ".crash", "w", encoding="utf-8") as handle:
+        handle.write(traceback.format_exc())
+    raise
+"""
+
+
 class ReapedExitTests(unittest.TestCase):
     def setUp(self):
         self._release_held_fd()
@@ -1280,61 +1328,93 @@ class ReapedExitTests(unittest.TestCase):
         self.assertNotIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
         self.assertEqual(got, b"")
 
-    def _sec_status(self, role):
-        """Drive the watch loop with no Linux start ticks.
+    def _sec_ancestor_report(self, role):
+        """send_report from a child of a live pid known only by sec: plus lstart.
 
-        role "owner" stores sec: plus this pid's lstart as owner_ident.
-        role "chat" stores that same string as chat_ident. send_report is
-        the real function. On 02ae3c4 that tty receives state=working.
+        The state file is written directly. send_report's own update is what
+        drops that owner on 7fb233c, and write_to_pane then walks the child
+        up to this pty. The bytes under test are the ones on that pty.
         """
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-sec-status-")
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-sec-ancestor-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
+        result = os.path.join(directory, "result")
+        driver = os.path.join(directory, "driver.py")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(_SEC_REPORT_DRIVER)
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
         self.addCleanup(os.close, slave)
-        proc = subprocess.Popen(
-            ["sleep", "30"],
-            stdin=subprocess.DEVNULL,
-            stdout=slave,
-            stderr=subprocess.DEVNULL,
-        )
+        err_path = os.path.join(directory, "owner.err")
+        proto = os.path.dirname(os.path.abspath(hook.__file__))
+        with open(err_path, "w", encoding="utf-8") as err:
+            proc = subprocess.Popen(
+                [sys.executable, driver, "owner", proto, path, result],
+                stdin=subprocess.DEVNULL,
+                stdout=slave,
+                stderr=err,
+            )
         self.addCleanup(_stop, proc)
-        lstart = _live_start(proc.pid)
-        stamp = time.time()
-        with mock.patch.object(hook, "_linux_start_ticks", return_value=None):
-            ident = hook.hires_start(proc.pid)
-            self.assertEqual(ident, "sec:" + lstart)
-            self.assertFalse(hook.fine_start(ident))
-
-            def seed(state):
-                state["watcher"] = os.getpid()
-                state["generation"] = 3
-                state["busy"] = {"sess": stamp}
-                state["owners"] = {} if role == "chat" else {"sess": proc.pid}
-                state["owner_started"] = {} if role == "chat" else {"sess": lstart}
-                state["owner_ident"] = {} if role == "chat" else {"sess": ident}
-                state["chat_pid"] = proc.pid if role == "chat" else 0
-                state["chat_started"] = lstart if role == "chat" else ""
-                state["chat_ident"] = ident if role == "chat" else ""
-                state["reported"] = None
-                state["seq"] = 4
-
-            self._run_status_loop(path, seed)
-            hook.emit_osc(path, "idle")
+        self.addCleanup(_kill_pidfiles, result, (".owner",))
+        owner_pid = 0
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            owner_pid = _read_pidfile(result + ".owner")
+            if owner_pid > 1:
+                break
+            time.sleep(0.02)
+        self.assertGreater(owner_pid, 1)
+        lstart = _live_start(owner_pid)
+        ident = "sec:" + lstart
+        self.assertFalse(hook.fine_start(ident))
+        state = hook.fresh_state()
+        state["generation"] = 3
+        state["busy"] = {"sess": time.time()}
+        state["seq"] = 4
+        if role == "chat":
+            state["chat_pid"] = owner_pid
+            state["chat_started"] = lstart
+            state["chat_ident"] = ident
+        elif role == "owner":
+            state["owners"] = {"sess": owner_pid}
+            state["owner_started"] = {"sess": lstart}
+            state["owner_ident"] = {"sess": ident}
+        else:
+            raise AssertionError(role)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        with open(result + ".go", "w", encoding="utf-8") as handle:
+            handle.write("go\n")
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            _kill_pidfiles(result, (".owner",))
+            proc.kill()
+            proc.wait(timeout=5)
+            self.fail("reporter did not finish")
+        if os.path.exists(path + ".crash"):
+            with open(path + ".crash", encoding="utf-8") as handle:
+                self.fail(handle.read())
+        device = os.ttyname(slave)
         got = _read_ready(master, 0.3)
         self.assertNotIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
         self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
-        self.assertEqual(got, b"")
+        self.assertEqual(got, b"", device)
+        log_path = path + ".log"
+        if os.path.exists(log_path):
+            with open(log_path, encoding="utf-8") as handle:
+                logged = handle.read()
+            self.assertNotIn("osc working via " + device, logged)
+            self.assertNotIn("osc done via " + device, logged)
 
     def test_empty_token_does_not_paint_done(self):
-        # A fine start token is unavailable. owner_ident is sec: plus this
-        # pid's lstart. The watch loop must not paint that tty.
-        self._sec_status("owner")
+        # owner_ident is sec: plus this live ancestor's lstart. send_report
+        # must not paint the tty write_to_pane walks to.
+        self._sec_ancestor_report("owner")
 
     def test_sec_lstart_collision_does_not_paint_done(self):
-        # chat_ident is that same sec: string. The watch loop must not paint.
-        self._sec_status("chat")
+        # chat_ident is that same sec: string on the same ancestor.
+        self._sec_ancestor_report("chat")
 
     def test_setsid_watcher_does_not_write_the_parent_pty(self):
         # A setsid watcher with stdio on /dev/null still has a parent pty.

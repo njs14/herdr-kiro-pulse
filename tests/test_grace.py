@@ -843,7 +843,7 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
-            self.assertTrue(hook.owner_is_dead(50, "sec:then"))
+            self.assertFalse(hook.owner_is_dead(50, "sec:then"))
             self.assertTrue(hook.owner_is_dead(50, "then"))
             self.assertFalse(hook.owner_is_dead(50, ""))
 

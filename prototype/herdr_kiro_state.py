@@ -1639,12 +1639,13 @@ def ownership(dest: str) -> str:
 
 
 def owner_is_dead(owner: object, started: object = "") -> bool:
-    """True when this pid is not the recorded process.
+    """True when this pid is gone, or a fine token names a different process.
 
-    `started` is the hires token. An empty token is not proof the process
-    exited, so the row stays and a later event can record one. A ``sec:``
-    token is whole-second lstart, so it is not that process. A live process
-    is never dead because of its parent.
+    An empty token is not proof the process exited, so the row stays and a
+    later event can record one. A ``sec:`` token on a live pid is not that
+    proof either. Dropping the row takes the pid off the skip list, and the
+    ancestor walk then paints its tty. A live process is never dead because
+    of its parent.
     """
     if not isinstance(owner, (int, str)) or not owner:
         return False
@@ -1658,10 +1659,8 @@ def owner_is_dead(owner: object, started: object = "") -> bool:
     if snap.get("error"):
         return False
     token = started if isinstance(started, str) else ""
-    if not token:
+    if not token or not fine_start(token):
         return False
-    if not fine_start(token):
-        return True
     return hires_start(pid) != token
 
 
