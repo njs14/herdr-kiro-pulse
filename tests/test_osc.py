@@ -5,11 +5,13 @@ The bytes have to land on the pane pty, which is the owner's stdout, and
 the captured pipe must stay empty.
 """
 
+import contextlib
 import errno
 import json
 import os
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -46,6 +48,36 @@ def _scratch(prefix):
     fd, path = tempfile.mkstemp(prefix=prefix)
     os.close(fd)
     return path
+
+
+def _live_start(pid):
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        hook.begin_tick()
+        snap = hook.process_snapshot(pid)
+        if snap and not snap.get("error") and snap.get("lstart"):
+            return snap["lstart"]
+        time.sleep(0.02)
+    raise AssertionError(f"no start token for pid {pid}")
+
+
+def _read_pidfile(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read().strip()
+    except OSError:
+        return 0
+    if not text.isdigit():
+        return 0
+    return int(text)
+
+
+def _kill_pidfiles(result):
+    for suffix in (".watch", ".hook", ".owner"):
+        pid = _read_pidfile(result + suffix)
+        if pid > 1:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def _remembered_tty(value):
@@ -246,8 +278,11 @@ class OscHookTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
 
+        token = _live_start(holder.pid)
+
         def seed(state):
             state["chat_pid"] = holder.pid
+            state["chat_started"] = token
             state["reported"] = "working"
             state["seq"] = 4
 
@@ -306,8 +341,11 @@ class OscHookTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
 
+        token = _live_start(holder.pid)
+
         def seed(state):
             state["chat_pid"] = holder.pid
+            state["chat_started"] = token
             state["reported"] = "working"
             state["seq"] = 4
 
@@ -372,7 +410,7 @@ class AppExitOscTests(unittest.TestCase):
             order.append(("held",))
             return real_held()
 
-        def capture(payload, pids):
+        def capture(payload, pids, **_kwargs):
             payloads.append(payload)
             pid_lists.append(list(pids))
             return "/dev/pts/7"
@@ -575,7 +613,7 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
             mock.patch.object(hook.os, "kill", fake_kill),
-            mock.patch.object(osc, "write_to_pane", lambda _payload, _pids: ""),
+            mock.patch.object(osc, "write_to_pane", lambda *_args, **_kwargs: ""),
             mock.patch.object(osc, "_tty_opens", lambda _pid: iter(())),
             mock.patch.object(osc, "_write_path", write_path),
             mock.patch.object(hook.subprocess, "run", refuse),
@@ -640,7 +678,7 @@ class ReapedExitTests(unittest.TestCase):
             if int(pid) == 4242 and not phase["dead"]:
                 yield proc_link, slave_name
 
-        def write_to_pane(_payload, _pids):
+        def write_to_pane(_payload, _pids, **_kwargs):
             if phase["watch"] or phase["dead"]:
                 return ""
             return slave_name
@@ -742,7 +780,7 @@ class ReapedExitTests(unittest.TestCase):
         def boom(_fd, _payload):
             raise OSError(errno.EIO, "closed")
 
-        def paint(_payload, _pids):
+        def paint(_payload, _pids, **_kwargs):
             painted.append(True)
             return "/dev/pts/7"
 
@@ -1031,6 +1069,188 @@ class ReapedExitTests(unittest.TestCase):
             with open(log_path, encoding="utf-8") as handle:
                 logged = handle.read()
         self.assertNotIn(device, logged)
+
+
+# The child-sleep check above stays green on 3113252: that sleep is not an
+# ancestor, so the parent walk never sees it. This driver is the tree
+# ensure_watcher starts. The hook stays alive. The owner is the hook's parent
+# and holds the pty. send_report is the real function inside the watcher.
+_ANCESTOR_DRIVER = """\
+import os
+import subprocess
+import sys
+import time
+import traceback
+
+mode = sys.argv[1]
+proto = sys.argv[2]
+path = sys.argv[3]
+result = sys.argv[4]
+os.environ["HC_TERMINAL_ID"] = "t7"
+os.environ["HERDR_ENV"] = ""
+os.environ["HERDR_PANE_ID"] = ""
+os.environ["HERDR_KIRO_LOG"] = path + ".log"
+os.environ["HERDR_BIN_PATH"] = os.path.join(os.path.dirname(path), "missing-herdr")
+os.environ["XDG_STATE_HOME"] = os.path.dirname(path)
+
+
+def _pidfile(name):
+    with open(result + "." + name, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+
+
+if mode == "owner":
+    _pidfile("owner")
+    go = result + ".go"
+    deadline = time.time() + 15
+    while time.time() < deadline and not os.path.exists(go):
+        time.sleep(0.02)
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "hook", proto, path, result],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    raise SystemExit(proc.wait(timeout=20))
+
+if mode == "hook":
+    _pidfile("hook")
+    proc = subprocess.Popen(
+        [sys.executable, __file__, "watch", proto, path, result],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(result + ".watch", "w", encoding="utf-8") as handle:
+        handle.write(str(proc.pid))
+    raise SystemExit(proc.wait(timeout=20))
+
+sys.path.insert(0, proto)
+try:
+    import herdr_kiro_state as hook
+
+    hook._watch_loop("t7", path)
+except Exception:
+    with open(path + ".crash", "w", encoding="utf-8") as handle:
+        handle.write(traceback.format_exc())
+    raise
+"""
+
+
+class AncestorReportTests(unittest.TestCase):
+    def _status(self, kind):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-ancestor-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        result = os.path.join(directory, "result")
+        driver = os.path.join(directory, "driver.py")
+        with open(driver, "w", encoding="utf-8") as handle:
+            handle.write(_ANCESTOR_DRIVER)
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        # macOS drops unread pty output when the last slave fd closes.
+        self.addCleanup(os.close, slave)
+        err_path = os.path.join(directory, "owner.err")
+        with open(err_path, "w", encoding="utf-8") as err:
+            proc = subprocess.Popen(
+                [sys.executable, driver, "owner", os.path.dirname(os.path.abspath(hook.__file__)), path, result],
+                stdin=subprocess.DEVNULL,
+                stdout=slave,
+                stderr=err,
+            )
+        self.addCleanup(_stop, proc)
+        self.addCleanup(_kill_pidfiles, result)
+        owner_pid = 0
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            owner_pid = _read_pidfile(result + ".owner")
+            if owner_pid > 1:
+                break
+            time.sleep(0.02)
+        self.assertGreater(owner_pid, 1)
+        token = _live_start(owner_pid) if kind == "match" else ""
+        # update() normalizes with this process's ps cache. A stale cache
+        # treats the new owner as dead and drops it before the watcher starts.
+        hook.begin_tick()
+
+        def seed(state):
+            state["watcher"] = 0
+            state["generation"] = 3
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {} if kind == "chat" else {"sess": owner_pid}
+            state["owner_started"] = {} if kind != "match" else {"sess": token}
+            state["chat_pid"] = owner_pid if kind == "chat" else 0
+            state["chat_started"] = ""
+            state["reported"] = None
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        with open(result + ".go", "w", encoding="utf-8") as handle:
+            handle.write("go\n")
+        log_path = path + ".log"
+        crash_path = path + ".crash"
+        logged = ""
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if os.path.exists(crash_path):
+                with open(crash_path, encoding="utf-8") as handle:
+                    self.fail(handle.read())
+            if os.path.exists(log_path):
+                with open(log_path, encoding="utf-8") as handle:
+                    logged = handle.read()
+            # "watcher exit osc missed" also contains " osc ". Wait for a
+            # status line from emit_osc, which names the state.
+            if "osc missed " in logged or "osc working via" in logged or "osc done" in logged:
+                break
+            time.sleep(0.05)
+        else:
+            detail = logged
+            if os.path.exists(err_path):
+                with open(err_path, encoding="utf-8") as handle:
+                    detail = detail + handle.read()
+            self.fail("no osc attempt\n" + detail)
+        got = _read_ready(master, 0.3)
+
+        def steal(state):
+            state["watcher"] = 42424242
+
+        hook.update(path, steal)
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            _kill_pidfiles(result)
+            proc.kill()
+            proc.wait(timeout=5)
+        return got, logged, os.ttyname(slave)
+
+    def test_empty_owner_token_on_a_live_ancestor_stays_empty(self):
+        # setsid watcher, hook still alive, owner is the hook's parent.
+        # owner_started is empty. That pty must get no status bytes.
+        got, logged, device = self._status("owner")
+        self.assertEqual(got, b"", logged)
+        self.assertNotIn(b"state=working", got)
+        self.assertNotIn(b"state=done", got)
+        self.assertIn("osc missed working", logged)
+        self.assertNotIn(device, logged)
+
+    def test_empty_chat_token_on_a_live_ancestor_stays_empty(self):
+        # Same tree. The pid is chat_pid and chat_started is empty.
+        got, logged, device = self._status("chat")
+        self.assertEqual(got, b"", logged)
+        self.assertNotIn(b"state=working", got)
+        self.assertNotIn(b"state=done", got)
+        self.assertIn("osc missed working", logged)
+        self.assertNotIn(device, logged)
+
+    def test_matching_ancestor_token_receives_working(self):
+        # A start token that matches still goes through write_to_pane,
+        # including when that pid is an ancestor of the setsid watcher.
+        got, logged, device = self._status("match")
+        self.assertIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got, logged)
+        self.assertNotIn(b"state=done", got)
+        self.assertIn("osc working via ", logged)
+        self.assertIn(device, logged)
 
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and

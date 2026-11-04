@@ -80,8 +80,22 @@ def write_pid(payload: bytes, pid: int) -> str:
     return ""
 
 
-def write_to_pane(payload: bytes, pids: list[int]) -> str:
-    """Write payload to the first pane tty among pids, this process, and its parents."""
+def write_to_pane(payload: bytes, pids: list[int], *, skip: list[int] | None = None) -> str:
+    """Write payload to the first pane tty among pids, this process, and its parents.
+
+    `skip` holds recorded pids that a start token does not identify. An empty
+    token matches any live pid, and the spawning hook is still this process's
+    parent on the first report, so the parent walk would otherwise write that
+    ancestor's tty. Those pids are left out of both lists.
+    """
+    blocked: set[int] = set()
+    for pid in skip or []:
+        try:
+            number = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if number > 1:
+            blocked.add(number)
     seen: set[int] = set()
     ordered: list[int] = []
     for pid in list(pids) + _self_chain():
@@ -89,7 +103,7 @@ def write_to_pane(payload: bytes, pids: list[int]) -> str:
             number = int(pid)
         except (TypeError, ValueError):
             continue
-        if number <= 1 or number in seen:
+        if number <= 1 or number in seen or number in blocked:
             continue
         seen.add(number)
         ordered.append(number)

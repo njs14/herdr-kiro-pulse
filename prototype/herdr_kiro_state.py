@@ -482,15 +482,23 @@ def herdr(*args: str) -> bool:
     return completed.returncode == 0
 
 
-def _report_pids(path: str) -> list:
+def _status_targets(path: str) -> tuple[list[int], list[int]]:
+    """Pids a start token identifies, and recorded pids the pane walk must skip.
+
+    An empty token matches any live pid. Leaving that pid off the explicit list
+    is not enough: write_to_pane walks parents and writes the first tty, and the
+    spawning hook is still alive for the first report. Skip that pid in the walk
+    too. When one record identifies the pid and another does not, the match wins.
+    """
     try:
         with open(path, encoding="utf-8") as handle:
             state = json.loads(handle.read() or "{}")
     except (OSError, ValueError, TypeError):
-        return []
+        return [], []
     if not isinstance(state, dict):
-        return []
-    pids = []
+        return [], []
+    allowed: list[int] = []
+    blocked: list[int] = []
     owners = state.get("owners") or {}
     started_map = state.get("owner_started") if isinstance(state.get("owner_started"), dict) else {}
     if isinstance(owners, dict):
@@ -499,20 +507,31 @@ def _report_pids(path: str) -> list:
                 pid = int(value)
             except (TypeError, ValueError):
                 continue
-            # An empty token matches any live pid. That process is not the owner,
-            # so a status write must not land on its tty.
             raw = started_map.get(key) or ""
             token = raw if isinstance(raw, str) else ""
-            if not token or not alive(pid, token):
-                continue
-            pids.append(pid)
+            if pid > 1 and token and alive(pid, token):
+                allowed.append(pid)
+            elif pid > 1:
+                blocked.append(pid)
     try:
         chat = int(state.get("chat_pid") or 0)
     except (TypeError, ValueError):
         chat = 0
-    if chat:
-        pids.append(chat)
-    return pids
+    raw_chat = state.get("chat_started") or ""
+    chat_token = raw_chat if isinstance(raw_chat, str) else ""
+    if chat > 1 and chat_token and alive(chat, chat_token):
+        allowed.append(chat)
+    elif chat > 1:
+        blocked.append(chat)
+    identified = set(allowed)
+    skip: list[int] = []
+    seen: set[int] = set()
+    for pid in blocked:
+        if pid in identified or pid in seen:
+            continue
+        seen.add(pid)
+        skip.append(pid)
+    return allowed, skip
 
 
 # Fd this process opened from /proc/<owner>/fd while that owner was alive.
@@ -621,7 +640,8 @@ def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
     except ValueError:
         log("refusing osc")
         return False
-    written = herdr_kiro_osc.write_to_pane(payload, _report_pids(path))
+    allowed, blocked = _status_targets(path)
+    written = herdr_kiro_osc.write_to_pane(payload, allowed, skip=blocked)
     if written:
         log(f"osc {fields['state']} via {written}")
         return True
