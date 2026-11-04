@@ -17,7 +17,7 @@ After a Kiro turn ends on a workspace that is not the focused one, and the agent
 
 Preconditions:
 
-- Doctor still reports agent `kiro`.
+- Doctor still reports agent `kiro` or `kiro-cli`.
 - The pane is `w1:p1` from this launch.
 
 - **Leave the pane.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py background`. Stdout names a workspace other than `w1`.

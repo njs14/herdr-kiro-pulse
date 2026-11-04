@@ -16,8 +16,8 @@ A running workflow banner means the pane is working. Get and explain both report
 
 Preconditions:
 
-- Doctor still reports agent `kiro`.
-- Launch's idle wait has already passed, or doctor has seen agent `kiro`.
+- Doctor still reports agent `kiro` or `kiro-cli`.
+- Launch's idle wait has already passed, or doctor has seen agent `kiro` or `kiro-cli`.
 
 - **Show the banner.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py paint working`.
 - **Read the status.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py wait working workflow_banner_working 8`. The saved JSON has `agent_status` `working`, `explain_state` `working`, and `explain_rule` `workflow_banner_working`.

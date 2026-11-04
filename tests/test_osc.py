@@ -86,37 +86,48 @@ def _remembered_tty(value):
 
 class OscMapTests(unittest.TestCase):
     def test_spec_states_are_the_only_words(self):
-        self.assertEqual(osc.fields_for("working"), {"state": "working", "app": "kiro"})
-        self.assertEqual(osc.fields_for("blocked"), {"state": "blocked", "kind": "permission", "app": "kiro"})
+        self.assertEqual(osc.fields_for("working"), {"state": "working", "app": "kiro-cli"})
+        self.assertEqual(osc.fields_for("blocked"), {"state": "blocked", "kind": "permission", "app": "kiro-cli"})
         self.assertEqual(
             osc.fields_for("blocked", "question_panel"),
-            {"state": "blocked", "kind": "question", "app": "kiro"},
+            {"state": "blocked", "kind": "question", "app": "kiro-cli"},
         )
         self.assertEqual(
             osc.fields_for("blocked", "workflow_question_esc_cancel"),
-            {"state": "blocked", "kind": "question", "app": "kiro"},
+            {"state": "blocked", "kind": "question", "app": "kiro-cli"},
         )
         self.assertEqual(
             osc.fields_for("blocked", "workspace_trust"),
-            {"state": "blocked", "kind": "permission", "app": "kiro"},
+            {"state": "blocked", "kind": "permission", "app": "kiro-cli"},
         )
         # A finished TUI report is idle. The App word for that finish is done.
-        self.assertEqual(osc.fields_for("idle"), {"state": "done", "app": "kiro"})
+        self.assertEqual(osc.fields_for("idle"), {"state": "done", "app": "kiro-cli"})
         self.assertIsNone(osc.fields_for("unknown"))
+
+    def test_kiro_cli_and_kiro_are_both_the_app(self):
+        # CLI 3.0 reports app=kiro-cli. An older session still sends app=kiro.
+        self.assertTrue(osc.is_kiro_app("kiro-cli"))
+        self.assertTrue(osc.is_kiro_app("kiro"))
+        self.assertFalse(osc.is_kiro_app("claude"))
+        self.assertFalse(osc.is_kiro_app(""))
+        fields = osc.fields_for("working")
+        assert fields is not None
+        self.assertTrue(osc.is_kiro_app(fields["app"]))
+        self.assertEqual(fields["app"], "kiro-cli")
         self.assertIsNone(osc.fields_for("need-you"))
         self.assertIsNone(osc.fields_for("needs-you"))
 
     def test_wire_bytes_match_the_grammar(self):
-        self.assertEqual(osc.encode(osc.fields_for("working")), b"\x1b]7501;state=working:app=kiro\x1b\\")
+        self.assertEqual(osc.encode(osc.fields_for("working")), b"\x1b]7501;state=working:app=kiro-cli\x1b\\")
         self.assertEqual(
             osc.encode(osc.fields_for("blocked")),
-            b"\x1b]7501;state=blocked:kind=permission:app=kiro\x1b\\",
+            b"\x1b]7501;state=blocked:kind=permission:app=kiro-cli\x1b\\",
         )
         self.assertEqual(
             osc.encode(osc.fields_for("blocked", "question_panel")),
-            b"\x1b]7501;state=blocked:kind=question:app=kiro\x1b\\",
+            b"\x1b]7501;state=blocked:kind=question:app=kiro-cli\x1b\\",
         )
-        self.assertEqual(osc.encode(osc.fields_for("idle")), b"\x1b]7501;state=done:app=kiro\x1b\\")
+        self.assertEqual(osc.encode(osc.fields_for("idle")), b"\x1b]7501;state=done:app=kiro-cli\x1b\\")
 
     def test_hook_words_never_encode_state_idle(self):
         for kind in ("working", "idle", "blocked", "unknown"):
@@ -125,7 +136,7 @@ class OscMapTests(unittest.TestCase):
                 continue
             self.assertNotEqual(fields["state"], "idle")
             self.assertNotIn(b"state=idle", osc.encode(fields))
-        self.assertEqual(osc.fields_for("idle"), {"state": "done", "app": "kiro"})
+        self.assertEqual(osc.fields_for("idle"), {"state": "done", "app": "kiro-cli"})
 
     def test_a_regular_file_is_not_a_pane(self):
         with tempfile.NamedTemporaryFile(prefix="herdr-kiro-notty-") as handle:
@@ -215,7 +226,7 @@ class OscDeliveryTests(unittest.TestCase):
             reported = handle.read().decode("utf-8", "replace").strip()
         self.assertEqual(reported, os.ttyname(slave))
         got = _read_ready(master, 1.0)
-        self.assertIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got)
+        self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
 
     def test_lsof_text_names_stdout_before_the_controlling_tty(self):
         text = "p42\nf1u\nn/dev/ttys000\nf2w\nn/dev/ttys000\nf0r\nn/dev/ttys001\nfcwd\nn/\n"
@@ -299,7 +310,7 @@ class OscHookTests(unittest.TestCase):
         self.assertEqual([args[args.index("--state") + 1] for args in calls], ["idle"])
         self.assertNotIn("release-agent", [args[0] for args in calls])
         got = _read_ready(master, 1.0)
-        self.assertIn(b"\x1b]7501;state=done:app=kiro\x1b\\", got)
+        self.assertIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
         _stop(holder)
 
     def test_tui_report_does_not_need_a_pane_tty(self):
@@ -447,7 +458,7 @@ class OscHookTests(unittest.TestCase):
         ):
             self.assertTrue(hook.send_report("t7", path, "idle"))
             self.assertTrue(hook.finish_if_unchanged("t7", path, {"generation": 1, "busy": {}}, "idle"))
-        self.assertEqual(osc_writes, [b"\x1b]7501;state=done:app=kiro\x1b\\"])
+        self.assertEqual(osc_writes, [b"\x1b]7501;state=done:app=kiro-cli\x1b\\"])
         self.assertEqual([row[row.index("--state") + 1] for row in calls if row[0] == "report-agent"], ["idle"])
         self.assertFalse(any(row[0] == "release-agent" for row in calls))
 
@@ -485,7 +496,7 @@ class OscHookTests(unittest.TestCase):
             self.assertTrue(hook.send_report("t7", path, "idle"))
             self.assertTrue(hook.send_report("t7", path, "idle"))
         got = _read_ready(master, 1.0)
-        payload = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        payload = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
         self.assertGreaterEqual(got.count(payload), 2)
         self.assertNotIn(b"state=idle", got)
         _stop(holder)
@@ -580,7 +591,7 @@ class AppExitOscTests(unittest.TestCase):
 
         self.addCleanup(drop_held)
         env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
-        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
         busy = {"sess": time.time()}
         owners = {"sess": 4242}
         path = os.path.join(directory, "owner-exit.json")
@@ -768,7 +779,7 @@ class ReapedExitTests(unittest.TestCase):
         )
 
     def _deliver_reaped(self, path, snap, master, slave, slave_name):
-        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
         proc_link = "/proc/4242/fd/1"
         phase = {"dead": False, "watch": False, "n": 0}
         device_opens = []
@@ -947,7 +958,7 @@ class ReapedExitTests(unittest.TestCase):
             "HERDR_PANE_ID": "",
             "HERDR_KIRO_LOG": path + ".log",
         }
-        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
         with (
             mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
             mock.patch.dict(os.environ, env, clear=False),
@@ -1012,7 +1023,7 @@ class ReapedExitTests(unittest.TestCase):
             with open(err_path, encoding="utf-8") as handle:
                 detail = detail + handle.read()
         self.assertEqual(proc.returncode, 0, detail)
-        done = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
         parent_got = _read_ready(parent_master, 0.3)
         held_got = _read_ready(held_master, 0.3)
         self.assertNotIn(done, parent_got, detail)
@@ -1097,8 +1108,8 @@ class ReapedExitTests(unittest.TestCase):
         ):
             hook._watch_loop("t7", path)
         got = _read_ready(master, 0.3)
-        self.assertNotIn(b"\x1b]7501;state=done:app=kiro\x1b\\", got)
-        self.assertNotIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got)
+        self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
+        self.assertNotIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
         self.assertEqual(got, b"")
 
     def test_empty_owner_started_does_not_receive_a_status_write(self):
@@ -1170,8 +1181,8 @@ class ReapedExitTests(unittest.TestCase):
         ):
             hook._watch_loop("t7", path)
         got = _read_ready(master, 0.3)
-        self.assertNotIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got)
-        self.assertNotIn(b"\x1b]7501;state=done:app=kiro\x1b\\", got)
+        self.assertNotIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
+        self.assertNotIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
         self.assertEqual(got, b"")
         log_path = path + ".log"
         logged = ""
@@ -1357,7 +1368,7 @@ class AncestorReportTests(unittest.TestCase):
         # A start token that matches still goes through write_to_pane,
         # including when that pid is an ancestor of the setsid watcher.
         got, logged, device = self._status("match")
-        self.assertIn(b"\x1b]7501;state=working:app=kiro\x1b\\", got, logged)
+        self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got, logged)
         self.assertNotIn(b"state=done", got)
         self.assertIn("osc working via ", logged)
         self.assertIn(device, logged)
@@ -1570,7 +1581,7 @@ class AboveSkippedPidTests(unittest.TestCase):
     def test_matching_token_writes_its_pty_not_the_parent(self):
         # A matching start token still writes that pid's pty, and not the parent's.
         parent_got, grand_got, mid_got, logged, parent_dev, mid_dev = self._report("match")
-        self.assertIn(b"\x1b]7501;state=working:app=kiro\x1b\\", mid_got, logged)
+        self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", mid_got, logged)
         self.assertEqual(parent_got, b"", logged)
         self.assertEqual(grand_got, b"", logged)
         self.assertIn(mid_dev, logged)

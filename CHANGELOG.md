@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+Kiro CLI 3.0 is the supported CLI. Interactive chat starts on V3 without `--v3`, so install, the README, and the approval check omit that flag. The approval check still does not pass `--trust-all-tools`. A headless run that omits `--trust-all-tools` stays on V2, so `harness/run_suite.py` keeps the flag and drops `--v3`. doctor passes on a default 3.0 install, where `chat.agentEngine` is unset and interactive chat is V3. A saved `v2` is still reported. The hook writes `app=kiro-cli`. A status whose app is `kiro` is still this program.
+
 ## 0.1.0
 
 The hook reports a Kiro CLI V3 session to the Herdr App with OSC 7501 on the pane tty. A failed App screen read does not end the turn. A later empty read still reports idle, and the App shows that as state=done. A TUI pane that inherited HC_TERMINAL_ID reads that pane and does not write OSC. A failed read of that pane does not end the turn. `hc` is herdr-core and has no status-set command. A finished turn is `state=done` on the App and still `idle` on the Herdr TUI, and that OSC word stays `done` after the pane is seen. The painted Agents section keeps a focused row under Done until that row is left. `herdr-app ls` already reports idle for that row. `settled: false` means the tab is listed. The TUI report is not followed by `release-agent` while kiro-cli is running. Question-panel rules use `kind=question`. Other blockers use `kind=permission`. On macOS the pane device comes from the process's stdout fd. A setsid hook has no controlling terminal, so `ps -o tty=` is not that device. A non-idle watcher exit in the App writes that same `state=done` while the outer pid is still recorded.

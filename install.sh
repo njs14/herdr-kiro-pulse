@@ -274,4 +274,4 @@ if [ -f "$RULES" ]; then
   reload_manifests
 fi
 python3 "$ROOT/prototype/herdr_kiro_doctor.py" --warn-upstream || true
-echo "Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat --v3"
+echo "Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat"

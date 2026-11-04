@@ -63,15 +63,19 @@ exit 0
             handle.write(script)
         os.chmod(path, stat.S_IRWXU)
 
-    def write_kiro(self, slow=False, engine="v3", workflows="true"):
+    def write_kiro(self, slow=False, engine="v3", workflows="true", version="3.0.0"):
         if slow:
-            body = '#!/bin/sh\nif [ "$1" = --version ]; then echo kiro-cli 2.37.0; exit 0; fi\nsleep 5\nexit 0\n'
+            body = f'#!/bin/sh\nif [ "$1" = --version ]; then echo kiro-cli {version}; exit 0; fi\nsleep 5\nexit 0\n'
         else:
+            if engine is None:
+                engine_line = 'if [ "$2" = chat.agentEngine ]; then exit 1; fi\n'
+            else:
+                engine_line = f'if [ "$2" = chat.agentEngine ]; then echo {engine}; exit 0; fi\n'
             body = (
                 "#!/bin/sh\n"
-                'if [ "$1" = --version ]; then echo kiro-cli 2.37.0; exit 0; fi\n'
-                f'if [ "$2" = chat.agentEngine ]; then echo {engine}; exit 0; fi\n'
-                f'if [ "$2" = chat.enableWorkflows ]; then echo {workflows}; exit 0; fi\n'
+                f'if [ "$1" = --version ]; then echo kiro-cli {version}; exit 0; fi\n'
+                + engine_line
+                + f'if [ "$2" = chat.enableWorkflows ]; then echo {workflows}; exit 0; fi\n'
                 "exit 0\n"
             )
         path = os.path.join(self.bindir, "kiro-cli")
@@ -99,6 +103,34 @@ exit 0
             check=False,
         )
         return _Timed(completed, time.time() - started)
+
+    def test_default_3_0_without_agent_engine_exits_zero(self):
+        settings = os.path.join(self.home, ".kiro", "settings", "cli.json")
+        with open(settings, "w", encoding="utf-8") as handle:
+            json.dump({"chat.enableWorkflows": True}, handle)
+        self.write_herdr()
+        self.write_kiro(engine=None)
+        self.install()
+        completed = self.doctor()
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("interactive default is V3", completed.stdout)
+        self.assertNotIn("want v3", completed.stdout)
+
+    def test_saved_v2_on_3_0_is_a_failure(self):
+        self.write_herdr()
+        self.write_kiro(engine="v2")
+        self.install()
+        completed = self.doctor()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("chat.agentEngine is v2, want v3", completed.stdout)
+
+    def test_cli_older_than_3_0_is_a_failure(self):
+        self.write_herdr()
+        self.write_kiro(version="2.37.0")
+        self.install()
+        completed = self.doctor()
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("older than 3.0", completed.stdout)
 
     def test_healthy_install_exits_zero(self):
         self.write_herdr()

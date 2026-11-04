@@ -16,6 +16,9 @@ import sys
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+sys.path.insert(0, os.path.join(ROOT, "prototype"))
+import herdr_kiro_osc as osc
+
 HOOK = os.path.join(ROOT, "prototype", "herdr_kiro_state.py")
 TOML = os.path.join(ROOT, "prototype", "kiro-detection.toml")
 PAINTER = os.path.join(os.path.dirname(__file__), "painter.c")
@@ -246,14 +249,14 @@ def doctor() -> None:
                 agent = json.loads(got.stdout).get("result", {}).get("agent") or {}
             except json.JSONDecodeError:
                 agent = {}
-            if agent.get("agent") == "kiro":
+            if osc.is_kiro_app(agent.get("agent")):
                 break
         time.sleep(0.3)
     else:
         raise SystemExit("pane agent is not kiro yet")
     if agent.get("cwd") and not str(agent.get("cwd")).startswith(run_dir()):
         raise SystemExit("pane cwd is outside this run")
-    print(json.dumps({"doctor": "ok", "version": text, "pane": meta["pane"], "agent": "kiro"}))
+    print(json.dumps({"doctor": "ok", "version": text, "pane": meta["pane"], "agent": agent.get("agent")}))
 
 
 def paint(mode: str) -> None:

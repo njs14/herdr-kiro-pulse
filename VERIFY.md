@@ -4,9 +4,11 @@ The bundle includes `.git`. `git rev-parse HEAD` is the commit this tree was pac
 
 Do not print `KIRO_API_KEY`. Do not write it into logs.
 
+Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3 without `--v3`. A headless run that omits `--trust-all-tools` stays on V2. The approval check is interactive, so it does not pass `--v3` or `--trust-all-tools`. `harness/run_suite.py` keeps `--trust-all-tools` and does not pass `--v3`. `hc --json get` reports `app` `kiro-cli` on CLI 3.0. An older session still sends `app=kiro`. Both are this program. The tables further down were recorded on Kiro CLI 2.37.0.
+
 ## What passing looks like
 
-`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty, including that a finished turn stays `state=done` and that a focused Agents row stays under Done until it is left. It does not launch the Herdr App. A live App check is a Mac run of `kiro-cli chat --v3` inside an App terminal. The painted sidebar check selects another tab. It uses `echo` or `true` when a tool approval is required.
+`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty, including that a finished turn stays `state=done` and that a focused Agents row stays under Done until it is left. It does not launch the Herdr App. A live App check is a Mac run of `kiro-cli chat` inside an App terminal. `hc --json get` status `app` is `kiro-cli` or `kiro`. The painted sidebar check selects another tab. It uses `echo` or `true` when a tool approval is required. Do not pass `--trust-all-tools`.
 
 `tests/run_py39.sh` runs those tests on Python 3.9. Stock macOS `/usr/bin/python3` is 3.9, and the hook uses `from __future__ import annotations` so `int | None` is not evaluated at import.
 
@@ -93,7 +95,7 @@ Kiro CLI 2.37.0's documented hook list includes `Stop` and does not list `Sessio
 | solo | 32 | 0 | 0.121s | no |
 | watch-tool | 25 | 0 | 0.628s | no |
 
-`herdr plugin link` of this tree registered `herdr-kiro` 0.8.0. `herdr plugin install` was not used. It only clones GitHub, and this package is not published.
+`herdr plugin link` of this tree registered `herdr-kiro` 0.8.0. `herdr plugin install` was not used on that run. The package was not on GitHub yet.
 
 ## v9 on this VM
 

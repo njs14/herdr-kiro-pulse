@@ -216,7 +216,9 @@ def ensure_kiro():
             "120000",
             "--",
             "chat",
-            "--v3",
+            # CLI 3.0 starts interactive chat on V3 without --v3. A headless
+            # run that omits --trust-all-tools stays on V2, so this suite
+            # keeps that flag. The approval check does not pass it.
             "--trust-all-tools",
             "--trust-workspace",
             timeout=150,

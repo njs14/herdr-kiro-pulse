@@ -14,7 +14,9 @@ import shutil
 import stat
 import subprocess
 
-APP = "kiro"
+# CLI 3.0 reports app=kiro-cli. Older sessions still send app=kiro.
+APP = "kiro-cli"
+KIRO_APPS = frozenset({"kiro", "kiro-cli"})
 _STATES = {"idle", "working", "done", "blocked", "error", "clear"}
 _KINDS = {"permission", "question", "auth"}
 _QUESTION_RULES = {"question_panel", "workflow_question_esc_cancel"}
@@ -24,6 +26,11 @@ _FLAG_SETS = (
     os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | _CLOEXEC,
     os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | _CLOEXEC,
 )
+
+
+def is_kiro_app(name: object) -> bool:
+    """True for the OSC app name Kiro sends, on CLI 3.0 and on older sessions."""
+    return isinstance(name, str) and name in KIRO_APPS
 
 
 def fields_for(kind: str, rule_id: str = "") -> dict | None:

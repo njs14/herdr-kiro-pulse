@@ -10,13 +10,13 @@ The Allow once chooser blocks the pane. Get and explain both report blocked, and
 ## How to get to it (user POV)
 
 - Let Kiro ask to use a tool. The throwaway permissions rule is tool `*` permission `ask`, so a tool call asks instead of running.
-- On a Mac, do not pass `--trust-all-tools`. Confirm the chooser, or cancel it, yourself.
+- On a Mac, start `kiro-cli chat --trust-workspace`. Do not pass `--v3` or `--trust-all-tools`. Confirm the chooser, or cancel it, yourself.
 
 ## Driving it with verify-herdr-kiro
 
 Preconditions:
 
-- Doctor still reports agent `kiro`.
+- Doctor still reports agent `kiro` or `kiro-cli`.
 - The permissions file under the scratch workspace contains tool `*` permission `ask`. The stand-in does not read that file.
 
 - **Show the chooser.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py paint approval`.

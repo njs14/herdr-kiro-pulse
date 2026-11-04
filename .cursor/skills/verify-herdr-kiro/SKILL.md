@@ -25,7 +25,7 @@ The painter is the screen stand-in. It is not Kiro. A live Mac run does not comp
 python3 .cursor/skills/verify-herdr-kiro/drive.py doctor
 ```
 
-Doctor is read-only. It requires the server pid from this launch to be alive, `herdr --version` to contain `0.9.5`, workspace list to succeed, and `agent get` on the recorded pane to report agent `kiro` with a cwd under `VERIFY_RUN`. Run it before the first drive and again after a failed drive.
+Doctor is read-only. It requires the server pid from this launch to be alive, `herdr --version` to contain `0.9.5`, workspace list to succeed, and `agent get` on the recorded pane to report agent `kiro` or `kiro-cli` with a cwd under `VERIFY_RUN`. Run it before the first drive and again after a failed drive.
 
 ## Drive
 
@@ -63,7 +63,7 @@ CI can run, with herdr 0.9.5 installed and no Kiro key:
 
 `tests.test_osc` is the OSC 7501 check CI can run. It opens a pty, writes the sequence the way the hook does, and reads those bytes on the master. It does not start herdr-app, herdr-core, or `hc`. `drive.py` is the Herdr TUI stand-in. It paints a herdr 0.9.5 pane and reads `herdr agent get`. It does not write OSC 7501 and it is not a Herdr App check.
 
-A live Herdr App check is separate. It uses an already-installed App and core and starts `kiro-cli chat --v3` inside an App terminal. `herdr-app ls` reports idle once `herdr.seen` equals the turn. The painted Agents section keeps that row under Done while the row is focused, and the check selects another tab in the same space. The window does not have to be frontmost. The check uses `echo` or `true` when a tool approval is required. This skill does not run that check.
+A live Herdr App check is separate. It uses an already-installed App and core and starts `kiro-cli chat` inside an App terminal. `hc --json get` reports `app` `kiro-cli` on CLI 3.0 and `kiro` from an older session. Both are this program. `herdr-app ls` reports idle once `herdr.seen` equals the turn. The painted Agents section keeps that row under Done while the row is focused, and the check selects another tab in the same space. The window does not have to be frontmost. The check uses `echo` or `true` when a tool approval is required. This skill does not run that check.
 
 These three are CI checks. They do not need herdr or a Kiro key:
 
@@ -71,7 +71,7 @@ These three are CI checks. They do not need herdr or a Kiro key:
 - `uvx ruff format --check`
 - `uvx ty check`
 
-A live Mac run is still required for a real `kiro-cli`. It uses the same throwaway home and permissions file, starts `kiro-cli chat --v3 --trust-workspace` in the pane, and does not pass `--trust-all-tools`. The `ask` rule is what produces a real tool-approval dialog. `--trust-workspace` skips the trust dialog, so the trust drive on a Mac is a fresh workspace that has not been trusted yet, before that flag is used.
+A live Mac run is still required for a real `kiro-cli`. It uses the same throwaway home and permissions file, starts `kiro-cli chat --trust-workspace` in the pane, and does not pass `--trust-all-tools` or `--v3`. CLI 3.0 starts that interactive chat on V3. The `ask` rule is what produces a real tool-approval dialog. `--trust-workspace` skips the trust dialog, so the trust drive on a Mac is a fresh workspace that has not been trusted yet, before that flag is used.
 
 Stand-in steps a Mac run will not do:
 
