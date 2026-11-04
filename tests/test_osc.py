@@ -366,7 +366,7 @@ class OscHookTests(unittest.TestCase):
             calls.append(tuple(args))
             return herdr_ok["value"]
 
-        def capture(payload, _pids):
+        def capture(payload, _pids, **_kwargs):
             osc_writes.append(payload)
             return "/dev/pts/0"
 
