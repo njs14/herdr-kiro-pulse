@@ -1708,8 +1708,6 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
         if reason == "idle" and current.get("busy"):
             current["retiring"] = False
             return
-        # emit_osc reads this file before release_if_current drops owners.
-        # A dead chat pid is not the living outer tty.
         if reason != "idle" and in_app():
             emit_osc(path, "idle")
         decision["ok"] = release_if_current(current, generation, keys)

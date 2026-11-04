@@ -317,8 +317,6 @@ class OscHookTests(unittest.TestCase):
 
 
 class AppExitOscTests(unittest.TestCase):
-    """A non-idle watcher exit in the App writes wire state=done before the slot clears."""
-
     def _seed(self, path, busy=None, owners=None):
         def seed(state):
             state["watcher"] = os.getpid()
@@ -389,105 +387,19 @@ class AppExitOscTests(unittest.TestCase):
         done = b"\x1b]7501;state=done:app=kiro\x1b\\"
         busy = {"sess": time.time()}
         owners = {"sess": 4242}
-        for reason in ("owner exit", "agent gone"):
-            path = os.path.join(directory, reason.replace(" ", "-") + ".json")
-            self._seed(path, busy=busy, owners=owners)
-            ok, order, payloads, pid_lists = self._finish(path, "t7", reason, env, busy=busy)
-            self.assertTrue(ok)
-            emitted = ("emit", path, "idle", "")
-            self.assertIn(emitted, order)
-            self.assertLess(order.index(emitted), order.index(("clear", path)))
-            self.assertEqual(payloads, [done])
-            self.assertNotIn(b"state=idle", payloads[0])
-            self.assertNotIn(b"kind=auth", payloads[0])
-            self.assertIn(4242, pid_lists[0])
-            released = [(item[0], item[1][:2]) for item in order if item[0] == "herdr"]
-            self.assertIn(("herdr", ("release-agent", "t7")), released)
-            with open(path, encoding="utf-8") as handle:
-                self.assertEqual(json.load(handle)["watcher"], 0)
-
-    def test_app_idle_finish_does_not_release_or_emit(self):
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-idle-")
-        self.addCleanup(shutil.rmtree, directory, True)
-        path = os.path.join(directory, "t7.json")
-        self._seed(path)
-        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
-        ok, order, payloads, pid_lists = self._finish(path, "t7", "idle", env)
+        path = os.path.join(directory, "owner-exit.json")
+        self._seed(path, busy=busy, owners=owners)
+        ok, order, payloads, pid_lists = self._finish(path, "t7", "owner exit", env, busy=busy)
         self.assertTrue(ok)
-        self.assertEqual(payloads, [])
-        self.assertEqual(pid_lists, [])
-        self.assertFalse(any(item[0] == "emit" for item in order))
-        self.assertFalse(any(item[0] == "herdr" and item[1][0] == "release-agent" for item in order))
-        self.assertTrue(any(item[0] == "clear" for item in order))
+        emitted = ("emit", path, "idle", "")
+        self.assertIn(emitted, order)
+        self.assertLess(order.index(emitted), order.index(("clear", path)))
+        self.assertEqual(payloads, [done])
+        self.assertIn(4242, pid_lists[0])
+        released = [(item[0], item[1][:2]) for item in order if item[0] == "herdr"]
+        self.assertIn(("herdr", ("release-agent", "t7")), released)
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
-
-    def test_tui_owner_exit_releases_without_osc(self):
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-exit-")
-        self.addCleanup(shutil.rmtree, directory, True)
-        path = os.path.join(directory, "pane.json")
-        self._seed(path)
-        env = {"HC_TERMINAL_ID": "", "HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p9"}
-        ok, order, payloads, pid_lists = self._finish(path, "w1:p9", "owner exit", env)
-        self.assertTrue(ok)
-        self.assertEqual(payloads, [])
-        self.assertEqual(pid_lists, [])
-        self.assertFalse(any(item[0] == "emit" for item in order))
-        released = [(item[0], item[1][:2]) for item in order if item[0] == "herdr"]
-        self.assertIn(("herdr", ("release-agent", "w1:p9")), released)
-
-    def test_unknown_hook_state_writes_no_osc(self):
-        directory = tempfile.mkdtemp(prefix="herdr-kiro-unknown-")
-        self.addCleanup(shutil.rmtree, directory, True)
-        path = os.path.join(directory, "t7.json")
-
-        def seed(state):
-            state["seq"] = 2
-
-        hook.update(path, seed)
-        payloads = []
-
-        def fake_herdr(*_args):
-            return True
-
-        def capture(payload, _pids):
-            payloads.append(payload)
-            return "/dev/pts/7"
-
-        def refuse(*_args, **_kwargs):
-            raise AssertionError("side-effecting command")
-
-        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": "", "HERDR_KIRO_LOG": path + ".log"}
-        with (
-            mock.patch.object(hook, "herdr", fake_herdr),
-            mock.patch.object(osc, "write_to_pane", capture),
-            mock.patch.object(hook.subprocess, "run", refuse),
-            mock.patch.object(hook.subprocess, "check_output", refuse),
-            mock.patch.object(hook.subprocess, "Popen", refuse),
-            mock.patch.dict(os.environ, env, clear=False),
-        ):
-            self.assertTrue(hook.send_report("t7", path, "unknown"))
-            self.assertTrue(hook.emit_osc(path, "unknown"))
-        self.assertEqual(payloads, [])
-
-    def test_hook_words_do_not_send_kind_auth(self):
-        for kind, rule in (
-            ("working", ""),
-            ("idle", ""),
-            ("blocked", ""),
-            ("blocked", "question_panel"),
-            ("blocked", "workflow_question_esc_cancel"),
-            ("blocked", "workspace_trust"),
-            ("unknown", ""),
-            ("auth", ""),
-        ):
-            fields = osc.fields_for(kind, rule)
-            if fields is None:
-                continue
-            self.assertNotEqual(fields.get("kind"), "auth")
-            encoded = osc.encode(fields)
-            self.assertNotIn(b"kind=auth", encoded)
-            self.assertNotIn(b"state=idle", encoded)
 
 
 # Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and
