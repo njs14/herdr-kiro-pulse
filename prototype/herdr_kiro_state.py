@@ -45,7 +45,7 @@ import time
 
 import herdr_kiro_osc
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 SOURCE = "hook:kiro"
 AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
@@ -175,12 +175,16 @@ def fresh_state() -> dict:
         "grace_started": 0.0,
         "owners": {},
         "owner_started": {},
+        "owner_ident": {},
         "aggregate": 0,
         "generation": 0,
         "retiring": False,
         "owners_died": False,
         "chat_pid": 0,
         "chat_started": "",
+        "chat_ident": "",
+        "proven_pid": 0,
+        "proven_ident": "",
     }
 
 
@@ -188,12 +192,15 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
     raw_busy = state.get("busy")
     raw_owners = state.get("owners")
     raw_started = state.get("owner_started")
+    raw_ident = state.get("owner_ident")
     busy = raw_busy if isinstance(raw_busy, dict) else {}
     owners = raw_owners if isinstance(raw_owners, dict) else {}
     owner_started = raw_started if isinstance(raw_started, dict) else {}
+    owner_ident = raw_ident if isinstance(raw_ident, dict) else {}
     kept = {}
     kept_owners = {}
     kept_started = {}
+    kept_ident = {}
     dropped_dead = False
     for session, stamp in busy.items():
         try:
@@ -204,7 +211,7 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
         # A missed App exit write still has to name this pid. The tick that
         # notices the reap runs before that write. The stale-stamp cutoff
         # must not drop that pid while the write is still pending.
-        dead = owner_is_dead(owners.get(key), owner_started.get(key))
+        dead = owner_is_dead(owners.get(key), owner_ident.get(key))
         if dead and not retain_dead_owner:
             dropped_dead = True
             continue
@@ -214,6 +221,22 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
                 kept_owners[key] = owners.get(key)
                 if owner_started.get(key):
                     kept_started[key] = owner_started.get(key)
+                raw_ident = owner_ident.get(key)
+                if isinstance(raw_ident, str) and fine_start(raw_ident):
+                    kept_ident[key] = raw_ident
+    raw_chat = state.get("chat_ident")
+    chat_ident = raw_chat if isinstance(raw_chat, str) else ""
+    if not fine_start(chat_ident):
+        chat_ident = ""
+    raw_proven = state.get("proven_ident")
+    proven_ident = raw_proven if isinstance(raw_proven, str) else ""
+    try:
+        proven_pid = int(state.get("proven_pid") or 0)
+    except (TypeError, ValueError):
+        proven_pid = 0
+    if not fine_start(proven_ident) or proven_pid <= 1:
+        proven_pid = 0
+        proven_ident = ""
     try:
         seq = int(state.get("seq") or 0)
     except (TypeError, ValueError):
@@ -257,12 +280,16 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
         "grace_started": grace_started,
         "owners": kept_owners,
         "owner_started": kept_started,
+        "owner_ident": kept_ident,
         "aggregate": aggregate,
         "generation": int(state.get("generation") or 0),
         "retiring": bool(state.get("retiring")),
         "owners_died": owners_died,
         "chat_pid": int(state.get("chat_pid") or 0),
         "chat_started": state.get("chat_started") or "",
+        "chat_ident": chat_ident,
+        "proven_pid": proven_pid,
+        "proven_ident": proven_ident,
     }
 
 
@@ -281,8 +308,54 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     if not owner:
         return
     state["owners"][key] = int(owner)
-    if started:
-        state["owner_started"][key] = started
+    if not started:
+        return
+    state["owner_started"][key] = started
+    # Whole-second lstart matches a pid reused in that same second. The pid
+    # file stores hires_start. A sec: token is that one-second value, so it
+    # is not this owner. A later event must not leave one in place.
+    ident = hires_start(int(owner))
+    idents = state.get("owner_ident")
+    if not isinstance(idents, dict):
+        idents = {}
+        state["owner_ident"] = idents
+    if fine_start(ident):
+        idents[key] = ident
+        return
+    current = idents.get(key) or ""
+    if isinstance(current, str) and fine_start(current):
+        return
+    idents.pop(key, None)
+
+
+def _keep_proven_pane(state: dict, key: str) -> None:
+    """Save a proven pane owner before END drops its row.
+
+    The idle report runs after that drop. state=done still has to reach the
+    tty this token proved. An empty token or a sec: token is not saved.
+    """
+    owners = state.get("owners")
+    if not isinstance(owners, dict):
+        return
+    try:
+        pid = int(owners.get(key) or 0)
+    except (TypeError, ValueError):
+        return
+    idents = state.get("owner_ident")
+    raw = idents.get(key) if isinstance(idents, dict) else ""
+    token = raw if isinstance(raw, str) else ""
+    if not identity_proven(pid, token):
+        return
+    state["proven_pid"] = pid
+    state["proven_ident"] = token
+
+
+def _pop_session(state: dict, key: str) -> None:
+    _keep_proven_pane(state, key)
+    state["busy"].pop(key, None)
+    state["owners"].pop(key, None)
+    state["owner_started"].pop(key, None)
+    state["owner_ident"].pop(key, None)
 
 
 def finish_if_idle(state: dict, now: float) -> None:
@@ -307,6 +380,8 @@ def apply_event(
     if chat_pid:
         nxt["chat_pid"] = int(chat_pid)
         nxt["chat_started"] = chat_started or ""
+        token = hires_start(int(chat_pid))
+        nxt["chat_ident"] = token if fine_start(token) else ""
     if session == AGGREGATE:
         count = int(nxt.get("aggregate") or 0)
         if event == "SessionStart":
@@ -324,9 +399,7 @@ def apply_event(
                 count -= 1
             nxt["aggregate"] = count
             if count == 0:
-                nxt["busy"].pop(AGGREGATE, None)
-                nxt["owners"].pop(AGGREGATE, None)
-                nxt["owner_started"].pop(AGGREGATE, None)
+                _pop_session(nxt, AGGREGATE)
                 finish_if_idle(nxt, now)
             else:
                 nxt["busy"][AGGREGATE] = now
@@ -345,21 +418,20 @@ def apply_event(
             nxt["busy"][session] = now
             remember_owner(nxt, session, owner, owner_started)
         else:
+            # The first event can store lstart before a fine token exists.
+            # A later busy event for that same session has to record it.
             for member in members_of(nxt["busy"], session):
                 nxt["busy"][member] = now
+                remember_owner(nxt, member, owner, owner_started)
         nxt["grace_until"] = 0.0
     elif event in END_EVENTS:
         if session in nxt["busy"]:
-            nxt["busy"].pop(session, None)
-            nxt["owners"].pop(session, None)
-            nxt["owner_started"].pop(session, None)
+            _pop_session(nxt, session)
         else:
             members = members_of(nxt["busy"], session)
             if members:
                 oldest = min(members, key=lambda item: (nxt["busy"][item], item))
-                nxt["busy"].pop(oldest, None)
-                nxt["owners"].pop(oldest, None)
-                nxt["owner_started"].pop(oldest, None)
+                _pop_session(nxt, oldest)
         if not nxt["busy"]:
             nxt["grace_until"] = now + SETTLE_SECS
             nxt["grace_started"] = now
@@ -484,12 +556,14 @@ def herdr(*args: str) -> bool:
 
 
 def _status_targets(path: str) -> tuple[list[int], list[int]]:
-    """Pids a start token identifies, and recorded pids the pane walk must skip.
+    """Pids a hires token identifies, and recorded pids the pane walk must skip.
 
-    An empty token matches any live pid. The walk has to stop at that pid, not
+    The token is the one the pid file stores. An empty token does not identify
+    a live pid, and neither does sec: plus whole-second lstart. Working and
+    done both require a finer token. The walk has to stop at that pid, not
     only leave it out of the explicit list: the next ancestor with a pty would
-    otherwise receive the status. When one record identifies the pid and another
-    does not, the match wins.
+    otherwise receive the status. When one record identifies the pid and
+    another does not, the match wins.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -501,16 +575,20 @@ def _status_targets(path: str) -> tuple[list[int], list[int]]:
     allowed: list[int] = []
     blocked: list[int] = []
     owners = state.get("owners") or {}
-    started_map = state.get("owner_started") if isinstance(state.get("owner_started"), dict) else {}
+    raw_ident = state.get("owner_ident")
+    idents = raw_ident if isinstance(raw_ident, dict) else {}
     if isinstance(owners, dict):
         for key, value in owners.items():
             try:
                 pid = int(value)
             except (TypeError, ValueError):
                 continue
-            raw = started_map.get(key) or ""
+            raw = idents.get(key) or ""
             token = raw if isinstance(raw, str) else ""
-            if pid > 1 and token and alive(pid, token):
+            # sec: plus lstart matches a pid reused in that same second.
+            # It does not paint state=working or state=done.
+            identified = fine_start(token) and alive(pid, token)
+            if pid > 1 and identified:
                 allowed.append(pid)
             elif pid > 1:
                 blocked.append(pid)
@@ -518,9 +596,10 @@ def _status_targets(path: str) -> tuple[list[int], list[int]]:
         chat = int(state.get("chat_pid") or 0)
     except (TypeError, ValueError):
         chat = 0
-    raw_chat = state.get("chat_started") or ""
+    raw_chat = state.get("chat_ident") or ""
     chat_token = raw_chat if isinstance(raw_chat, str) else ""
-    if chat > 1 and chat_token and alive(chat, chat_token):
+    chat_ok = fine_start(chat_token) and alive(chat, chat_token)
+    if chat > 1 and chat_ok:
         allowed.append(chat)
     elif chat > 1:
         blocked.append(chat)
@@ -537,7 +616,9 @@ def _status_targets(path: str) -> tuple[list[int], list[int]]:
 
 # Fd this process opened from /proc/<owner>/fd while that owner was alive.
 # The watcher opens it in this interpreter. The exit writes this fd.
+# The token is the identity that proved the owner when the fd was opened.
 _pane_fd = -1
+_held_ident = ""
 _HELD_FLAGS = (
     os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
     os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
@@ -553,18 +634,33 @@ def _open_held(open_path: str) -> int:
     return -1
 
 
-def _hold_live_owner(pid: int, started: str) -> None:
+def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
     """Dup the tty fd this owner still has open.
 
-    An empty start token matches any live process at this pid, so it does
-    not identify the owner. Do not hold that process's tty.
+    An empty hires token does not identify the owner. Do not hold that
+    process's tty. Whole-second lstart still matches a pid reused in that
+    same second, so the hold uses the token the pid file stores. The fd has
+    to be the named tty. Any other character device, including a replaced
+    fd 1, is closed.
     """
-    global _pane_fd
-    if _pane_fd >= 0 or pid <= 1 or not started or not alive(pid, started):
+    global _pane_fd, _held_ident
+    del started
+    # An empty token is not a mismatch of ``if ident and``. A ``sec:`` token
+    # compares equal for a pid reused in that same second. Neither may hold.
+    if _pane_fd >= 0 or not identity_proven(pid, ident):
         return
     prefix = f"/proc/{pid}/fd/"
-    for open_path, _device in herdr_kiro_osc._tty_opens(pid):
+    for open_path, named in herdr_kiro_osc._tty_opens(pid):
         if not str(open_path).startswith(prefix):
+            continue
+        device = str(named)
+        if not herdr_kiro_osc._TTY.fullmatch(device):
+            continue
+        try:
+            expected = os.stat(device)
+        except OSError:
+            continue
+        if not stat.S_ISCHR(expected.st_mode):
             continue
         fd = _open_held(open_path)
         if fd < 0:
@@ -574,20 +670,143 @@ def _hold_live_owner(pid: int, started: str) -> None:
         except OSError:
             os.close(fd)
             continue
-        if not stat.S_ISCHR(info.st_mode):
+        if not stat.S_ISCHR(info.st_mode) or info.st_rdev != expected.st_rdev:
             os.close(fd)
             continue
         _pane_fd = fd
+        _held_ident = ident
         return
 
 
 def _close_held_fd() -> None:
-    global _pane_fd
+    global _pane_fd, _held_ident
     fd = _pane_fd
     _pane_fd = -1
+    _held_ident = ""
     if fd >= 0:
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def identity_proven(pid: int, token: object) -> bool:
+    """True when `token` is finer than this pid's whole-second start and names it.
+
+    An empty token does not prove the pid. ``sec:`` plus lstart is that
+    whole-second start, so it does not prove the pid either.
+    """
+    if not isinstance(token, str) or not fine_start(token):
+        return False
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if number <= 1:
+        return False
+    snap = process_snapshot(number)
+    if snap and not snap.get("error"):
+        started = snap.get("lstart") or ""
+        if started and (token == started or token == "sec:" + started):
+            return False
+    return alive(number, token)
+
+
+def _recorded_identities(path: str, *, include_pane: bool = False) -> list[tuple[int, str]]:
+    """Owner and chat pids with the token currently stored for each.
+
+    `include_pane` adds the owner saved when Stop dropped a proven row.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.loads(handle.read() or "{}")
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    found: list[tuple[int, str]] = []
+    owners = state.get("owners") or {}
+    raw_idents = state.get("owner_ident")
+    idents = raw_idents if isinstance(raw_idents, dict) else {}
+    if isinstance(owners, dict):
+        for key, value in owners.items():
+            try:
+                pid = int(value)
+            except (TypeError, ValueError):
+                continue
+            raw = idents.get(key) or ""
+            token = raw if isinstance(raw, str) else ""
+            if pid > 1:
+                found.append((pid, token))
+    try:
+        chat = int(state.get("chat_pid") or 0)
+    except (TypeError, ValueError):
+        chat = 0
+    raw_chat = state.get("chat_ident") or ""
+    chat_token = raw_chat if isinstance(raw_chat, str) else ""
+    if chat > 1:
+        found.append((chat, chat_token))
+    if include_pane:
+        raw_pane = state.get("proven_ident") or ""
+        pane_token = raw_pane if isinstance(raw_pane, str) else ""
+        try:
+            pane_pid = int(state.get("proven_pid") or 0)
+        except (TypeError, ValueError):
+            pane_pid = 0
+        if pane_pid > 1 and not any(pid == pane_pid for pid, _known in found):
+            found.append((pane_pid, pane_token))
+    return found
+
+
+def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id: str = "") -> bool:
+    """Write state=working or state=done for one proven owner.
+
+    This is the only write of those two states. The target is `pid`, or the
+    fd opened for that pid while the token proved it. A process whose token
+    is missing or only whole-second is not eligible, and dropping its row
+    does not make some other process eligible.
+    """
+    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    if fields is None or fields.get("state") not in ("working", "done"):
+        return False
+    # A held fd was opened only after identity_proven succeeded. The process
+    # may already be gone, so the stored token is the proof.
+    proven = fine_start(token) if held_fd >= 0 else identity_proven(pid, token)
+    if not proven:
+        return False
+    try:
+        payload = herdr_kiro_osc.encode(fields)
+    except ValueError:
+        log("refusing osc")
+        return False
+    if held_fd >= 0:
+        try:
+            herdr_kiro_osc._write_all(held_fd, payload)
+        except OSError:
+            log("osc missed done")
+            return False
+        log("osc done via held")
+        return True
+    device = herdr_kiro_osc.write_pid(payload, pid)
+    if not device:
+        return False
+    log(f"osc {fields['state']} via {device}")
+    return True
+
+
+def _paint_proven(path: str, kind: str, rule_id: str = "") -> bool:
+    """Paint each recorded pid whose token proves it.
+
+    state=done also paints the pane owner saved from a proven row at Stop.
+    """
+    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    if fields is None or fields.get("state") not in ("working", "done"):
+        return False
+    painted = False
+    for pid, token in _recorded_identities(path, include_pane=fields.get("state") == "done"):
+        if paint_status(kind, pid, token, rule_id=rule_id):
+            painted = True
+    if not painted:
+        log(f"osc missed {fields['state']}")
+    return painted
 
 
 def _write_held_fd() -> bool:
@@ -595,14 +814,7 @@ def _write_held_fd() -> bool:
     fd = _pane_fd
     if fd < 0:
         return False
-    payload = herdr_kiro_osc.encode(herdr_kiro_osc.fields_for("idle"))
-    try:
-        herdr_kiro_osc._write_all(fd, payload)
-    except OSError:
-        log("osc missed done")
-        return False
-    log("osc done via held")
-    return True
+    return paint_status("idle", 0, _held_ident, held_fd=fd)
 
 
 def _watcher_still_us(path: str) -> bool:
@@ -629,6 +841,8 @@ def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None:
         return True
+    if fields.get("state") in ("working", "done"):
+        return _paint_proven(path, kind, rule_id)
     try:
         payload = herdr_kiro_osc.encode(fields)
     except ValueError:
@@ -1283,15 +1497,26 @@ def _pids_exited(pids) -> bool:
     return saw
 
 
+def _ident_map(state: dict) -> dict:
+    raw = state.get("owner_ident")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _chat_ident(state: dict) -> str:
+    raw = state.get("chat_ident") or ""
+    return raw if isinstance(raw, str) else ""
+
+
 def tracked_exit(state: dict, chat_hits: int):
     """How a tracked Kiro process ended.
 
     'outer' when the recorded kiro-cli pid is gone. 'chat' when the recorded
     kiro-cli-chat pid is gone and no replacement is under a living outer, for
     several ticks. A live pid is not an exit, including when its parent is init.
+    Identity is the hires token, not whole-second lstart.
     """
     owners = state.get("owners") or {}
-    started = state.get("owner_started") or {}
+    idents = _ident_map(state)
     outer_alive = False
     saw_outer = False
     for key, owner in owners.items():
@@ -1302,14 +1527,14 @@ def tracked_exit(state: dict, chat_hits: int):
         if pid <= 1:
             continue
         saw_outer = True
-        if alive(pid, started.get(key) or ""):
+        if alive(pid, idents.get(key) or ""):
             outer_alive = True
     if saw_outer and not outer_alive:
         return "outer", 0
     chat = int(state.get("chat_pid") or 0)
     if not chat:
         return None, 0
-    if alive(chat, state.get("chat_started") or ""):
+    if alive(chat, _chat_ident(state)):
         return None, 0
     if outer_alive:
         for key, owner in owners.items():
@@ -1317,7 +1542,7 @@ def tracked_exit(state: dict, chat_hits: int):
                 pid = int(owner)
             except (TypeError, ValueError):
                 continue
-            if alive(pid, started.get(key) or "") and chat_under(pid):
+            if alive(pid, idents.get(key) or "") and chat_under(pid):
                 return None, 0
     hits = chat_hits + 1
     if hits >= GONE_CONFIRM_HITS:
@@ -1482,6 +1707,16 @@ def hires_start(pid: int) -> str:
     return "sec:" + token
 
 
+def fine_start(token: str) -> bool:
+    """True when this token is finer than one second.
+
+    The non-tick path stores ``sec:`` plus whole-second lstart. A pid reused
+    in that same second produces the same string. That token is not an owner,
+    and it does not paint that pid.
+    """
+    return isinstance(token, str) and bool(token) and not token.startswith("sec:")
+
+
 def watcher_identity(pid: int):
     """None when the pid is gone. error is set when ps cannot be read."""
     try:
@@ -1558,7 +1793,14 @@ def ownership(dest: str) -> str:
 
 
 def owner_is_dead(owner: object, started: object = "") -> bool:
-    """True when this pid is gone. A live process is never dead because of its parent."""
+    """True when this pid is gone, or a fine token names a different process.
+
+    An empty token is not proof the process exited, so the row stays and a
+    later event can record one. A ``sec:`` token on a live pid is not that
+    proof either. Dropping the row takes the pid off the skip list, and the
+    ancestor walk then paints its tty. A live process is never dead because
+    of its parent.
+    """
     if not isinstance(owner, (int, str)) or not owner:
         return False
     try:
@@ -1570,11 +1812,18 @@ def owner_is_dead(owner: object, started: object = "") -> bool:
         return True
     if snap.get("error"):
         return False
-    return bool(started and snap.get("lstart") != started)
+    token = started if isinstance(started, str) else ""
+    if not token or not fine_start(token):
+        return False
+    return hires_start(pid) != token
 
 
-def alive(pid: int, started: str = "") -> bool:
-    if pid <= 0:
+def _process_matches(pid: int, started: str) -> bool:
+    """True when this pid exists and its hires token equals `started`.
+
+    This includes a ``sec:`` token. The watcher slot uses it. An owner does not.
+    """
+    if pid <= 0 or not isinstance(started, str) or not started:
         return False
     snap = process_snapshot(pid)
     if snap is None:
@@ -1584,8 +1833,18 @@ def alive(pid: int, started: str = "") -> bool:
             os.kill(pid, 0)
         except OSError:
             return False
-        return not started
-    return not (started and snap.get("lstart") != started)
+        return False
+    return hires_start(pid) == started
+
+
+def alive(pid: int, started: str = "") -> bool:
+    """True when this pid is still the process a fine start token names.
+
+    A ``sec:`` token does not make this pid the owner.
+    """
+    if not fine_start(started):
+        return False
+    return _process_matches(pid, started)
 
 
 def agent_lookup(pane: str) -> str:
@@ -1651,9 +1910,9 @@ def owners_status(state: dict) -> str:
     owners = state.get("owners") or {}
     if not owners:
         return "none"
-    started = state.get("owner_started") or {}
+    idents = _ident_map(state)
     for key, owner in owners.items():
-        if not owner_is_dead(owner, started.get(key) or ""):
+        if not owner_is_dead(owner, idents.get(key) or ""):
             return "alive"
     return "dead"
 
@@ -1772,7 +2031,7 @@ def ensure_watcher(pane: str, path: str) -> None:
         retiring = bool(state.get("retiring"))
         if claimed and retiring:
             return
-        if not retiring and (claimed or alive(pid, state.get("watcher_started") or "")):
+        if not retiring and (claimed or _process_matches(pid, state.get("watcher_started") or "")):
             return
         state["watcher"] = -1
         state["watcher_at"] = now
@@ -1797,11 +2056,12 @@ def ensure_watcher(pane: str, path: str) -> None:
         snap = process_snapshot(proc.pid)
     if snap and not snap.get("error"):
         started = snap.get("lstart") or ""
+    watcher_token = hires_start(proc.pid)
 
     def record(state: dict) -> None:
         state["watcher"] = proc.pid
-        if started:
-            state["watcher_started"] = started
+        if watcher_token:
+            state["watcher_started"] = watcher_token
         state["retiring"] = False
 
     update(path, record)
@@ -1825,7 +2085,11 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
-    retain_owner = reason != "idle" and in_app()
+    # A TUI pane that also has HC_TERMINAL_ID reads that pane. send_report
+    # already returns before emit_osc there, because those bytes land on the
+    # inner tty. The exit write follows that.
+    app_exit = reason != "idle" and in_app() and not in_tui()
+    retain_owner = app_exit
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
@@ -1839,7 +2103,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
             return
         # The held fd is the only exit write. Another tty is not success,
         # and there is no path open when this process holds no fd.
-        if reason != "idle" and in_app() and not _write_held_fd():
+        if app_exit and not _write_held_fd():
             return
         decision["ok"] = release_if_current(current, generation, keys)
 
@@ -2004,10 +2268,11 @@ def _watch_loop(pane: str, path: str) -> None:
     begin_tick()
     snap = process_snapshot(os.getpid())
     started = "" if not snap or snap.get("error") else snap.get("lstart") or ""
+    watcher_token = hires_start(os.getpid())
 
     def claim(state: dict) -> None:
         state["watcher"] = os.getpid()
-        state["watcher_started"] = started
+        state["watcher_started"] = watcher_token or started
 
     update(path, claim, retain_dead_owner=in_app())
     write_pidfile(path, os.getpid(), started)
@@ -2055,24 +2320,27 @@ def _watch_loop(pane: str, path: str) -> None:
                 known_owners = current_owners
             kind, chat_hits = tracked_exit(state, chat_hits)
             owner_alive = False
-            started_by_pid = {}
+            ident_by_pid = {}
+            idents = _ident_map(state)
             for key, owner in (state.get("owners") or {}).items():
                 try:
-                    started_by_pid[int(owner)] = (state.get("owner_started") or {}).get(key) or ""
+                    pid_key = int(owner)
                 except (TypeError, ValueError):
                     continue
+                raw = idents.get(key) or ""
+                ident_by_pid[pid_key] = raw if isinstance(raw, str) else ""
             for owner in (state.get("owners") or {}).values():
                 try:
                     pid = int(owner)
                 except (TypeError, ValueError):
                     continue
-                started = started_by_pid.get(pid) or ""
-                if not alive(pid, started):
+                ident = ident_by_pid.get(pid) or ""
+                if not alive(pid, ident):
                     continue
                 owner_alive = True
-                _hold_live_owner(pid, started)
+                _hold_live_owner(pid, ident, ident)
                 break
-            if not owner_alive and chat_pid and alive(chat_pid, state.get("chat_started") or ""):
+            if not owner_alive and chat_pid and alive(chat_pid, _chat_ident(state)):
                 owner_alive = True
             pane_kiro = kiro_in_pane(list(known_owners))
             owner_dead = kind is not None or should_stop_for_dead_owner(state, pane_kiro)

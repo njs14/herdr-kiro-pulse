@@ -16,7 +16,7 @@ The workspace trust dialog blocks the pane. Get and explain both report blocked,
 
 Preconditions:
 
-- Doctor still reports agent `kiro`.
+- Doctor still reports agent `kiro` or `kiro-cli`.
 - No workflow banner is on screen. A banner under the dialog is working, not trust.
 
 - **Show the dialog.** Run `python3 .cursor/skills/verify-herdr-kiro/drive.py paint trust`.

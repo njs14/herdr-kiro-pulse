@@ -8,10 +8,12 @@ A [herdr](https://herdr.dev) plugin that reports a [Kiro CLI](https://kiro.dev/d
 
 The App reads status only from OSC 7501 on the program's own output. `hc` is the herdr-core CLI. It can print a screen and paste input. It cannot set status. Inside an App terminal, core sets `HC_TERMINAL_ID`, and this hook writes one report to that pane's tty:
 
-- a running turn is `state=working:app=kiro`
-- a chooser or the workspace-trust dialog is `state=blocked:kind=permission:app=kiro`
-- a question panel is `state=blocked:kind=question:app=kiro`
-- a finished turn is `state=done:app=kiro`
+- a running turn is `state=working:app=kiro-cli`
+- a chooser or the workspace-trust dialog is `state=blocked:kind=permission:app=kiro-cli`
+- a question panel is `state=blocked:kind=question:app=kiro-cli`
+- a finished turn is `state=done:app=kiro-cli`
+
+Kiro CLI 3.0 sends `app=kiro-cli`. An older session still sends `app=kiro`. Both are this program.
 
 `herdr-app ls` shows `blocked` as needing you. It shows `done` while the turn is unseen, and idle once `herdr.seen` is that turn. The painted Agents section is a separate hold: a focused row that was under Done stays under Done after that list status is idle, and selecting another tab in the same space moves the row to Idle. A finished turn stays `state=done` on the wire.
 
@@ -33,7 +35,7 @@ The GIF above (960×540, 12 seconds) is [demo/herdr-kiro-demo.gif](demo/herdr-ki
 
 ## Install
 
-Requires herdr 0.9.5 or newer, `kiro-cli` on `PATH`, and Python 3.9 or newer. Platforms in `herdr-plugin.toml` are Linux and macOS.
+Requires herdr 0.9.5 or newer, Kiro CLI 3.0 (`kiro-cli` on `PATH`), and Python 3.9 or newer. Platforms in `herdr-plugin.toml` are Linux and macOS.
 
 ```bash
 herdr plugin install njs14/herdr-kiro-pulse
@@ -52,7 +54,7 @@ With herdr installed and no server running, that exits 0. Stdout:
 ```text
 Installed ~/.kiro/hooks/herdr-kiro.json
 Installed ~/.config/herdr/agent-detection/kiro.toml
-Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat --v3
+Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat
 ```
 
 Stderr when nothing is listening: `note: no herdr server is running; reload happens on the next herdr start`. If `HERDR_SESSION` names a session that is not running, the script exits 2.
@@ -69,10 +71,10 @@ herdr plugin action invoke herdr-kiro.install
 Kiro reads hooks when its process starts. After install:
 
 ```bash
-kiro-cli chat --v3
+kiro-cli chat
 ```
 
-The hook was tested with `chat.agentEngine` set to `v3` and `chat.enableWorkflows` set to `true`. Nothing in this package writes those settings, and nothing restarts a `kiro-cli` that is already running. Outside an App terminal (`HC_TERMINAL_ID`) and outside a TUI pane (`HERDR_ENV=1` and `HERDR_PANE_ID`) the hook exits without reporting.
+Kiro CLI 3.0 is the supported CLI. Interactive chat starts on V3. A saved `chat.agentEngine` of `v2` still selects V2. `chat.enableWorkflows` has to be `true` for the workflow runs. Nothing in this package writes those settings, and nothing restarts a `kiro-cli` that is already running. Outside an App terminal (`HC_TERMINAL_ID`) and outside a TUI pane (`HERDR_ENV=1` and `HERDR_PANE_ID`) the hook exits without reporting.
 
 ```bash
 ./doctor.sh
@@ -105,9 +107,9 @@ Stay on the stock file if you want herdr to keep applying newer remote Kiro rule
 
 ## Status
 
-Version 0.1.0, from `herdr-plugin.toml`. Actively changed. Not a stable API, and not published.
+Version 0.1.1, from `herdr-plugin.toml`. Kiro CLI 3.0 is the supported CLI.
 
-Unit tests on this tree: 168 passed, 1 error, on Python 3.15.2, with herdr 0.9.5. The command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes from herdr 0.9.5 and Kiro CLI 2.37.0 are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
+The unit command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 `python3 harness/run_suite.py` drives workflows in a herdr pane. It needs a session, a Kiro pane, and `KIRO_API_KEY` in that environment. Do not print the key.
 

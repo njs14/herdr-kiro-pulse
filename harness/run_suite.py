@@ -216,7 +216,8 @@ def ensure_kiro():
             "120000",
             "--",
             "chat",
-            "--v3",
+            # A headless run that omits --trust-all-tools stays on V2, so
+            # this suite keeps that flag. The approval check does not pass it.
             "--trust-all-tools",
             "--trust-workspace",
             timeout=150,

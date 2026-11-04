@@ -4,9 +4,11 @@ The bundle includes `.git`. `git rev-parse HEAD` is the commit this tree was pac
 
 Do not print `KIRO_API_KEY`. Do not write it into logs.
 
+Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A headless run that omits `--trust-all-tools` stays on V2, so `harness/run_suite.py` keeps that flag. The approval check is interactive and does not pass `--trust-all-tools`. `hc --json get` reports `app` `kiro-cli` on CLI 3.0. An older session still sends `app=kiro`. Both are this program. The tables further down are records of earlier runs.
+
 ## What passing looks like
 
-`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty, including that a finished turn stays `state=done` and that a focused Agents row stays under Done until it is left. It does not launch the Herdr App. A live App check is a Mac run of `kiro-cli chat --v3` inside an App terminal. The painted sidebar check selects another tab. It uses `echo` or `true` when a tool approval is required.
+`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty, including that a finished turn stays `state=done` and that a focused Agents row stays under Done until it is left. It does not launch the Herdr App. A live App check is a Mac run of `kiro-cli chat` inside an App terminal. `hc --json get` status `app` is `kiro-cli` or `kiro`. The painted sidebar check selects another tab. It uses `echo` or `true` when a tool approval is required. Do not pass `--trust-all-tools`.
 
 `tests/run_py39.sh` runs those tests on Python 3.9. Stock macOS `/usr/bin/python3` is 3.9, and the hook uses `from __future__ import annotations` so `int | None` is not evaluated at import.
 
@@ -49,7 +51,7 @@ This removes the hook file only when the marker sha256 still matches, and rename
 
 ## Stripped session ids
 
-Kiro 2.37.0 starts each hook in a new process. A parent pid is different on every event, so it cannot join a Start to its Stop. When `session_id` is missing, every event for the pane shares one aggregate slot. The slot ends when the SessionStart count returns to zero, when the idle prompt has stayed up with no banner and no tool for 2 seconds, or when the outer `kiro-cli` process exits. The grace after that is 0.5 seconds. Busy count cannot grow with the event count. A second SessionStart does not end the slot by itself.
+Kiro starts each hook in a new process. A parent pid is different on every event, so it cannot join a Start to its Stop. When `session_id` is missing, every event for the pane shares one aggregate slot. The slot ends when the SessionStart count returns to zero, when the idle prompt has stayed up with no banner and no tool for 2 seconds, or when the outer `kiro-cli` process exits. The grace after that is 0.5 seconds. Busy count cannot grow with the event count. A second SessionStart does not end the slot by itself.
 
 `harness/strip_session_id.py` is the live probe. It strips `session_id` and runs the real hook as a child. On this VM, 19 stripped events had 19 different immediate parents and one shared `kiro-cli`. Max busy was 1. The last Stop left busy at 0 and started grace. The watcher then exited.
 
@@ -93,7 +95,7 @@ Kiro CLI 2.37.0's documented hook list includes `Stop` and does not list `Sessio
 | solo | 32 | 0 | 0.121s | no |
 | watch-tool | 25 | 0 | 0.628s | no |
 
-`herdr plugin link` of this tree registered `herdr-kiro` 0.8.0. `herdr plugin install` was not used. It only clones GitHub, and this package is not published.
+`herdr plugin link` of this tree registered `herdr-kiro` 0.8.0. `herdr plugin install` was not used on that run. The package was not on GitHub yet.
 
 ## v9 on this VM
 

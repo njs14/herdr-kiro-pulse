@@ -27,6 +27,20 @@ def version_key(text):
     return tuple(parts) if parts else None
 
 
+def cli_version(text):
+    """The first dotted number in `kiro-cli 3.0.0`."""
+    for token in (text or "").split():
+        key = version_key(token)
+        if key is not None:
+            return key
+    return None
+
+
+def cli_supports_v3_default(cli_key):
+    """CLI 3.0 starts interactive chat on V3 when chat.agentEngine is unset."""
+    return cli_key is not None and cli_key >= (3,)
+
+
 def newer_upstream(remote, baseline=BUILT_AGAINST):
     remote_key = version_key(remote)
     base_key = version_key(baseline)
@@ -177,12 +191,20 @@ def main() -> int:
     print("kiro-cli: %s" % (kiro_text if code == 0 and kiro_text else "not on PATH"))
     if code != 0 or not kiro_text:
         problems.append("kiro-cli is not on PATH")
+    cli_key = cli_version(kiro_text) if code == 0 and kiro_text else None
+    if code == 0 and kiro_text and not cli_supports_v3_default(cli_key):
+        problems.append("kiro-cli is older than 3.0, the supported CLI")
     engine, engine_from = read_setting("chat.agentEngine")
     workflows, workflows_from = read_setting("chat.enableWorkflows")
-    print(f"chat.agentEngine: {engine} ({engine_from})")
+    # A saved chat.agentEngine still selects the harness. Unset on 3.0 does not:
+    # interactive chat starts on V3.
+    if cli_supports_v3_default(cli_key) and engine == "unknown":
+        print(f"chat.agentEngine: unset ({engine_from}); CLI 3.0 interactive default is V3")
+    else:
+        print(f"chat.agentEngine: {engine} ({engine_from})")
+        if engine != "v3":
+            problems.append(f"chat.agentEngine is {engine}, want v3")
     print(f"chat.enableWorkflows: {workflows} ({workflows_from})")
-    if engine != "v3":
-        problems.append(f"chat.agentEngine is {engine}, want v3")
     if workflows != "true":
         problems.append(f"chat.enableWorkflows is {workflows}, want true")
     config = os.path.join(

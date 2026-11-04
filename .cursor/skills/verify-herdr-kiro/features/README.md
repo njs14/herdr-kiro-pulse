@@ -7,7 +7,7 @@ This directory is the maintained source for verifying the Kiro hook in a herdr p
 - Launch with `python3 .cursor/skills/verify-herdr-kiro/drive.py launch` from the repo root.
 - Set `VERIFY_RUN` to a scratch directory this run owns. The default is `/tmp/herdr-kiro-verify`.
 - Set `HERDR_BIN` when the herdr 0.9.5 binary is not on `PATH`.
-- Run `python3 .cursor/skills/verify-herdr-kiro/drive.py doctor` and require version `0.9.5`, agent `kiro`, and a cwd under `VERIFY_RUN`.
+- Run `python3 .cursor/skills/verify-herdr-kiro/drive.py doctor` and require version `0.9.5`, agent `kiro` or `kiro-cli`, and a cwd under `VERIFY_RUN`.
 - Never drive a herdr session this launch did not start.
 
 ## Driving conventions
