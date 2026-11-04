@@ -108,7 +108,7 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(state, "blocked")
 
     def test_workspace_trust_dialog_is_blocked(self):
-        capture = os.path.join(ROOT, "logs", "workspace-trust.txt")
+        capture = os.path.join(ROOT, "tests", "screens", "workspace-trust.txt")
         with open(capture, encoding="utf-8") as handle:
             text = handle.read()
         state, rule = self.explain(text)
@@ -254,7 +254,7 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual((state, rule), ("working", "workflow_banner_working"))
 
     def _capture(self, name):
-        path = os.path.join(ROOT, "logs", name)
+        path = os.path.join(ROOT, "tests", "screens", name)
         with open(path, encoding="utf-8") as handle:
             return handle.read()
 

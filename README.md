@@ -49,15 +49,15 @@ Manual install from a clone:
 ./install.sh
 ```
 
-With herdr installed and no server running, that exits 0. Stdout:
+With herdr on `PATH` and no server running, that exits 0. Stdout is `Installed` plus the absolute path of each file, then the restart line. The default paths expand from `$HOME`:
 
 ```text
-Installed ~/.kiro/hooks/herdr-kiro.json
-Installed ~/.config/herdr/agent-detection/kiro.toml
+Installed /home/you/.kiro/hooks/herdr-kiro.json
+Installed /home/you/.config/herdr/agent-detection/kiro.toml
 Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat
 ```
 
-Stderr when nothing is listening: `note: no herdr server is running; reload happens on the next herdr start`. If `HERDR_SESSION` names a session that is not running, the script exits 2.
+`/home/you` stands in for the home directory. `$KIRO_HOOKS_DIR` replaces `$HOME/.kiro/hooks`, and `$XDG_CONFIG_HOME` replaces `$HOME/.config`, when those are set. Stderr when nothing is listening: `note: no herdr server is running; reload happens on the next herdr start`. If `herdr` is not on `PATH`, stderr is `herdr is not on PATH, skipped manifest reload` and the script still exits 0. If `HERDR_SESSION` names a session that is not running, the script exits 2.
 
 Register the same script as a plugin action:
 
@@ -107,7 +107,7 @@ Stay on the stock file if you want herdr to keep applying newer remote Kiro rule
 
 ## Status
 
-Version 0.1.1, from `herdr-plugin.toml`. Kiro CLI 3.0 is the supported CLI.
+Version 0.1.0, from `herdr-plugin.toml`. Kiro CLI 3.0 is the supported CLI.
 
 The unit command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 

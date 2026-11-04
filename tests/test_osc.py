@@ -26,16 +26,28 @@ import herdr_kiro_state as hook
 
 
 def _read_ready(fd, timeout):
-    ready, _, _ = select.select([fd], [], [], timeout)
-    if not ready:
-        return b""
-    try:
-        return os.read(fd, 4096)
-    except OSError as exc:
-        # The last slave fd closed. An empty buffer is EIO, not a payload.
-        if exc.errno == errno.EIO:
-            return b""
-        raise
+    """Read until the pty is quiet. One write can arrive as its own read."""
+    deadline = time.monotonic() + timeout
+    chunks = []
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining < 0:
+            remaining = 0
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            break
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError as exc:
+            # The last slave fd closed. An empty buffer is EIO, not a payload.
+            if exc.errno == errno.EIO:
+                break
+            raise
+        if not chunk:
+            break
+        chunks.append(chunk)
+        deadline = min(deadline, time.monotonic() + 0.05)
+    return b"".join(chunks)
 
 
 def _stop(proc):
@@ -1818,10 +1830,10 @@ class ReapedExitTests(unittest.TestCase):
         self.assertNotIn(device, logged)
 
 
-# The child-sleep check above stays green on 3113252: that sleep is not an
-# ancestor, so the parent walk never sees it. This driver is the tree
-# ensure_watcher starts. The hook stays alive. The owner is the hook's parent
-# and holds the pty. send_report is the real function inside the watcher.
+# The child-sleep check above is not an ancestor, so the parent walk never
+# sees it. This driver is the tree ensure_watcher starts. The hook stays
+# alive. The owner is the hook's parent and holds the pty. send_report is the
+# real function inside the watcher.
 _ANCESTOR_DRIVER = """\
 import os
 import subprocess
