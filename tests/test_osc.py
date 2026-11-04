@@ -73,6 +73,15 @@ class OscMapTests(unittest.TestCase):
         )
         self.assertEqual(osc.encode(osc.fields_for("idle")), b"\x1b]7501;state=done:app=kiro\x1b\\")
 
+    def test_hook_words_never_encode_state_idle(self):
+        for kind in ("working", "idle", "blocked", "unknown"):
+            fields = osc.fields_for(kind)
+            if fields is None:
+                continue
+            self.assertNotEqual(fields["state"], "idle")
+            self.assertNotIn(b"state=idle", osc.encode(fields))
+        self.assertEqual(osc.fields_for("idle"), {"state": "done", "app": "kiro"})
+
     def test_a_regular_file_is_not_a_pane(self):
         with tempfile.NamedTemporaryFile(prefix="herdr-kiro-notty-") as handle:
             holder = subprocess.Popen(
@@ -267,6 +276,116 @@ class OscHookTests(unittest.TestCase):
         ):
             self.assertTrue(hook.send_report("w1:p1", path, "idle"))
         self.assertEqual([args[args.index("--state") + 1] for args in calls], ["idle"])
+
+    def test_a_second_idle_report_stays_done(self):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        holder = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+        )
+        self.addCleanup(_stop, holder)
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-seen-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+
+        def seed(state):
+            state["chat_pid"] = holder.pid
+            state["reported"] = "working"
+            state["seq"] = 4
+
+        hook.update(path, seed)
+
+        def fake_herdr(*_args):
+            return True
+
+        env = {"HC_TERMINAL_ID": "t7"}
+        with mock.patch.object(hook, "herdr", fake_herdr), mock.patch.dict(os.environ, env, clear=False):
+            self.assertTrue(hook.send_report("t7", path, "idle"))
+            self.assertTrue(hook.send_report("t7", path, "idle"))
+        got = _read_ready(master, 1.0)
+        payload = b"\x1b]7501;state=done:app=kiro\x1b\\"
+        self.assertGreaterEqual(got.count(payload), 2)
+        self.assertNotIn(b"state=idle", got)
+        _stop(holder)
+
+
+# Herdr App 0.1.12 defaults/mods/agents/main.js. hold() lines 126-131 and
+# rank() lines 133-136. The painted section is this rank. herdr-app ls is
+# Model::status, which is already idle once the turn has been seen.
+_RANK = {"blocked": 4, "done": 3, "working": 2, "idle": 1}
+_SECTION = {4: "Needs you", 3: "Done", 2: "Working", 1: "Idle"}
+
+
+class _AgentsHold:
+    def __init__(self):
+        self.held = None
+
+    def show(self, agents):
+        current = next((agent for agent in agents if agent["focused"]), None)
+        same = current is not None and self.held is not None and current["address"] == self.held["address"]
+        if current is None or not same or current["status"] != "idle":
+            if current is None:
+                self.held = None
+            else:
+                self.held = {"address": current["address"], "rank": _RANK.get(current["status"], 0)}
+        sections = {}
+        for agent in agents:
+            rank = self._rank(agent) or _RANK["idle"]
+            sections[agent["address"]] = _SECTION[rank]
+        return sections
+
+    def _rank(self, agent):
+        saw_done = (
+            self.held is not None
+            and agent["address"] == self.held["address"]
+            and self.held["rank"] == _RANK["done"]
+            and agent["status"] == "idle"
+        )
+        if saw_done:
+            return _RANK["done"]
+        return _RANK.get(agent["status"], 0)
+
+
+class AgentsSectionTests(unittest.TestCase):
+    def test_focused_row_stays_under_done_until_left(self):
+        hold = _AgentsHold()
+        self.assertEqual(
+            hold.show([{"address": "t1", "status": "done", "focused": True}]),
+            {"t1": "Done"},
+        )
+        self.assertEqual(
+            hold.show([{"address": "t1", "status": "idle", "focused": True}]),
+            {"t1": "Done"},
+        )
+        # The other tab is selected. A terminal with no status is absent from agents().
+        self.assertEqual(
+            hold.show([{"address": "t1", "status": "idle", "focused": False}]),
+            {"t1": "Idle"},
+        )
+
+    def test_a_row_that_arrives_idle_is_under_idle(self):
+        hold = _AgentsHold()
+        self.assertEqual(
+            hold.show([{"address": "t1", "status": "idle", "focused": True}]),
+            {"t1": "Idle"},
+        )
+
+    def test_leaving_busy_moves_the_section_at_once(self):
+        hold = _AgentsHold()
+        hold.show([{"address": "t1", "status": "done", "focused": True}])
+        self.assertEqual(
+            hold.show([{"address": "t1", "status": "working", "focused": True}]),
+            {"t1": "Working"},
+        )
+        self.assertEqual(
+            hold.show([{"address": "t1", "status": "blocked", "focused": True}]),
+            {"t1": "Needs you"},
+        )
 
 
 if __name__ == "__main__":

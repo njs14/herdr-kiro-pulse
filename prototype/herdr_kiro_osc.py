@@ -30,7 +30,10 @@ def fields_for(kind: str, rule_id: str = "") -> dict | None:
     """Map a hook report onto one OSC 7501 root record.
 
     `idle` is the TUI word for a finished turn. The App word for that finish
-    is `done`. `unknown` is not a protocol state, so it is not sent.
+    is `done`, and it stays `done` after the pane is seen. The Agents
+    sidebar keeps a focused row under Done until that row is left. Sending
+    `state=idle` leaves that hold in place, so this function never returns it.
+    `unknown` is not a protocol state, so it is not sent.
     """
     if kind == "working":
         return {"state": "working", "app": APP}

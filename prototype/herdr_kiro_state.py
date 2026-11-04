@@ -3,9 +3,11 @@
 
 The App reads OSC 7501 from the pane tty. herdr-core sets HC_TERMINAL_ID on
 that program. The hook writes state=working, state=blocked, or state=done
-there. Herdr TUI is separate: HERDR_ENV and HERDR_PANE_ID still drive
-`herdr pane report-agent`. A finished turn stays an idle report on the TUI,
-which herdr 0.9.5 shows as done until the pane is seen.
+there. A finished turn stays state=done after the pane is seen. The Agents
+sidebar keeps a focused row under Done until that row is left, and this
+hook cannot set that hold. Herdr TUI is separate: HERDR_ENV and HERDR_PANE_ID
+still drive `herdr pane report-agent`. A finished turn stays an idle report
+on the TUI, which herdr 0.9.5 shows as done until the pane is seen.
 
 Workflow steps are separate Kiro sessions. The parent pane paints its idle prompt
 while they run, so screen detection calls the pane idle. Each step session

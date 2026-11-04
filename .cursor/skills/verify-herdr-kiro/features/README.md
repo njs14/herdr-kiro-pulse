@@ -37,7 +37,7 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 
 ## What this map does not drive
 
-`tests/test_osc.py` is the OSC 7501 proof. CI runs it. It is not a `drive.py` recipe, and `paint` does not emit OSC 7501. These feature files drive the Herdr TUI stand-in. A live Herdr App check is a Kiro session inside an App terminal, and it is not verified here.
+`tests/test_osc.py` is the OSC 7501 proof. CI runs it. It is not a `drive.py` recipe, and `paint` does not emit OSC 7501. A finished turn stays `state=done` on that wire. These feature files drive the Herdr TUI stand-in. A live Herdr App check is a Kiro session inside an App terminal. The painted Agents section stays under Done while that row is focused, and the check selects another tab. It is not verified here.
 
 ## Features
 
