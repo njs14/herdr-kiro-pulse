@@ -20,7 +20,9 @@ after Stop, and it remembers the sequence number. This process re-sends working
 until the grace ends, then reports idle. That idle report stays in place
 while kiro-cli is running. A live pid whose token is empty, ``sec:`` plus a
 whole-second lstart, or a bare whole-second lstart is not an exit and is not
-painted. Owner exit releases only after the recorded pid is gone.
+painted. The owner is the outer process. A gone chat child is not an exit
+and does not release the pane. Owner exit releases only after that outer
+process is gone.
 """
 
 from __future__ import annotations
@@ -165,13 +167,12 @@ def fresh_state() -> dict:
         "busy": {},
         "seq": 0,
         "grace_until": 0.0,
-        "reported": None,
         "watcher": 0,
         "watcher_at": 0.0,
         "watcher_started": "",
         "owners": {},
-        "owner_started": {},
         "owner_ident": {},
+        "phase": "",
         "aggregate": 0,
         "generation": 0,
         "retiring": False,
@@ -186,15 +187,12 @@ def fresh_state() -> dict:
 def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> dict:
     raw_busy = state.get("busy")
     raw_owners = state.get("owners")
-    raw_started = state.get("owner_started")
     raw_ident = state.get("owner_ident")
     busy = raw_busy if isinstance(raw_busy, dict) else {}
     owners = raw_owners if isinstance(raw_owners, dict) else {}
-    owner_started = raw_started if isinstance(raw_started, dict) else {}
     owner_ident = raw_ident if isinstance(raw_ident, dict) else {}
     kept = {}
     kept_owners = {}
-    kept_started = {}
     kept_ident = {}
     dropped_dead = False
     for session, stamp in busy.items():
@@ -214,10 +212,8 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
             kept[key] = seen
             if owners.get(key):
                 kept_owners[key] = owners.get(key)
-                if owner_started.get(key):
-                    kept_started[key] = owner_started.get(key)
                 raw_ident = owner_ident.get(key)
-                if isinstance(raw_ident, str) and fine_start(raw_ident):
+                if isinstance(raw_ident, str):
                     kept_ident[key] = raw_ident
     raw_chat = state.get("chat_ident")
     chat_ident = raw_chat if isinstance(raw_chat, str) else ""
@@ -264,13 +260,12 @@ def normalize(state: dict, now: float, *, retain_dead_owner: bool = False) -> di
         "busy": kept,
         "seq": seq,
         "grace_until": grace_until,
-        "reported": state.get("reported"),
         "watcher": watcher,
         "watcher_at": watcher_at,
         "watcher_started": state.get("watcher_started") or "",
         "owners": kept_owners,
-        "owner_started": kept_started,
         "owner_ident": kept_ident,
+        "phase": state.get("phase") if state.get("phase") in OWNER_STATES else "",
         "aggregate": aggregate,
         "generation": int(state.get("generation") or 0),
         "retiring": bool(state.get("retiring")),
@@ -299,7 +294,6 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     state["owners"][key] = int(owner)
     if not started:
         return
-    state["owner_started"][key] = started
     # owner_ident keeps hires_start only when that token is finer than one
     # second. sec: plus whole-second lstart, and a bare whole-second lstart,
     # match a pid reused in that same second, so neither is this owner. The
@@ -322,7 +316,8 @@ def _keep_proven_pane(state: dict, key: str) -> None:
     """Save a proven pane owner before END drops its row.
 
     The idle report runs after that drop. state=done still has to reach the
-    tty this token proved. An empty token or a sec: token is not saved.
+    tty this token proved. Stop and SessionEnd both drop the row. An empty
+    token or a sec: token is not saved.
     """
     owners = state.get("owners")
     if not isinstance(owners, dict):
@@ -344,7 +339,6 @@ def _pop_session(state: dict, key: str) -> None:
     _keep_proven_pane(state, key)
     state["busy"].pop(key, None)
     state["owners"].pop(key, None)
-    state["owner_started"].pop(key, None)
     state["owner_ident"].pop(key, None)
 
 
@@ -621,7 +615,7 @@ def _open_held(open_path: str) -> int:
     return -1
 
 
-def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
+def _hold_live_owner(pid: int, ident: str = "") -> None:
     """Dup the tty fd this owner still has open.
 
     An empty token does not identify the owner. sec: plus whole-second lstart
@@ -631,7 +625,6 @@ def _hold_live_owner(pid: int, started: str, ident: str = "") -> None:
     other character device, including a replaced fd 1, is closed.
     """
     global _pane_fd, _held_ident
-    del started
     # An empty token is not a mismatch of ``if ident and``. A ``sec:`` token
     # compares equal for a pid reused in that same second. Neither may hold.
     if _pane_fd >= 0 or not identity_proven(pid, ident):
@@ -689,21 +682,15 @@ def identity_proven(pid: int, token: object) -> bool:
         return False
     if number <= 1:
         return False
-    snap = process_snapshot(number)
-    started = ""
-    if snap and not snap.get("error"):
-        started = snap.get("lstart") or ""
-    if started and (token == started or token == "sec:" + started):
-        return False
     if not alive(number):
         return False
     return hires_start(number) == token
 
 
 def _recorded_identities(path: str, *, include_pane: bool = False) -> list[tuple[int, str]]:
-    """Owner and chat pids with the token currently stored for each.
+    """The pane's outer owner, never its chat child.
 
-    `include_pane` adds the owner saved when Stop dropped a proven row.
+    `include_pane` adds the owner saved when END dropped a proven row.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -726,14 +713,6 @@ def _recorded_identities(path: str, *, include_pane: bool = False) -> list[tuple
             token = raw if isinstance(raw, str) else ""
             if pid > 1:
                 found.append((pid, token))
-    try:
-        chat = int(state.get("chat_pid") or 0)
-    except (TypeError, ValueError):
-        chat = 0
-    raw_chat = state.get("chat_ident") or ""
-    chat_token = raw_chat if isinstance(raw_chat, str) else ""
-    if chat > 1:
-        found.append((chat, chat_token))
     if include_pane:
         raw_pane = state.get("proven_ident") or ""
         pane_token = raw_pane if isinstance(raw_pane, str) else ""
@@ -755,6 +734,8 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
     including on that held fd. Dropping the row does not make some other
     process eligible.
     """
+    if in_tui():
+        return False
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None or fields.get("state") not in ("working", "done"):
         return False
@@ -784,20 +765,19 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
 
 
 def _paint_proven(path: str, kind: str, rule_id: str = "") -> bool:
-    """Paint each recorded pid whose token proves it.
+    """Paint the pane's one outer tty.
 
-    state=done also paints the pane owner saved from a proven row at Stop.
+    state=done also uses the owner saved when END dropped a proven row.
+    A chat pty and a second recorded pid are not painted.
     """
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None or fields.get("state") not in ("working", "done"):
         return False
-    painted = False
     for pid, token in _recorded_identities(path, include_pane=fields.get("state") == "done"):
         if paint_status(kind, pid, token, rule_id=rule_id):
-            painted = True
-    if not painted:
-        log(f"osc missed {fields['state']}")
-    return painted
+            return True
+    log(f"osc missed {fields['state']}")
+    return False
 
 
 def _write_held_fd() -> bool:
@@ -876,7 +856,6 @@ def send_report(pane: str, path: str, kind: str) -> bool:
 def emit_report(pane: str, path: str, kind: str) -> bool:
     def bump(state: dict) -> None:
         state["seq"] += 1
-        state["reported"] = kind
         if kind == "idle":
             state["grace_until"] = 0.0
 
@@ -1377,20 +1356,11 @@ def screen_is_quiet(text: str) -> bool:
 
 
 def prompt_visible(text: str) -> bool:
-    """Kiro's idle prompt, or a short line that ends in a shell prompt character.
+    """The Kiro 3.0 idle prompt, and nothing else.
 
-    A short line that ends in ``$`` matches, including model text such as ``the price is $``.
+    A line such as ``the price is $`` is model text. It is not the prompt.
     """
-    tail = tail_text(text)
-    if IDLE_PROMPT.search(tail or ""):
-        return True
-    for line in tail.splitlines():
-        stripped = line.strip()
-        if not stripped or len(stripped) > 120:
-            continue
-        if re.search(r"[$#%]\s*$", stripped) and ("/" in stripped or ":" in stripped or stripped.endswith("$")):
-            return True
-    return False
+    return IDLE_PROMPT.search(tail_text(text) or "") is not None
 
 
 def report_for(screen: str, action: str):
@@ -1416,7 +1386,6 @@ def release_if_current(state: dict, generation: int, keys) -> bool:
     for key in keys:
         state["busy"].pop(key, None)
         state["owners"].pop(key, None)
-        state["owner_started"].pop(key, None)
     if AGGREGATE not in state["busy"]:
         state["aggregate"] = 0
     if not state["busy"]:
@@ -1469,11 +1438,6 @@ def _ident_map(state: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def _chat_ident(state: dict) -> str:
-    raw = state.get("chat_ident") or ""
-    return raw if isinstance(raw, str) else ""
-
-
 OWNER_STATES = ("no_owner", "proven", "weak", "exited", "idle_clear")
 OWNER_EVENTS = ("start", "prompt", "stop", "idle_clear", "process_exit", "pid_reuse", "piped_chat")
 _PANE_WRITES = {
@@ -1499,145 +1463,227 @@ def pane_transition(state: str, event: str) -> str:
     return _PANE_WRITES.get((state, event), "none")
 
 
-def _fine_recorded(state: dict) -> bool:
-    idents = _ident_map(state)
-    for token in idents.values():
-        if fine_start(token):
-            return True
-    if fine_start(_chat_ident(state)):
-        return True
-    raw = state.get("proven_ident") or ""
-    return isinstance(raw, str) and fine_start(raw)
+_PANE_NEXT = {
+    ("proven", "stop"): "idle_clear",
+    ("proven", "idle_clear"): "idle_clear",
+    ("proven", "piped_chat"): "idle_clear",
+    ("proven", "process_exit"): "exited",
+    ("proven", "pid_reuse"): "weak",
+    ("weak", "process_exit"): "exited",
+    ("idle_clear", "process_exit"): "exited",
+}
 
 
-def owner_phase(state: dict) -> str:
-    """no_owner, proven, weak, or exited from the recorded pids.
+def pane_next(state: str, event: str) -> str:
+    """The state after one event. The default is to stay."""
+    if state not in OWNER_STATES:
+        raise ValueError(state)
+    if event not in OWNER_EVENTS:
+        raise ValueError(event)
+    return _PANE_NEXT.get((state, event), state)
 
-    idle_clear is the state after a proven ending. The caller passes it.
-    A gone pid that still has a fine token is exited here. The exit event
-    uses proven for that one call so the pane write is done.
+
+def _chat_pid_of(state: dict) -> int:
+    try:
+        chat = int(state.get("chat_pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return chat if chat > 1 else 0
+
+
+def _outer_pairs(state: dict) -> list[tuple[int, str]]:
+    """One record for the pane: the outer pid, plus a saved proven pid.
+
+    The chat child is not an owner and is not a second pane.
     """
-    rows: list[tuple[int, str]] = []
+    found: list[tuple[int, str]] = []
     idents = _ident_map(state)
-    for key, owner in (state.get("owners") or {}).items():
+    chat = _chat_pid_of(state)
+    for _key, owner in (state.get("owners") or {}).items():
         try:
             pid = int(owner)
         except (TypeError, ValueError):
             continue
-        if pid > 1:
-            raw = idents.get(key) or ""
-            rows.append((pid, raw if isinstance(raw, str) else ""))
-    try:
-        chat = int(state.get("chat_pid") or 0)
-    except (TypeError, ValueError):
-        chat = 0
-    if chat > 1:
-        rows.append((chat, _chat_ident(state)))
-    try:
-        proven_pid = int(state.get("proven_pid") or 0)
-    except (TypeError, ValueError):
-        proven_pid = 0
-    raw_proven = state.get("proven_ident") or ""
-    if proven_pid > 1 and isinstance(raw_proven, str) and raw_proven:
-        rows.append((proven_pid, raw_proven))
-    if not rows:
-        return "no_owner"
-    live_proven = False
-    live_weak = False
-    for pid, token in rows:
-        if not alive(pid):
+        if pid <= 1 or pid == chat:
             continue
-        if identity_proven(pid, token):
-            live_proven = True
-        else:
-            live_weak = True
-    if live_proven:
+        raw = idents.get(_key) or ""
+        token = raw if isinstance(raw, str) else ""
+        if any(known == pid for known, _token in found):
+            continue
+        found.append((pid, token))
+    raw_pane = state.get("proven_ident") or ""
+    pane_token = raw_pane if isinstance(raw_pane, str) else ""
+    try:
+        pane_pid = int(state.get("proven_pid") or 0)
+    except (TypeError, ValueError):
+        pane_pid = 0
+    if pane_pid > 1 and pane_pid != chat and not any(known == pane_pid for known, _token in found):
+        found.append((pane_pid, pane_token))
+    return found
+
+
+def _outer_gone(state: dict) -> bool:
+    pairs = _outer_pairs(state)
+    if not pairs:
+        return False
+    return all(not alive(pid) for pid, _token in pairs)
+
+
+def _killed(state: dict) -> bool:
+    """True when kill says every outer pid is gone.
+
+    A process table can still name a pid after it has been reaped. kill is
+    the check for that. A live pid, including one whose token changed, is
+    not gone.
+    """
+    return bool(_pids_exited(pid for pid, _token in _outer_pairs(state)))
+
+
+def _owner_exited(state: dict, remembered: list) -> bool:
+    """The outer process is gone.
+
+    A dropped row still counts when the last outer pid is gone. A live pid,
+    including one whose token changed, does not.
+    """
+    if _outer_pairs(state):
+        return _outer_gone(state) or _killed(state)
+    if not remembered:
+        return False
+    return bool(_pids_exited(remembered))
+
+
+def chat_is_piped(state: dict) -> bool:
+    """True when the chat child's stdout is a pipe.
+
+    A host without /proc cannot see that fd, so the ending stays idle_clear
+    or stop.
+    """
+    pid = _chat_pid_of(state)
+    if not pid:
+        return False
+    try:
+        info = os.stat(f"/proc/{pid}/fd/1")
+    except OSError:
+        return False
+    return stat.S_ISFIFO(info.st_mode)
+
+
+def hook_event(state: dict, event: str) -> str:
+    """The pane event for one hook callback."""
+    if event in END_EVENTS:
+        return "piped_chat" if chat_is_piped(state) else "stop"
+    if event == "UserPromptSubmit":
+        return "prompt"
+    return "start"
+
+
+def screen_event(state: dict, which: str) -> str:
+    """The pane event for one watcher observation."""
+    if which == "timer":
+        return "piped_chat" if chat_is_piped(state) else "idle_clear"
+    if which == "settled":
+        return "piped_chat" if chat_is_piped(state) else "stop"
+    if which == "banner":
+        return "start"
+    if which == "continue":
+        return "prompt"
+    if which == "reuse":
+        return "pid_reuse"
+    if which == "exit":
+        return "process_exit"
+    raise ValueError(which)
+
+
+def owner_phase(state: dict) -> str:
+    """The stored ending, or the outer pid's live class.
+
+    idle_clear stays until process_exit. A chat child does not change it.
+    A live outer that is not identity_proven is weak, including a fine token
+    that no longer matches. A gone outer is exited.
+    """
+    stored = state.get("phase") or ""
+    if stored == "idle_clear":
+        return "idle_clear"
+    if stored == "exited":
+        return "exited"
+    pairs = _outer_pairs(state)
+    if not pairs:
+        return "no_owner"
+    if any(alive(pid) and identity_proven(pid, token) for pid, token in pairs):
         return "proven"
-    if live_weak:
+    if any(alive(pid) for pid, _token in pairs):
         return "weak"
     return "exited"
 
 
-def _paint_transition_done(state: dict) -> bool:
-    """Write the done pane_transition already chose, on the proven pane."""
-    if _write_held_fd():
+def _phase_for_event(state: dict, event: str) -> str:
+    """proven for the one process_exit that still owes state=done.
+
+    owner_phase reports exited once the outer pid is gone. The token recorded
+    while it was proven is what makes that exit write done.
+    """
+    phase = owner_phase(state)
+    if event != "process_exit" or phase == "idle_clear":
+        return phase
+    if any(fine_start(token) for _pid, token in _outer_pairs(state)):
+        return "proven"
+    return phase
+
+
+def _save_proven_owner(state: dict) -> None:
+    for pid, token in _outer_pairs(state):
+        if fine_start(token) and (identity_proven(pid, token) or not alive(pid)):
+            state["proven_pid"] = pid
+            state["proven_ident"] = token
+            return
+
+
+def _paint_one_owner(state: dict, kind: str) -> bool:
+    """Write working or done on the pane's outer tty, or on its held fd.
+
+    A TUI pane, including one inside the App, gets no OSC. A chat pty is
+    not a target.
+    """
+    if in_tui():
         return True
-    for pid, token in _idents_in(state):
-        if identity_proven(pid, token) and paint_status("idle", pid, token):
-            return True
-    try:
-        proven_pid = int(state.get("proven_pid") or 0)
-    except (TypeError, ValueError):
-        proven_pid = 0
-    raw = state.get("proven_ident") or ""
-    token = raw if isinstance(raw, str) else ""
-    if proven_pid > 1 and fine_start(token):
-        return paint_status("idle", proven_pid, token)
-    return False
+    if kind == "idle" and _write_held_fd():
+        return True
+    return any(paint_status(kind, pid, token) for pid, token in _outer_pairs(state))
 
 
-def _idents_in(state: dict) -> list[tuple[int, str]]:
-    found: list[tuple[int, str]] = []
-    idents = _ident_map(state)
-    for key, owner in (state.get("owners") or {}).items():
-        try:
-            pid = int(owner)
-        except (TypeError, ValueError):
-            continue
-        raw = idents.get(key) or ""
-        if pid > 1:
-            found.append((pid, raw if isinstance(raw, str) else ""))
-    try:
-        chat = int(state.get("chat_pid") or 0)
-    except (TypeError, ValueError):
-        chat = 0
-    if chat > 1:
-        found.append((chat, _chat_ident(state)))
-    return found
+def commit_pane(state: dict, event: str) -> tuple[str, bool]:
+    """Choose the pane write, paint that one tty, and store the next state.
+
+    This is the only path that writes working or done and the only path that
+    moves the owner into idle_clear or exited. The caller drops the row
+    after a done write has succeeded.
+    """
+    phase = _phase_for_event(state, event)
+    write = pane_transition(phase, event)
+    ok = True
+    if write == "done":
+        _save_proven_owner(state)
+        ok = _paint_one_owner(state, "idle")
+    elif write == "working":
+        ok = _paint_one_owner(state, "working")
+    state["phase"] = pane_next(phase, event)
+    return write, ok
 
 
 def tracked_exit(state: dict, chat_hits: int):
-    """How a tracked Kiro process ended.
+    """'outer' when the recorded outer pid is gone. A chat child never is.
 
-    'outer' when the recorded kiro-cli pid is gone. 'chat' when the recorded
-    kiro-cli-chat pid is gone and no replacement is under a living outer, for
-    several ticks. A live pid is not an exit, including an empty token, sec:
-    plus whole-second lstart, a bare whole-second lstart, and a parent of init.
-    Those tokens are not painted. release-agent waits until the pid is gone.
+    A live pid is not an exit, including an empty token, sec: plus
+    whole-second lstart, a bare whole-second lstart, and a parent of init.
+    Those tokens are not painted. chat_hits is ignored.
     """
-    owners = state.get("owners") or {}
-    idents = _ident_map(state)
-    outer_alive = False
-    saw_outer = False
-    for key, owner in owners.items():
-        try:
-            pid = int(owner)
-        except (TypeError, ValueError):
-            continue
-        if pid <= 1:
-            continue
-        saw_outer = True
-        if alive(pid, idents.get(key) or ""):
-            outer_alive = True
-    if saw_outer and not outer_alive:
-        return "outer", 0
-    chat = int(state.get("chat_pid") or 0)
-    if not chat:
+    del chat_hits
+    pairs = _outer_pairs(state)
+    if not pairs:
         return None, 0
-    if alive(chat, _chat_ident(state)):
+    if any(alive(pid) for pid, _token in pairs):
         return None, 0
-    if outer_alive:
-        for key, owner in owners.items():
-            try:
-                pid = int(owner)
-            except (TypeError, ValueError):
-                continue
-            if alive(pid, idents.get(key) or "") and chat_under(pid):
-                return None, 0
-    hits = chat_hits + 1
-    if hits >= GONE_CONFIRM_HITS:
-        return "chat", hits
-    return None, hits
+    return "outer", 0
 
 
 def should_stop_for_dead_owner(state: dict, pane_kiro: bool) -> bool:
@@ -1869,29 +1915,21 @@ def ownership(dest: str) -> str:
 
 
 def owner_is_dead(owner: object, started: object = "") -> bool:
-    """True when this pid is gone, or a fine token names a different process.
+    """True only when this pid is gone.
 
-    An empty token is not proof the process exited, so the row stays and a
-    later event can record one. A ``sec:`` token on a live pid is not that
-    proof either. Dropping the row takes the pid off the skip list, and the
-    ancestor walk then paints its tty. A live process is never dead because
-    of its parent.
+    A live pid stays in the table when its token is empty, ``sec:`` plus
+    whole-second lstart, a bare whole-second lstart, or a fine token that
+    names a different start. Dropping it would take the pid off the skip
+    list, and the ancestor walk would paint its tty. started is ignored.
     """
+    del started
     if not isinstance(owner, (int, str)) or not owner:
         return False
     try:
         pid = int(owner)
     except ValueError:
         return False
-    snap = process_snapshot(pid)
-    if snap is None:
-        return True
-    if snap.get("error"):
-        return False
-    token = started if isinstance(started, str) else ""
-    if not token or not fine_start(token):
-        return False
-    return hires_start(pid) != token
+    return process_snapshot(pid) is None
 
 
 def _process_matches(pid: int, started: str) -> bool:
@@ -2144,17 +2182,39 @@ def clear_watcher(path: str) -> None:
     remove_pidfile(path, os.getpid())
 
 
+def apply_owner_exit(pane: str, path: str) -> bool:
+    """Paint process_exit, then release only after that write succeeds.
+
+    A failed done write leaves the row. finish_if_unchanged does not write.
+    """
+    decision = {"go": False}
+    snap: dict = {}
+
+    def apply(current: dict) -> None:
+        if not _owner_exited(current, []):
+            return
+        write, ok = commit_pane(current, screen_event(current, "exit"))
+        if write == "done" and not ok:
+            return
+        decision["go"] = True
+        snap["generation"] = int(current.get("generation") or 0)
+        snap["busy"] = dict(current.get("busy") or {})
+
+    update(path, apply, retain_dead_owner=True)
+    if not decision["go"]:
+        return False
+    return finish_if_unchanged(pane, path, snap, "owner exit")
+
+
 def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
-    """Stop the watcher only while this process still owns its slot."""
+    """Stop the watcher only while this process still owns its slot.
+
+    This does not write working or done. The caller paints before it asks.
+    """
     me = os.getpid()
     generation = int(state.get("generation") or 0)
     keys = list(state.get("busy") or {})
     decision = {"ok": False}
-    # A TUI pane that also has HC_TERMINAL_ID reads that pane. send_report
-    # already returns before emit_osc there, because those bytes land on the
-    # inner tty. The exit write follows that.
-    app_exit = reason != "idle" and in_app() and not in_tui()
-    retain_owner = app_exit
 
     def apply(current: dict) -> None:
         watcher = int(current.get("watcher") or 0)
@@ -2166,13 +2226,9 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
         if reason == "idle" and current.get("busy"):
             current["retiring"] = False
             return
-        # The held fd is the only exit write. Another tty is not success,
-        # and there is no path open when this process holds no fd.
-        if app_exit and not _write_held_fd():
-            return
         decision["ok"] = release_if_current(current, generation, keys)
 
-    update(path, apply, retain_dead_owner=retain_owner)
+    update(path, apply)
     if not decision["ok"]:
         return False
     still = {"ok": False}
@@ -2348,14 +2404,13 @@ def _watch_loop(pane: str, path: str) -> None:
     # Keep the last pid so that exit still wakes the watcher.
     known_owners = []
     known_outers = []
-    chat_hits = 0
     gone_since = None
     gone_hits = 0
     try:
         while True:
             owner_watch.wait(known_owners, TICK_SECS)
             begin_tick()
-            state = update(path, lambda _state: None, retain_dead_owner=in_app())
+            state = update(path, lambda _state: None, retain_dead_owner=True)
             if slot_holder_gone(state):
                 log("watcher exit slot holder gone")
                 return
@@ -2380,7 +2435,6 @@ def _watch_loop(pane: str, path: str) -> None:
                 known_outers = outers_now
             if current_owners:
                 known_owners = current_owners
-            kind, chat_hits = tracked_exit(state, chat_hits)
             owner_alive = False
             ident_by_pid = {}
             idents = _ident_map(state)
@@ -2401,12 +2455,10 @@ def _watch_loop(pane: str, path: str) -> None:
                     continue
                 owner_alive = True
                 if identity_proven(pid, ident):
-                    _hold_live_owner(pid, ident, ident)
+                    _hold_live_owner(pid, ident)
                     break
             if not owner_alive and chat_pid and alive(chat_pid):
                 owner_alive = True
-            pane_kiro = kiro_in_pane(list(known_owners))
-            owner_dead = kind is not None or should_stop_for_dead_owner(state, pane_kiro)
             if not known_owners and looked == "gone":
                 if gone_since is None:
                     gone_since = now
@@ -2416,26 +2468,18 @@ def _watch_loop(pane: str, path: str) -> None:
             else:
                 gone_since = None
                 gone_hits = 0
-            phase = owner_phase(state)
-            outers_gone = bool(_pids_exited(known_outers))
-            # A live weak owner is not an exit. A gone pid with a fine token
-            # is the proven process_exit, so the pane write is done.
-            if phase == "weak" and not outers_gone:
-                pass
-            else:
-                if _fine_recorded(state) and (phase == "exited" or outers_gone or kind is not None):
-                    phase = "proven"
-                if phase != "weak" and (owner_dead or kind is not None or outers_gone):
-                    if pane_transition(phase, "process_exit") == "done":
-                        _paint_transition_done(state)
-                    if finish_if_unchanged(pane, path, state, "owner exit"):
-                        return
-                    # This pid is still in the file after a missed write. Retry later.
-                    if not _watcher_still_us(path):
-                        log("watcher exit slot held")
-                        return
-                    time.sleep(TICK_SECS)
-                    continue
+            # A live weak owner stays in the table. The outer process is the
+            # only exit, and that exit is process_exit.
+            if _owner_exited(state, known_outers):
+                if apply_owner_exit(pane, path):
+                    return
+                if not _watcher_still_us(path):
+                    log("watcher exit slot held")
+                    return
+                time.sleep(TICK_SECS)
+                continue
+            if owner_phase(state) == "weak":
+                state = update(path, lambda current: commit_pane(current, screen_event(current, "reuse")))
             screen = pane_text(pane)
             # None is a failed App read. Explain would call that an idle screen.
             app_read_failed = in_app() and screen is None
@@ -2483,9 +2527,11 @@ def _watch_loop(pane: str, path: str) -> None:
                         generation: int = generation,
                         keys: list = keys,
                     ) -> None:
-                        if pane_transition(owner_phase(current), "idle_clear") == "done":
-                            _paint_transition_done(current)
-                        decision["ok"] = release_if_current(current, generation, keys)
+                        write, ok = commit_pane(current, screen_event(current, "timer"))
+                        if write == "done" and not ok:
+                            return
+                        if current.get("phase") == "idle_clear":
+                            decision["ok"] = release_if_current(current, generation, keys)
 
                     update(path, apply_clear)
                     if decision["ok"]:
@@ -2503,7 +2549,14 @@ def _watch_loop(pane: str, path: str) -> None:
             )
             owners_gone = bool(known_owners) and not owner_alive
             if banner and not state.get("owners_died") and not owners_gone:
-                if pane_transition(owner_phase(state), "start") == "working":
+                chosen = {"write": "none"}
+
+                def apply_banner(current: dict, chosen: dict = chosen) -> None:
+                    write, _ok = commit_pane(current, screen_event(current, "banner"))
+                    chosen["write"] = write
+
+                state = update(path, apply_banner)
+                if chosen["write"] == "working":
                     reported, misses = note_report(pane, path, "working", reported, misses)
                     if reported is None and misses >= 30:
                         return
@@ -2516,7 +2569,14 @@ def _watch_loop(pane: str, path: str) -> None:
             app_quiet = in_app() and not in_tui() and not app_read_failed and not screen.strip() and not banner
             if not app_read_failed and action == "idle" and (screen_is_quiet(screen) or app_quiet):
                 if reported != "idle":
-                    if pane_transition(owner_phase(state), "stop") == "done":
+                    chosen = {"write": "none"}
+
+                    def apply_settled(current: dict, chosen: dict = chosen) -> None:
+                        write, _ok = commit_pane(current, screen_event(current, "settled"))
+                        chosen["write"] = write
+
+                    state = update(path, apply_settled)
+                    if chosen["write"] == "done":
                         reported, misses = note_report(pane, path, "idle", reported, misses)
                         if reported is None and misses >= 30:
                             return
@@ -2531,7 +2591,14 @@ def _watch_loop(pane: str, path: str) -> None:
                 continue
             if action != "working" or state.get("owners_died") or owners_gone:
                 continue
-            if pane_transition(owner_phase(state), "prompt") != "working":
+            chosen = {"write": "none"}
+
+            def apply_prompt(current: dict, chosen: dict = chosen) -> None:
+                write, _ok = commit_pane(current, screen_event(current, "continue"))
+                chosen["write"] = write
+
+            state = update(path, apply_prompt)
+            if chosen["write"] != "working":
                 continue
             reported, misses = note_report(pane, path, "working", reported, misses)
             if reported is None and misses >= 30:
@@ -2599,8 +2666,22 @@ def main() -> int:
     owner, owner_started, chat_pid, _chat_lstart = kiro_lineage()
     log(f"event={event} session={session} pane={pane} chain={process_chain()}")
 
+    chosen = {"write": "none"}
+
     def fold(state: dict) -> None:
+        ev = hook_event(state, event)
+        if event in END_EVENTS:
+            write, _ok = commit_pane(state, ev)
+            chosen["write"] = write
         revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
+        if event in END_EVENTS:
+            revised["phase"] = state.get("phase") or revised.get("phase") or ""
+            if state.get("proven_pid"):
+                revised["proven_pid"] = state.get("proven_pid")
+                revised["proven_ident"] = state.get("proven_ident") or ""
+        else:
+            write, _ok = commit_pane(revised, ev)
+            chosen["write"] = write
         state.clear()
         state.update(revised)
 
@@ -2615,13 +2696,10 @@ def main() -> int:
         time.time(),
     )
     kind = report_for(screen, action)
-    phase = owner_phase(state)
     if event in END_EVENTS:
-        if pane_transition(phase, "stop") == "done":
+        if chosen["write"] == "done":
             send_report(pane, path, "idle")
-    elif (
-        kind == "working" and pane_transition(phase, "prompt" if event == "UserPromptSubmit" else "start") == "working"
-    ):
+    elif kind == "working" and chosen["write"] == "working":
         send_report(pane, path, "working")
     elif kind == "blocked":
         send_report(pane, path, kind)

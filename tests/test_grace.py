@@ -11,6 +11,7 @@ import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -877,7 +878,7 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
         ):
             self.assertFalse(hook.owner_is_dead(50, "100.000000"))
-            self.assertTrue(hook.owner_is_dead(50, "200.000000"))
+            self.assertFalse(hook.owner_is_dead(50, "200.000000"))
         with (
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
@@ -983,7 +984,8 @@ class GraceTests(unittest.TestCase):
                 owner_started="10",
             )
             self.assertEqual(state["owner_ident"], {})
-            self.assertEqual(state["owner_started"].get("sess"), "10")
+            self.assertEqual(state["owners"].get("sess"), 50)
+            self.assertNotIn("owner_started", state)
             state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
         self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
 
@@ -1007,7 +1009,7 @@ class GraceTests(unittest.TestCase):
         self.assertIn("sess", state["busy"])
         self.assertNotIn("sess", state["owner_ident"])
 
-    def test_chat_pid_death_is_owner_exit_after_confirm(self):
+    def test_a_gone_chat_child_is_not_an_owner_exit(self):
         state = hook.fresh_state()
         state["owners"] = {"sess": 50}
         state["owner_started"] = {"sess": "outer"}
@@ -1035,7 +1037,7 @@ class GraceTests(unittest.TestCase):
             kind, hits = hook.tracked_exit(state, hits)
             self.assertIsNone(kind)
             kind, _hits = hook.tracked_exit(state, hits)
-            self.assertEqual(kind, "chat")
+            self.assertIsNone(kind)
 
     def test_explain_failure_under_a_banner_stays_working(self):
         directory = tempfile.mkdtemp()
@@ -1816,6 +1818,181 @@ class _ScreenCompletion:
 
     def see(self):
         self.seen = True
+
+
+class PaneFindingTests(unittest.TestCase):
+    def test_the_price_line_is_not_the_idle_prompt(self):
+        self.assertFalse(hook.prompt_visible("the price is $\n"))
+        self.assertTrue(hook.prompt_visible("ask a question or describe a task\n"))
+
+    def test_a_fractional_proc_token_is_proven(self):
+        forms = (
+            ("1793839197.630000", True),
+            ("100.000000", True),
+            ("sec:1793839197", False),
+            ("1793839197", False),
+            ("", False),
+        )
+        for token, proven in forms:
+            self.assertEqual(hook.fine_start(token), proven, token)
+
+    def test_pane_next_covers_every_pair(self):
+        moves = {
+            ("proven", "stop"): "idle_clear",
+            ("proven", "idle_clear"): "idle_clear",
+            ("proven", "piped_chat"): "idle_clear",
+            ("proven", "process_exit"): "exited",
+            ("proven", "pid_reuse"): "weak",
+            ("weak", "process_exit"): "exited",
+            ("idle_clear", "process_exit"): "exited",
+        }
+        for state in hook.OWNER_STATES:
+            for event in hook.OWNER_EVENTS:
+                want = moves.get((state, event), state)
+                self.assertEqual(hook.pane_next(state, event), want, (state, event))
+
+    def test_the_hook_passes_every_event(self):
+        quiet = {"chat_pid": 0}
+        piped = {"chat_pid": 77}
+        fifo = mock.Mock(st_mode=stat.S_IFIFO)
+        rows = [
+            (hook.hook_event(quiet, "SessionStart"), "start"),
+            (hook.hook_event(quiet, "PostToolUse"), "start"),
+            (hook.hook_event(quiet, "UserPromptSubmit"), "prompt"),
+            (hook.hook_event(quiet, "Stop"), "stop"),
+            (hook.hook_event(quiet, "SessionEnd"), "stop"),
+            (hook.screen_event(quiet, "banner"), "start"),
+            (hook.screen_event(quiet, "continue"), "prompt"),
+            (hook.screen_event(quiet, "timer"), "idle_clear"),
+            (hook.screen_event(quiet, "settled"), "stop"),
+            (hook.screen_event(quiet, "reuse"), "pid_reuse"),
+            (hook.screen_event(quiet, "exit"), "process_exit"),
+        ]
+        with mock.patch.object(hook.os, "stat", return_value=fifo):
+            rows.append((hook.hook_event(piped, "Stop"), "piped_chat"))
+            rows.append((hook.hook_event(piped, "SessionEnd"), "piped_chat"))
+            rows.append((hook.screen_event(piped, "timer"), "piped_chat"))
+            rows.append((hook.screen_event(piped, "settled"), "piped_chat"))
+        for got, want in rows:
+            self.assertEqual(got, want)
+
+    def _live_owner(self):
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": 50}
+        state["owner_ident"] = {"sess": "100.000000"}
+        state["chat_pid"] = 60
+        state["chat_ident"] = "200.000000"
+        state["generation"] = 4
+        return state
+
+    def test_one_pane_and_the_findings(self):
+        hook._close_held_fd()
+        state = self._live_owner()
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+
+        def hires(pid):
+            number = int(pid)
+            if number == 50:
+                return "100.000000"
+            if number == 60:
+                return "200.000000"
+            return ""
+
+        painted = []
+
+        def paint(kind, pid, token, held_fd=-1, rule_id=""):
+            del kind, token, held_fd, rule_id
+            painted.append(pid)
+            return True
+
+        with (
+            mock.patch.dict(os.environ, {"HERDR_ENV": "", "HERDR_PANE_ID": "", "HC_TERMINAL_ID": "t7"}, clear=False),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", hires),
+            mock.patch.object(hook, "paint_status", paint),
+        ):
+            self.assertTrue(hook.identity_proven(50, "100.000000"))
+            self.assertFalse(hook.identity_proven(50, "sec:10"))
+            self.assertFalse(hook.identity_proven(50, "10"))
+            self.assertFalse(hook.owner_is_dead(50, "200.000000"))
+            self.assertIsNone(hook.tracked_exit(state, 3)[0])
+            write, ok = hook.commit_pane(state, "start")
+            self.assertEqual((write, ok, painted, state["phase"]), ("working", True, [50], "proven"))
+            painted.clear()
+            write, _ok = hook.commit_pane(state, "idle_clear")
+            self.assertEqual(write, "done")
+            self.assertEqual(painted, [50])
+            self.assertEqual(state["phase"], "idle_clear")
+            self.assertEqual(state["proven_pid"], 50)
+            self.assertIn("sess", state["owners"])
+            self.assertTrue(hook.release_if_current(state, 4, ["sess"]))
+            self.assertNotIn("sess", state["owners"])
+            painted.clear()
+            write, _ok = hook.commit_pane(state, "stop")
+            self.assertEqual((write, painted, state["phase"]), ("done", [50], "idle_clear"))
+            self.assertEqual(hook.pane_transition(hook.owner_phase(state), "start"), "none")
+            self.assertEqual(hook.pane_transition(hook.owner_phase(state), "prompt"), "none")
+
+    def test_tui_inside_the_app_paints_nothing(self):
+        state = self._live_owner()
+        env = {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1", "HC_TERMINAL_ID": "t7"}
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+            mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            write, ok = hook.commit_pane(state, "idle_clear")
+        self.assertEqual((write, ok), ("done", True))
+        held.assert_not_called()
+        paint.assert_not_called()
+
+    def test_finish_does_not_write_done(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-finish-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda _state: None)
+        with (
+            mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+            mock.patch.object(hook, "release_authority"),
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+        ):
+            hook.finish_if_unchanged("t7", path, hook.fresh_state(), "owner exit")
+        held.assert_not_called()
+
+    def test_session_end_keeps_the_proven_pane(self):
+        state = self._live_owner()
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+            mock.patch.object(hook, "paint_status", lambda *_args, **_kwargs: True),
+        ):
+            event = hook.hook_event(state, "SessionEnd")
+            self.assertEqual(event, "stop")
+            hook.commit_pane(state, event)
+            revised = hook.apply_event(state, "SessionEnd", "sess", 2.0, 50, "10", 0)
+        self.assertEqual(revised["phase"], "idle_clear")
+        self.assertEqual(revised["proven_pid"], 50)
+        self.assertNotIn("sess", revised["owners"])
+
+    def test_a_live_reused_pid_stays_weak(self):
+        state = self._live_owner()
+        state["owner_ident"] = {"sess": "200.000000"}
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            self.assertFalse(hook.owner_is_dead(50, "200.000000"))
+            self.assertEqual(hook.owner_phase(state), "weak")
+            write, _ok = hook.commit_pane(state, hook.screen_event(state, "reuse"))
+        self.assertEqual((write, state["phase"], state["owners"].get("sess")), ("none", "weak", 50))
+        paint.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -301,15 +301,13 @@ class OscHookTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
 
-        token = _live_start(holder.pid)
-
         def seed(state):
-            state["chat_pid"] = holder.pid
-            state["chat_started"] = token
-            state["chat_ident"] = "100.000000"
-            state["reported"] = "working"
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": holder.pid}
+            state["owner_ident"] = {"sess": "100.000000"}
             state["seq"] = 4
 
+        hook.begin_tick()
         hook.update(path, seed)
         calls = []
 
@@ -496,15 +494,13 @@ class OscHookTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
 
-        token = _live_start(holder.pid)
-
         def seed(state):
-            state["chat_pid"] = holder.pid
-            state["chat_started"] = token
-            state["chat_ident"] = "100.000000"
-            state["reported"] = "working"
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": holder.pid}
+            state["owner_ident"] = {"sess": "100.000000"}
             state["seq"] = 4
 
+        hook.begin_tick()
         hook.update(path, seed)
 
         def fake_herdr(*_args):
@@ -533,7 +529,7 @@ class AppExitOscTests(unittest.TestCase):
             state["busy"] = {} if busy is None else busy
             state["owners"] = {} if owners is None else owners
             state["owner_started"] = dict.fromkeys(state["owners"], "alive")
-            state["owner_ident"] = {key: hook.hires_start(pid) for key, pid in state["owners"].items()}
+            state["owner_ident"] = dict.fromkeys(state["owners"], "100.000000")
             state["chat_pid"] = 0
             state["reported"] = "working"
             state["seq"] = 4
@@ -543,11 +539,11 @@ class AppExitOscTests(unittest.TestCase):
             hook.update(path, seed)
 
     def _finish(self, path, pane, reason, env, busy=None):
+        del reason, busy
         order = []
         payloads = []
         pid_lists = []
         log_file = path + ".log"
-        reported = {} if busy is None else busy
 
         def fake_herdr(*args):
             order.append(("herdr", args))
@@ -581,20 +577,19 @@ class AppExitOscTests(unittest.TestCase):
 
         scoped = dict(env)
         scoped["HERDR_KIRO_LOG"] = log_file
-        snap = {"ppid": 1, "lstart": "alive", "comm": "kiro-cli"}
         with (
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.object(hook, "clear_watcher", spy_clear),
             mock.patch.object(hook, "emit_osc", spy_emit),
             mock.patch.object(hook, "_write_held_fd", spy_held),
-            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
             mock.patch.object(osc, "write_to_pane", capture),
             mock.patch.object(hook.subprocess, "run", refuse),
             mock.patch.object(hook.subprocess, "check_output", refuse),
             mock.patch.object(hook.subprocess, "Popen", refuse),
             mock.patch.dict(os.environ, scoped, clear=False),
         ):
-            ok = hook.finish_if_unchanged(pane, path, {"generation": 3, "busy": reported}, reason)
+            ok = hook.apply_owner_exit(pane, path)
         return ok, order, payloads, pid_lists
 
     def test_non_idle_app_exit_writes_done_before_the_watcher_clears(self):
@@ -669,12 +664,7 @@ if mode == "mid":
 
 hook._pane_fd = held
 hook._held_ident = "100.000000"
-ok = hook.finish_if_unchanged(
-    "t7",
-    path,
-    {"generation": 3, "busy": {"sess": 1}},
-    "owner exit",
-)
+ok = hook.apply_owner_exit("t7", path)
 with open(result, "w", encoding="utf-8") as handle:
     handle.write("ok\\n" if ok else "miss\\n")
 raise SystemExit(0 if ok else 1)
@@ -826,12 +816,7 @@ try:
 
     with open(path, encoding="utf-8") as handle:
         saved = json.load(handle)
-    hook.finish_if_unchanged(
-        "t7",
-        path,
-        {"generation": int(saved.get("generation") or 0), "busy": saved.get("busy") or {}},
-        "owner exit",
-    )
+    hook.apply_owner_exit("t7", path)
     mark("exit")
 except Exception:
     with open(path + ".crash", "w", encoding="utf-8") as handle:
@@ -1104,7 +1089,7 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook.subprocess, "Popen", refuse),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            ok = hook.finish_if_unchanged("t7", path, {"generation": 3, "busy": {"sess": 1}}, "owner exit")
+            ok = hook.apply_owner_exit("t7", path)
         with open(path, encoding="utf-8") as handle:
             saved = json.load(handle)
         self.assertEqual(
@@ -1114,8 +1099,8 @@ class ReapedExitTests(unittest.TestCase):
 
     def test_reused_pid_does_not_receive_the_exit_write(self):
         # A live process has the owner's pid and a different start token.
-        # state=done goes to the fd held from the original tty, or the write
-        # misses. The new process's tty stays empty.
+        # That row stays. Neither the held tty nor the new tty is painted,
+        # and release-agent is not called.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-reuse-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1143,6 +1128,7 @@ class ReapedExitTests(unittest.TestCase):
         state["reported"] = "working"
         state["seq"] = 4
         self._write_state(path, state)
+        hook.begin_tick()
         calls = []
         env = {
             "HC_TERMINAL_ID": "t7",
@@ -1155,18 +1141,18 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            ok = hook.finish_if_unchanged(
-                "t7",
-                path,
-                {"generation": 3, "busy": {"sess": state["busy"]["sess"]}},
-                "owner exit",
-            )
+            ok = hook.apply_owner_exit("t7", path)
         new_got = _read_ready(new_master, 0.3)
         held_got = _read_ready(held_master, 0.3)
         self.assertNotIn(done, new_got)
-        self.assertIn(done, held_got)
-        self.assertTrue(ok)
-        self.assertIn(("release-agent",), [item[:1] for item in calls])
+        self.assertNotIn(done, held_got)
+        self.assertEqual(new_got, b"")
+        self.assertEqual(held_got, b"")
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved.get("owners"), {"sess": proc.pid})
 
     def test_tui_inside_app_does_not_write_the_exit_osc(self):
         # HERDR_ENV and HC_TERMINAL_ID both survive into the watcher.
@@ -1244,7 +1230,7 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "_open_held", open_held),
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
         ):
-            hook._hold_live_owner(proc.pid, lstart, "100.000000")
+            hook._hold_live_owner(proc.pid, "100.000000")
             wrote = hook._write_held_fd()
         wrong = _read_ready(wrong_master, 0.2)
         named_got = _read_ready(named_master, 0.2)
@@ -1301,12 +1287,6 @@ class ReapedExitTests(unittest.TestCase):
         def fake_wait(_self, _pids, _timeout):
             waits["n"] += 1
             if waits["n"] == 2:
-                hook.finish_if_unchanged(
-                    "t7",
-                    path,
-                    {"generation": 3, "busy": {"sess": stamp}},
-                    "owner exit",
-                )
 
                 def steal(state):
                     state["watcher"] = stolen
@@ -1408,7 +1388,6 @@ class ReapedExitTests(unittest.TestCase):
             state["owner_started"] = {"sess": lstart}
             state["owner_ident"] = {}
             state["chat_pid"] = 0
-            state["chat_started"] = ""
             state["reported"] = None
             state["seq"] = 4
 
@@ -1420,7 +1399,7 @@ class ReapedExitTests(unittest.TestCase):
         self.assertEqual(got, b"")
 
     def test_same_second_chat_lstart_does_not_receive_status(self):
-        # chat_started is that same whole-second lstart and chat_ident is empty.
+        # chat_ident is empty. The chat pty is not the pane.
         # That is not a proven owner, so emit_osc does not write this tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-chat-lstart-")
         self.addCleanup(shutil.rmtree, directory, True)
@@ -1435,7 +1414,6 @@ class ReapedExitTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         self.addCleanup(_stop, proc)
-        lstart = _live_start(proc.pid)
         stamp = time.time()
 
         def seed(state):
@@ -1444,7 +1422,6 @@ class ReapedExitTests(unittest.TestCase):
             state["busy"] = {"sess": stamp}
             state["owners"] = {}
             state["chat_pid"] = proc.pid
-            state["chat_started"] = lstart
             state["reported"] = None
             state["seq"] = 4
 
@@ -1562,7 +1539,6 @@ class ReapedExitTests(unittest.TestCase):
             state["owner_started"] = {"sess": _live_start(outer.pid)}
             state["owner_ident"] = {"sess": outer_start}
             state["chat_pid"] = chat.pid
-            state["chat_started"] = _live_start(chat.pid)
             state["chat_ident"] = chat_start
             state["grace_until"] = 0.0
             state["watcher"] = os.getpid()
@@ -1632,8 +1608,8 @@ class ReapedExitTests(unittest.TestCase):
         state["watcher"] = 0
         state["generation"] = 3
         state["busy"] = {"sess": time.time()}
-        state["owners"] = {"sess": 1}
-        state["owner_started"] = {"sess": "not-the-real-lstart"}
+        state["owners"] = {"sess": 4242}
+        state["owner_ident"] = {"sess": "100.000000"}
         state["reported"] = "working"
         state["seq"] = 4
         self._write_state(path, state)
@@ -1707,13 +1683,6 @@ class ReapedExitTests(unittest.TestCase):
         def fake_wait(_self, _pids, _timeout):
             waits["n"] += 1
             if waits["n"] == 2:
-                # The first iteration already tried to hold. This is the exit write.
-                hook.finish_if_unchanged(
-                    "t7",
-                    path,
-                    {"generation": 3, "busy": {"sess": stamp}},
-                    "owner exit",
-                )
 
                 def steal(state):
                     state["watcher"] = stolen
@@ -1939,7 +1908,6 @@ class AncestorReportTests(unittest.TestCase):
             state["owner_started"] = {} if kind != "match" else {"sess": token}
             state["owner_ident"] = {} if not fine else {"sess": ident}
             state["chat_pid"] = owner_pid if kind == "chat" else 0
-            state["chat_started"] = ""
             state["reported"] = None
             state["seq"] = 4
 
@@ -1992,7 +1960,7 @@ class AncestorReportTests(unittest.TestCase):
 
     def test_empty_owner_token_on_a_live_ancestor_stays_empty(self):
         # setsid watcher, hook still alive, owner is the hook's parent.
-        # owner_started is empty. That pty must get no status bytes.
+        # The owner token is empty. That pty must get no status bytes.
         got, logged, device, _ident = self._status("owner")
         self.assertEqual(got, b"", logged)
         self.assertNotIn(b"state=working", got)
@@ -2002,7 +1970,7 @@ class AncestorReportTests(unittest.TestCase):
         self.assertNotIn(device, logged)
 
     def test_empty_chat_token_on_a_live_ancestor_stays_empty(self):
-        # Same tree. The pid is chat_pid and chat_started is empty.
+        # Same tree. The pid is chat_pid and chat_ident is empty.
         got, logged, device, _ident = self._status("chat")
         self.assertEqual(got, b"", logged)
         self.assertNotIn(b"state=working", got)
@@ -2175,7 +2143,6 @@ class AboveSkippedPidTests(unittest.TestCase):
             state["owner_started"] = {} if kind != "match" else {"sess": token}
             state["owner_ident"] = {} if not fine else {"sess": ident}
             state["chat_pid"] = mid_pid if kind == "chat" else 0
-            state["chat_started"] = ""
             state["reported"] = None
             state["seq"] = 4
 
@@ -2224,7 +2191,7 @@ class AboveSkippedPidTests(unittest.TestCase):
 
     def test_empty_owner_token_does_not_write_the_parent_pty(self):
         # The recorded pid is in the middle. Its parent holds a different pty.
-        # An empty owner_started must not paint that parent, or the grandparent.
+        # An empty owner token must not paint that parent, or the grandparent.
         parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev, _ident = self._report("owner")
         self.assertEqual(parent_got, b"", logged)
         self.assertEqual(grand_got, b"", logged)
@@ -2234,7 +2201,7 @@ class AboveSkippedPidTests(unittest.TestCase):
         self.assertNotIn(parent_dev, logged)
 
     def test_empty_chat_token_does_not_write_the_parent_pty(self):
-        # No owner row. chat_pid is that middle process and chat_started is empty.
+        # No owner row. chat_pid is that middle process and chat_ident is empty.
         parent_got, grand_got, mid_got, logged, parent_dev, _mid_dev, _ident = self._report("chat")
         self.assertEqual(parent_got, b"", logged)
         self.assertEqual(grand_got, b"", logged)
