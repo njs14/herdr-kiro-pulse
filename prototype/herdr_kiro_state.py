@@ -23,7 +23,11 @@ token is empty, ``sec:`` plus a whole-second lstart, a bare whole-second
 lstart, or a fine token that no longer matches is not an exit and is not
 painted. The owner is the outer process. A gone chat child is not an exit
 and does not release the pane. release-agent runs only after that proven
-outer process is gone.
+outer process is gone. A screen read returns a result and does not touch
+the filesystem, the tty, or OSC. A failed App read is not an empty screen
+and is not explained. It is not painted from that missing screen. A busy
+slot still reports working. An unconfirmed held pid writes nothing,
+including a working paint, and does not open the live stdout.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import copy
+import dataclasses
 import datetime
 import errno
 import fcntl
@@ -434,6 +439,25 @@ def _finish_slot(state: dict, session: str, now: float) -> None:
 _PANE_OUTCOME = {"write": "none", "ok": True, "event": "", "release": False}
 # Preview folds classify a tick without painting, logging, or touching the pane.
 _COMMIT_DRY = False
+_WRITE_DEPTH = 0
+
+
+@contextlib.contextmanager
+def _applying():
+    """Count a write commit_pane is applying. A classifier never enters."""
+    global _WRITE_DEPTH
+    _WRITE_DEPTH += 1
+    try:
+        yield
+    finally:
+        _WRITE_DEPTH -= 1
+
+
+def _in_apply():
+    """The apply gate, or nothing while a preview is only classifying."""
+    if _COMMIT_DRY:
+        return contextlib.nullcontext()
+    return _applying()
 
 
 def apply_event(
@@ -1238,8 +1262,43 @@ def sweep_owned_temp() -> None:
                 os.remove(marker)
 
 
+@dataclasses.dataclass(frozen=True)
+class PidFileView:
+    """One pid file, read before anyone decides to unlink it."""
+
+    pid: int
+    kill_errno: int | None
+    recorded_start: str
+    recorded_comm: str
+    live_start: str
+    live_comm: str
+    snap_error: bool
+
+
+def classify_pidfile(view: PidFileView) -> str:
+    """Return reap or keep. The view is data. This does not unlink the file.
+
+    reap is a confirmed death (kill errno ESRCH) or a confirmed token
+    mismatch. EPERM, a snapshot error, and an empty recorded start stay.
+    """
+    if view.kill_errno == errno.ESRCH:
+        return "reap"
+    if view.kill_errno is not None or view.snap_error or not view.recorded_start:
+        return "keep"
+    mismatched = bool(view.live_start) and view.live_start != view.recorded_start
+    if view.recorded_comm and view.live_comm and view.recorded_comm != view.live_comm:
+        mismatched = True
+    if mismatched:
+        return "reap"
+    return "keep"
+
+
 def sweep_stale_pidfiles() -> None:
-    """Drop a pid file when the process is gone, its start moved, or its comm basename differs."""
+    """Unlink pid files classify_pidfile calls reap.
+
+    commit_pane applies this for the reap result, after a fresh kill and
+    snapshot. none and refresh do not call it. A screen read does not either.
+    """
     directory = os.path.join(state_dir(), "pids")
     if not os.path.isdir(directory):
         return
@@ -1248,34 +1307,34 @@ def sweep_stale_pidfiles() -> None:
             continue
         path = os.path.join(directory, name)
         pid = int(name)
+        kill_errno = None
         try:
             os.kill(pid, 0)
         except OSError as exc:
-            if exc.errno != errno.ESRCH:
+            kill_errno = exc.errno
+        recorded = ""
+        recorded_comm = ""
+        live_start = ""
+        live_comm = ""
+        snap_error = False
+        if kill_errno is None:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    lines = handle.read().splitlines()
+            except OSError:
                 continue
-            with contextlib.suppress(OSError):
-                os.remove(path)
+            recorded = lines[1].strip() if len(lines) > 1 else ""
+            recorded_comm = lines[2].strip() if len(lines) > 2 else ""
+            snap = process_snapshot(pid)
+            snap_error = not snap or bool(snap.get("error"))
+            if not snap_error:
+                live_start = hires_start(pid)
+                live_comm = (snap or {}).get("comm") or ""
+        view = PidFileView(pid, kill_errno, recorded, recorded_comm, live_start, live_comm, snap_error)
+        if classify_pidfile(view) != "reap":
             continue
-        try:
-            with open(path, encoding="utf-8") as handle:
-                lines = handle.read().splitlines()
-        except OSError:
-            continue
-        recorded = lines[1].strip() if len(lines) > 1 else ""
-        recorded_comm = lines[2].strip() if len(lines) > 2 else ""
-        if not recorded:
-            continue
-        snap = process_snapshot(pid)
-        if not snap or snap.get("error"):
-            continue
-        current = hires_start(pid)
-        current_comm = snap.get("comm") or ""
-        stale = bool(current) and current != recorded
-        if recorded_comm and current_comm and recorded_comm != current_comm:
-            stale = True
-        if stale:
-            with contextlib.suppress(OSError):
-                os.remove(path)
+        with contextlib.suppress(OSError):
+            os.remove(path)
 
 
 def cleanup_rules() -> None:
@@ -1290,13 +1349,16 @@ def _on_term(signum, _frame):
 
 
 def explain_env() -> dict:
-    """Point herdr at the toml next to this script. The temp dir is removed on exit."""
+    """Point herdr at the toml next to this script. The temp dir is removed on exit.
+
+    This does not sweep pid files. A pid file is removed only when commit_pane
+    applies reap.
+    """
     global _EXPLAIN_ENV
     if _EXPLAIN_ENV is not None:
         return _EXPLAIN_ENV
     global _RULES_DIR
     sweep_stale_rules()
-    sweep_stale_pidfiles()
     base = tempfile.mkdtemp(prefix=f"herdr-kiro-rules-{os.getpid()}-")
     _RULES_DIR = base
     marker = os.path.join(base, "herdr-kiro-owned")
@@ -1324,7 +1386,11 @@ def _unknown_screen() -> dict:
 
 
 def screen_view(text: str) -> dict:
-    """Winning herdr rule for this screen. A failed explain is not cached."""
+    """Winning herdr rule for this screen. A failed explain is not cached.
+
+    This is the herdr reader. explain, screen_is_settled, and report_for do
+    not call it. commit_pane calls it only while applying a write.
+    """
     cached = _SCREEN_CACHE.get(text)
     if cached is not None:
         return cached
@@ -1364,28 +1430,74 @@ def screen_view(text: str) -> dict:
     return view
 
 
-def blocker_visible(text: str) -> bool:
-    """True when approval text is on screen, or herdr's winning rule is blocked.
+@dataclasses.dataclass(frozen=True)
+class ScreenSnapshot:
+    """Text already read, plus an explain result when the caller has one.
+
+    text is None when the App read failed. That is not an empty screen.
+    Classifiers take this and return a result. They do not receive a writer.
+    """
+
+    text: str | None
+    explained: dict | None = None
+
+
+def _as_snapshot(screen: ScreenSnapshot | str | None) -> ScreenSnapshot:
+    if isinstance(screen, ScreenSnapshot):
+        return screen
+    if screen is None:
+        return ScreenSnapshot(None, None)
+    return ScreenSnapshot(screen, None)
+
+
+def explain(screen: ScreenSnapshot | str | None) -> dict:
+    """The explain result already on the snapshot. This does not call herdr.
+
+    A failed App read (text is None) is unknown. It is not explained here.
+    A string with no explained result is unknown too: the text rules are
+    separate, and this function does not invent a herdr state.
+    """
+    snap = _as_snapshot(screen)
+    if snap.text is None:
+        return _unknown_screen()
+    view = snap.explained
+    if isinstance(view, dict) and view.get("ok"):
+        return {"state": view.get("state") or "idle", "id": view.get("id"), "ok": True}
+    return _unknown_screen()
+
+
+def blocker_visible(screen: ScreenSnapshot | str | None) -> bool:
+    """True when approval text is on screen, or the snapshot's explain result is blocked.
 
     approval_text returns first. A chooser footer is blocked here when explain is not.
+    A failed App read is not blocked. This does not call screen_view.
     """
-    if approval_text(text):
+    snap = _as_snapshot(screen)
+    if snap.text is None:
+        return False
+    if approval_text(snap.text):
         return True
-    return screen_view(text).get("state") == "blocked"
+    view = explain(snap)
+    return bool(view.get("ok")) and view.get("state") == "blocked"
 
 
-def screen_is_settled(text: str) -> bool:
+def screen_is_settled(screen: ScreenSnapshot | str | None) -> bool:
     """No workflow banner, no blocked explain result, and no working footer.
 
-    Settled is also false when approval_text matches and explain is not
-    blocked. A question panel is a blocked explain result with no approval
-    text, so it is not settled. The kiro idle prompt qualifies. So does the
-    shell prompt left behind after the outer kiro-cli exits, which does not
-    contain that prompt.
+    The inputs are the snapshot. This does not touch the filesystem, the tty,
+    or OSC. Settled is also false when approval_text matches and explain is
+    not blocked. A question panel is a blocked explain result with no approval
+    text, so it is not settled. A failed App read is not settled and is not
+    an empty screen. The kiro idle prompt qualifies. So does the shell prompt
+    left behind after the outer kiro-cli exits, which does not contain that
+    prompt.
     """
-    if workflow_banner_from(text) or blocker_visible(text):
+    snap = _as_snapshot(screen)
+    if snap.text is None:
         return False
-    return "kiro is working" not in tail_text(text).lower()
+    if workflow_banner_from(snap.text) or blocker_visible(snap):
+        return False
+    return "kiro is working" not in tail_text(snap.text).lower()
 
 
 def _idle_prompt_line(text: str) -> bool:
@@ -1393,11 +1505,15 @@ def _idle_prompt_line(text: str) -> bool:
     return any(IDLE_PROMPT.search(line) for line in tail_text(text).splitlines())
 
 
-def screen_is_quiet(text: str) -> bool:
-    """The kiro idle prompt, with nothing else running."""
-    if not _idle_prompt_line(text):
+def screen_is_quiet(screen: ScreenSnapshot | str | None) -> bool:
+    """The kiro idle prompt, with nothing else running.
+
+    A failed App read is not quiet. This does not read the pane again.
+    """
+    snap = _as_snapshot(screen)
+    if snap.text is None or not _idle_prompt_line(snap.text):
         return False
-    return screen_is_settled(text)
+    return screen_is_settled(snap)
 
 
 def prompt_visible(text: str) -> bool:
@@ -1409,15 +1525,19 @@ def prompt_visible(text: str) -> bool:
     return _idle_prompt_line(text)
 
 
-def report_for(screen: str, action: str):
+def report_for(screen: ScreenSnapshot | str | None, action: str):
     """What this event should tell herdr. None means send nothing.
 
     A visible blocker is blocked. The idle prompt gets no working report, so a
-    late tool event cannot cover it. A banner or a live turn still reports working.
+    late tool event cannot cover it. A banner or a live turn still reports
+    working. A failed App read sends nothing and is not explained.
     """
-    if blocker_visible(screen):
+    snap = _as_snapshot(screen)
+    if snap.text is None:
+        return None
+    if blocker_visible(snap):
         return "blocked"
-    if screen_is_quiet(screen):
+    if screen_is_quiet(snap):
         return None
     if action == "working":
         return "working"
@@ -1462,6 +1582,7 @@ OWNER_EVENTS = (
     "touch_aggregate",
     "touch_partial",
     "record_named",
+    "reap",
 )
 _DIRECT_EVENTS = (
     "aggregate_zero",
@@ -1469,6 +1590,7 @@ _DIRECT_EVENTS = (
     "touch_aggregate",
     "touch_partial",
     "record_named",
+    "reap",
 )
 _PANE_WRITES = {
     ("proven", "start"): "working",
@@ -1506,13 +1628,17 @@ _PANE_WRITES = {
     ("exited", "record_named"): "record_named",
     ("idle_clear", "record_named"): "record_named",
 }
+for _phase in OWNER_STATES:
+    _PANE_WRITES[(_phase, "reap")] = "reap"
 
 
 def pane_transition(state: str, event: str) -> str:
     """The table result for one owner state and one event.
 
-    The result is working, done, paint_blocked, refresh, none,
+    The result is working, done, paint_blocked, refresh, none, reap,
     record_aggregate, touch_aggregate, touch_partial, or record_named.
+    reap is the only result that unlinks a pid file, and only commit_pane
+    applies it.
     """
     if state not in OWNER_STATES:
         raise ValueError(state)
@@ -1766,10 +1892,11 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     A TUI pane, including one inside the App, gets no OSC. A chat pty and a
     second recorded pid are not targets. The current token is checked before
     any held fd is written. An empty token or sec: plus whole-second lstart
-    writes nothing, including when a held fd is open. The held fd is
-    eligible only when its pid is this owner. If that pid cannot be
-    confirmed, this writes nothing and does not open another tty. With no
-    held fd, a live proven owner still paints through paint_status.
+    writes nothing, including when a held fd is open. An unconfirmed held
+    pid writes nothing for every kind, including working, and does not open
+    the live stdout. The held fd is eligible only when its pid is this
+    owner. With no held fd, a live proven owner still paints through
+    paint_status.
     """
     if in_tui():
         return True
@@ -1784,10 +1911,10 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     # write that fd when _held_pid is this owner.
     if not _pid_gone(pid) and not identity_proven(pid, token):
         return False
-    if kind == "idle" and _held_pid_unconfirmed(pid, token):
-        # A matching start token is not enough. The fd was opened for
-        # _held_pid. Zero, or any other pid, is a different terminal.
-        # Do not open another tty.
+    if _held_pid_unconfirmed(pid, token):
+        # The fd was opened for _held_pid. Zero, or any other pid, is a
+        # different terminal. Do not paint working or idle, and do not open
+        # the live stdout.
         return False
     if _COMMIT_DRY:
         return True
@@ -1811,10 +1938,16 @@ def _owner_held_unconfirmed(state: dict) -> bool:
 
 
 def _leaves_directory_untouched(write: str, ok: bool, trial: dict, state: dict) -> bool:
-    """True when this result must not open the pane, the floor, or the log."""
+    """True when this result must not open the pane, the floor, or the log.
+
+    none with an unchanged trial does not. A done or working result that
+    refused an unconfirmed held pid does not either, so that refusal does
+    not arm a watcher or rewrite the pane.
+    """
     if write == "none" and trial == state:
         return True
-    return write == "done" and not ok and trial == state and _owner_held_unconfirmed(state)
+    refused = write in ("done", "working") and not ok and trial == state
+    return refused and _owner_held_unconfirmed(state)
 
 
 def _file_generation_matches(path: str, generation: int) -> bool:
@@ -1845,9 +1978,10 @@ def _arm_watch(path: str, pane: str, claim, armed: dict) -> None:
     """Claim the slot on the first real write. none and refresh never arm."""
     if armed["on"]:
         return
-    update(path, claim)
-    write_pidfile(path, os.getpid())
-    log(f"watcher loop pane={pane}")
+    with _applying():
+        update(path, claim)
+        write_pidfile(path, os.getpid())
+        log(f"watcher loop pane={pane}")
     armed["on"] = True
 
 
@@ -1864,7 +1998,8 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
             return write, ok, state, True
         file_write, file_ok, file_trial = _preview_pane(loaded, event, now)
         if file_write == "refresh" and file_trial != loaded:
-            _write_refresh(path, file_trial)
+            with _applying():
+                _write_refresh(path, file_trial)
             return file_write, file_ok, file_trial, False
         return file_write, file_ok, state, True
     if _leaves_directory_untouched(write, ok, trial, state):
@@ -1877,7 +2012,8 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
             return
         commit_if_current(current, event, generation)
 
-    saved = update(path, apply)
+    with _applying():
+        saved = update(path, apply)
     recorded = str(_PANE_OUTCOME.get("write") or write)
     return recorded, bool(_PANE_OUTCOME.get("ok")), saved, False
 
@@ -1928,20 +2064,26 @@ def _hook_effects(pane: str, path: str, event: str, chosen: dict, state: dict) -
     if chosen["write"] in ("none", "refresh"):
         return
     ensure_watcher(pane, path)
-    screen = pane_text(pane) or ""
+    screen = pane_text(pane)
+    # A failed App read is not an empty screen. Do not explain it, and do
+    # not commit_blocked for a screen the App did not return.
+    if not isinstance(screen, str):
+        return
+    view = screen_view(screen)
+    snap = ScreenSnapshot(screen, view if view.get("ok") else None)
     action = next_action(
         len(state["busy"]),
         float(state["grace_until"]),
         workflow_banner_from(screen),
         time.time(),
     )
-    kind = report_for(screen, action)
+    kind = report_for(snap, action)
     if chosen["write"] == "done" and chosen["ok"] and (event in END_EVENTS or chosen["release"]):
         send_report(pane, path, "idle")
     elif kind == "working" and chosen["write"] == "working":
         send_report(pane, path, "working")
     elif kind == "blocked":
-        rule_id = str(screen_view(screen).get("id") or "")
+        rule_id = str(view.get("id") or "")
         write, ok = commit_blocked(path, rule_id)
         if write == "paint_blocked" and ok:
             send_report(pane, path, kind)
@@ -1977,32 +2119,33 @@ def _commit_persisted(
         return _pane_result("none", True)
     if write == "refresh":
         if existed and readable and trial != before:
-            _write_refresh(path, trial)
+            with _applying():
+                _write_refresh(path, trial)
         return _pane_result("refresh", True)
     if _leaves_directory_untouched(write, ok, trial, before):
         return _pane_result(write, ok)
-    log(f"event={event} session={session} pane={pane} chain={process_chain()}")
 
     def apply(current: dict, chosen: dict = chosen) -> None:
         _fold_hook(current, event, session, now, owner, owner_started, chat_pid, chosen)
 
-    saved = update(path, apply)
-    log(f"state event={event} busy={len(saved['busy'])} grace_until={float(saved['grace_until']):.3f}")
-    _hook_effects(pane, path, event, chosen, saved)
+    with _applying():
+        log(f"event={event} session={session} pane={pane} chain={process_chain()}")
+        saved = update(path, apply)
+        log(f"state event={event} busy={len(saved['busy'])} grace_until={float(saved['grace_until']):.3f}")
+        _hook_effects(pane, path, event, chosen, saved)
     return _pane_result(str(chosen["write"]), bool(chosen["ok"]))
 
 
-def _status_view(screen: str, state: dict, held, now: float, app_read_failed: bool = False):
-    """Classify a watcher screen. Explain runs only for a result that writes.
+def _status_view(screen: str, state: dict, held, now: float):
+    """Classify a watcher screen from text already read.
 
-    A failed App read is not a screen. The held banner stays, and explain
-    does not run, so it cannot clear that banner or delete a pid file.
+    screen_is_settled does not call herdr and does not delete a pid file.
+    screen_view runs only after the preview is a write. A failed App read
+    is not passed here, so it is not explained and it is not painted.
     """
     blocked = bool(approval_text(screen)) or held == "blocked"
     banner = bool(workflow_banner_from(screen)) or (held == "working" and not blocked)
     view = _unknown_screen()
-    if app_read_failed:
-        return blocked, banner, view
     if blocked:
         candidate = "blocked"
     elif banner:
@@ -2017,7 +2160,8 @@ def _status_view(screen: str, state: dict, held, now: float, app_read_failed: bo
     write, ok, trial = _preview_pane(state, candidate, now)
     if write == "refresh" or _leaves_directory_untouched(write, ok, trial, state):
         return blocked, banner, view
-    view = screen_view(screen)
+    with _in_apply():
+        view = screen_view(screen)
     if not view.get("ok"):
         return blocked, banner, view
     blocked = view.get("state") == "blocked" or bool(approval_text(screen))
@@ -2041,21 +2185,28 @@ def commit_pane(
     watch: bool = False,
     fault: Exception | None = None,
 ) -> tuple[str, bool]:
-    """Apply one table result. none assigns nothing and writes no tty.
+    """Apply one table result.
 
     A path makes this the only door that writes the pane, the seq floor,
-    the log, a watcher pid file, the tty, or OSC. none returns before any
-    of that I/O. refresh writes the busy timestamp and nothing else.
+    the log, a watcher pid file, the tty, or OSC. A table result of none
+    returns before that I/O and leaves the state directory unchanged,
+    including pid files. refresh writes the busy timestamp and nothing
+    else. reap unlinks a pid file only when the pid is confirmed dead or
+    its recorded token is confirmed mismatched. fault logs the error and
+    clears the watcher, then returns none. refuse_watch logs the refusal,
+    then returns none.
     """
     if watch:
         _run_watch(pane, path)
         return _pane_result("none", True)
     if fault is not None:
-        log(f"watcher error {type(fault).__name__}: {fault}")
-        clear_watcher(path)
+        with _applying():
+            log(f"watcher error {type(fault).__name__}: {fault}")
+            clear_watcher(path)
         return _pane_result("none", False)
     if event == "refuse_watch":
-        log("refusing watch")
+        with _applying():
+            log("refusing watch")
         return _pane_result("none", False)
     if path:
         return _commit_persisted(event, session, now, owner, owner_started, chat_pid, path, pane)
@@ -2068,6 +2219,11 @@ def commit_pane(
         event = _chooser_event(state, event)
     phase = _phase_for_event(state, event)
     write = pane_transition(phase, event)
+    if write == "reap":
+        if not _COMMIT_DRY:
+            with _applying():
+                sweep_stale_pidfiles()
+        return _pane_result(write, True)
     if write == "none":
         return _pane_result(write, True)
     if write == "refresh":
@@ -2075,7 +2231,9 @@ def commit_pane(
             state["busy"][AGGREGATE] = now if now else time.time()
         return _pane_result(write, True)
     if write == "paint_blocked":
-        return _pane_result(write, emit_osc(state, "blocked", rule_id))
+        with _in_apply():
+            painted = emit_osc(state, "blocked", rule_id)
+        return _pane_result(write, painted)
     if write == "record_aggregate":
         state["aggregate"] = int(state.get("aggregate") or 0) + 1
         state["busy"][AGGREGATE] = now
@@ -2106,11 +2264,13 @@ def commit_pane(
             if drops:
                 _finish_slot(state, session, now)
             return _pane_result(write, True)
-        # An unconfirmed held pid writes nothing. Do not store proven_pid.
+        # An unconfirmed held pid writes nothing. Do not store proven_pid
+        # and do not open the live stdout.
         if _held_pid_unconfirmed(owner_now[0], owner_now[1]):
             return _pane_result(write, False)
         _save_proven_owner(state)
-        ok = _paint_one_owner(state, "idle")
+        with _in_apply():
+            ok = _paint_one_owner(state, "idle")
         if not ok:
             return _pane_result(write, False)
         state["phase"] = pane_next(phase, event)
@@ -2121,7 +2281,11 @@ def commit_pane(
             _finish_slot(state, session, now)
         return _pane_result(write, True)
     if write == "working":
-        ok = _paint_one_owner(state, "working")
+        owner_now = _pane_owner(state)
+        if owner_now is not None and _held_pid_unconfirmed(owner_now[0], owner_now[1]):
+            return _pane_result(write, False)
+        with _in_apply():
+            ok = _paint_one_owner(state, "working")
         state["phase"] = pane_next(phase, event)
         return _pane_result(write, ok)
     raise ValueError(write)
@@ -2573,20 +2737,6 @@ def commit_if_current(current: dict, event: str, generation: int) -> tuple[str, 
     return commit_pane(current, event)
 
 
-def clear_idle_if_current(current: dict, generation: int) -> bool:
-    """Write idle_clear only when this generation is still the current one.
-
-    A newer prompt must not be painted done. A failed done leaves the row.
-    none does not change the row. A live owner stays: this does not pop
-    busy or owners. commit_pane drops a row only for a done result whose
-    owner process is not alive.
-    """
-    write, ok = commit_if_current(current, screen_event(current, "timer"), generation)
-    if write != "done" or not ok:
-        return False
-    return current.get("phase") == "idle_clear"
-
-
 def apply_owner_exit(pane: str, path: str) -> bool:
     """Paint process_exit. Release only after a proven done write succeeds.
 
@@ -2962,10 +3112,10 @@ def _run_watch(pane: str, path: str) -> None:
             pane_owner = _pane_owner(state)
             owner_alive = False
             # pane_transition returns working, done, paint_blocked, refresh,
-            # none, record_aggregate, touch_aggregate, touch_partial, or
-            # record_named. commit_pane stores pane_next only for working and
-            # done. This loop does not assign phase. Holding the tty does not
-            # write the phase.
+            # none, reap, record_aggregate, touch_aggregate, touch_partial,
+            # or record_named. commit_pane stores pane_next only for working
+            # and done. This loop does not assign phase. Holding the tty does
+            # not write the phase. A screen read does not reap a pid file.
             if pane_owner is not None and not _pid_gone(pane_owner[0]) and alive(pane_owner[0]):
                 owner_alive = True
                 if identity_proven(pane_owner[0], pane_owner[1]):
@@ -2993,7 +3143,7 @@ def _run_watch(pane: str, path: str) -> None:
                     return
                 exit_event = screen_event(state, "exit")
                 preview, preview_ok, trial = _preview_pane(state, exit_event, now)
-                if preview == "refresh" or _leaves_directory_untouched(preview, preview_ok, trial, state):
+                if _leaves_directory_untouched(preview, preview_ok, trial, state):
                     return
                 arm()
                 if apply_owner_exit(pane, path):
@@ -3013,11 +3163,16 @@ def _run_watch(pane: str, path: str) -> None:
             if _owner_is_live_weak(state):
                 _write, _ok, state, _skipped = _persist_watch(path, state, screen_event(state, "reuse"), now, arm)
             screen = pane_text(pane)
-            # None is a failed App read. Explain would call that an idle screen.
-            app_read_failed = in_app() and screen is None
-            if screen is None:
-                screen = ""
-            blocked, banner, view = _status_view(screen, state, held, now, app_read_failed)
+            # None is a failed App read. It is not "". It is not explained,
+            # and it is not painted from that screen. A banner or blocker
+            # already held still counts, and this read does not clear it.
+            app_read_failed = not isinstance(screen, str)
+            if app_read_failed:
+                blocked = held == "blocked"
+                banner = held == "working" and not blocked
+                view = _unknown_screen()
+            else:
+                blocked, banner, view = _status_view(screen, state, held, now)
             if blocked:
                 held = "blocked"
             elif banner:
@@ -3026,7 +3181,7 @@ def _run_watch(pane: str, path: str) -> None:
                 quiet_since = None
                 if reported != "blocked":
                     preview, preview_ok, trial = _preview_pane(state, "blocked", now)
-                    quiet = preview == "refresh" or _leaves_directory_untouched(preview, preview_ok, trial, state)
+                    quiet = _leaves_directory_untouched(preview, preview_ok, trial, state)
                     if not quiet:
                         arm()
                         rule_id = str(view.get("id") or "")
@@ -3038,7 +3193,7 @@ def _run_watch(pane: str, path: str) -> None:
                 continue
             if banner:
                 quiet_since = None
-            elif prompt_visible(screen) and screen_is_settled(screen):
+            elif not app_read_failed and prompt_visible(screen) and screen_is_settled(screen):
                 if quiet_since is None:
                     quiet_since = now
                 elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
@@ -3074,8 +3229,9 @@ def _run_watch(pane: str, path: str) -> None:
                 continue
             # Idle is only the Kiro CLI 3.0 chevron prompt. An empty App
             # screen is not that prompt and does not end the turn. A failed
-            # read is not the prompt either. A TUI pane keeps the TUI rule,
-            # even when HC_TERMINAL_ID is set.
+            # read is not the prompt either, so it does not paint done. A
+            # busy slot still reports working. A TUI pane keeps the TUI
+            # rule, even when HC_TERMINAL_ID is set.
             if not app_read_failed and action == "idle" and screen_is_quiet(screen):
                 if reported != "idle":
                     generation = int(state.get("generation") or 0)

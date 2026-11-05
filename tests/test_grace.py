@@ -5,6 +5,7 @@ the rest of a SessionStart grace. A named Stop does not start that grace.
 """
 
 import ast
+import builtins
 import contextlib
 import copy
 import errno
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import unittest
 from unittest import mock
 
@@ -426,6 +428,7 @@ class GraceTests(unittest.TestCase):
             "touch_aggregate",
             "touch_partial",
             "record_named",
+            "reap",
         )
         working = {("proven", "start"), ("proven", "prompt")}
         done = {
@@ -443,7 +446,7 @@ class GraceTests(unittest.TestCase):
         slots = {"record_aggregate", "touch_aggregate", "touch_partial", "record_named"}
         self.assertEqual(hook.OWNER_STATES, states)
         self.assertEqual(hook.OWNER_EVENTS, events)
-        self.assertEqual(len(states) * len(events), 65)
+        self.assertEqual(len(states) * len(events), 70)
         for state in states:
             for event in events:
                 got = hook.pane_transition(state, event)
@@ -456,6 +459,8 @@ class GraceTests(unittest.TestCase):
                     self.assertEqual(got, "paint_blocked", pair)
                 elif pair == ("proven", "aggregate_zero"):
                     self.assertEqual(got, "refresh", pair)
+                elif event == "reap":
+                    self.assertEqual(got, "reap", pair)
                 elif event in slots:
                     self.assertEqual(got, event, pair)
                 else:
@@ -801,12 +806,14 @@ class GraceTests(unittest.TestCase):
             "   (c) Configure individually (agent monitor)\n"
             "   (x) Exit (cancel subagents)\n"
         )
-        self.assertTrue(hook.blocker_visible(screen))
         self.assertTrue(hook.workflow_banner_from(screen))
         view = hook.screen_view(screen)
         self.assertEqual(view["state"], "blocked")
         self.assertEqual(view["id"], "crew_approval")
-        self.assertEqual(hook.report_for(screen, "working"), "blocked")
+        snap = hook.ScreenSnapshot(screen, view)
+        self.assertTrue(hook.blocker_visible(snap))
+        self.assertFalse(hook.screen_is_settled(snap))
+        self.assertEqual(hook.report_for(snap, "working"), "blocked")
 
     def test_quiet_screen_waits_before_clearing_a_live_slot(self):
         state = hook.fresh_state()
@@ -2097,8 +2104,8 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.object(hook, "paint_status", return_value=True) as paint,
         ):
-            cleared = hook.clear_idle_if_current(state, 4)
-        self.assertFalse(cleared)
+            write, ok = hook.commit_if_current(state, "idle_clear", 4)
+        self.assertEqual((write, ok), ("none", False))
         self.assertEqual(state["phase"], "")
         self.assertIn("sess", state["owners"])
         paint.assert_not_called()
@@ -2511,6 +2518,106 @@ class PaneFindingTests(unittest.TestCase):
                 self.assertEqual(_read_pty(held_master), b"")
                 self.assertEqual(_read_pty(owner_master), b"")
                 self.assertEqual(opened, [])
+
+    def test_unconfirmed_hold_does_not_open_stdout_for_working(self):
+        held_master, held_slave = os.openpty()
+        owner_master, owner_slave = os.openpty()
+        self.addCleanup(os.close, held_master)
+        self.addCleanup(os.close, held_slave)
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        owner = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=owner_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        hook._pane_fd = os.dup(held_slave)
+        hook._held_ident = "100.000000"
+        hook._held_pid = 0
+        held_fd = hook._pane_fd
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        state = hook.fresh_state()
+        state["aggregate"] = 1
+        state["busy"] = {hook.AGGREGATE: 1.0}
+        state["owners"] = {hook.AGGREGATE: owner.pid}
+        state["owner_ident"] = {hook.AGGREGATE: "100.000000"}
+        state["proven_pid"] = owner.pid
+        state["proven_ident"] = "100.000000"
+        state["phase"] = "proven"
+        before = _owner_fields(state)
+        _read_pty(held_master)
+        _read_pty(owner_master)
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", side_effect=AssertionError("live stdout")),
+        ):
+            write, ok = hook.commit_pane(state, "prompt")
+        self.assertEqual((write, ok), ("working", False))
+        self.assertEqual(state["phase"], "proven")
+        self.assertEqual(_owner_fields(state), before)
+        self.assertEqual(hook._pane_fd, held_fd)
+        self.assertEqual(_read_pty(held_master), b"")
+        self.assertEqual(_read_pty(owner_master), b"")
+
+    def test_reap_unlinks_only_a_confirmed_dead_or_mismatched_pidfile(self):
+        denied = hook.PidFileView(1, errno.EPERM, "1.000000", "kiro-cli", "2.000000", "other", False)
+        dead = hook.PidFileView(1, errno.ESRCH, "", "", "", "", False)
+        unknown = hook.PidFileView(1, None, "", "kiro-cli", "1.000000", "other", False)
+        snapped = hook.PidFileView(1, None, "1.000000", "kiro-cli", "2.000000", "other", True)
+        self.assertEqual(hook.classify_pidfile(denied), "keep")
+        self.assertEqual(hook.classify_pidfile(dead), "reap")
+        self.assertEqual(hook.classify_pidfile(unknown), "keep")
+        self.assertEqual(hook.classify_pidfile(snapped), "keep")
+        root = tempfile.mkdtemp(prefix="herdr-kiro-reap-")
+        self.addCleanup(shutil.rmtree, root, True)
+        pid_dir = os.path.join(root, "herdr-kiro", "pids")
+        os.makedirs(pid_dir)
+        dead_pid, bad_pid, ok_pid = 424242, 434343, 444444
+        files = {
+            str(dead_pid): f"{os.getuid()}\nnot-a-start\nstale\n",
+            str(bad_pid): f"{os.getuid()}\n1700000000.999999\nnot-the-comm\n",
+            str(ok_pid): f"{os.getuid()}\n100.000000\nkiro-cli\n",
+        }
+        for name, text in files.items():
+            with open(os.path.join(pid_dir, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+
+        def kill(pid, _sig, real_kill=os.kill):
+            if pid == dead_pid:
+                raise OSError(errno.ESRCH, "gone")
+            if pid in (bad_pid, ok_pid):
+                return None
+            return real_kill(pid, _sig)
+
+        def snap(pid):
+            if pid == ok_pid:
+                return {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+            if pid == bad_pid:
+                return {"ppid": 1, "lstart": "10", "comm": "other"}
+            return None
+
+        def start(pid):
+            return "100.000000" if pid == ok_pid else "200.000000"
+
+        env = {"XDG_STATE_HOME": root}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook.os, "kill", kill),
+            mock.patch.object(hook, "process_snapshot", snap),
+            mock.patch.object(hook, "hires_start", start),
+        ):
+            hook.commit_pane(hook.fresh_state(), "prompt")
+            for name in files:
+                self.assertTrue(os.path.isfile(os.path.join(pid_dir, name)), name)
+            hook.commit_pane(hook.fresh_state(), "reap")
+            self.assertFalse(os.path.isfile(os.path.join(pid_dir, str(dead_pid))))
+            self.assertFalse(os.path.isfile(os.path.join(pid_dir, str(bad_pid))))
+            self.assertTrue(os.path.isfile(os.path.join(pid_dir, str(ok_pid))))
 
     def test_live_sec_idle_clear_is_weak_and_reaches_pid_reuse(self):
         proc = subprocess.Popen(["sleep", "30"])
@@ -2946,7 +3053,8 @@ class PriorFindingTableTests(unittest.TestCase):
                 write, _ok = hook.commit_pane(sample, event)
                 self.assertEqual(write, "none", event)
                 self.assertEqual(_owner_fields(sample), before, event)
-            self.assertFalse(hook.clear_idle_if_current(state, 1))
+            write, ok = hook.commit_pane(state, "idle_clear")
+            self.assertEqual((write, ok), ("none", True))
         self.assertEqual(state["owners"].get("sess"), proc.pid)
         self.assertIn("sess", state["busy"])
         self.assertEqual(state["phase"], "idle_clear")
@@ -3273,10 +3381,13 @@ class PriorFindingTableTests(unittest.TestCase):
     def _row_question_panel(self, _row):
         text = "› ask a question or describe a task\n"
         view = {"state": "blocked", "id": "question_panel", "ok": True}
-        with mock.patch.object(hook, "screen_view", return_value=view):
-            self.assertTrue(hook.blocker_visible(text))
-            self.assertFalse(hook.screen_is_settled(text))
-            self.assertFalse(hook.screen_is_quiet(text))
+        snap = hook.ScreenSnapshot(text, view)
+        self.assertTrue(hook.blocker_visible(snap))
+        self.assertFalse(hook.screen_is_settled(snap))
+        self.assertFalse(hook.screen_is_quiet(snap))
+        failed = hook.ScreenSnapshot(None, view)
+        self.assertIsNone(hook.report_for(failed, "working"))
+        self.assertFalse(hook.screen_is_settled(failed))
         footer = "esc to close, arrows to navigate, and enter to select\n"
         self.assertTrue(hook.approval_text(footer))
         self.assertFalse(hook.screen_is_settled(footer))
@@ -3286,7 +3397,8 @@ class PriorFindingTableTests(unittest.TestCase):
         state["busy"] = {"sess": 1.0}
         state["generation"] = 1
         with mock.patch.object(hook, "paint_status", return_value=True) as paint:
-            self.assertFalse(hook.clear_idle_if_current(state, 1))
+            write, _ok = hook.commit_pane(state, hook.screen_event(state, "timer"))
+            self.assertEqual(write, "none")
         self.assertIn("sess", state["busy"])
         self.assertEqual(state["owners"], {})
         self.assertNotEqual(state["phase"], "idle_clear")
@@ -3331,6 +3443,7 @@ class SettledDecisionTests(unittest.TestCase):
                 "done",
                 "paint_blocked",
                 "refresh",
+                "reap",
                 "record_aggregate",
                 "touch_aggregate",
                 "touch_partial",
@@ -3844,6 +3957,10 @@ class PaneWriteMatrixTests(unittest.TestCase):
             for owner in ("proven", "chat_gone"):
                 for count in self._COUNTS:
                     keys.append(("held_unconfirmed", event, owner, count, "held"))
+        for event in self._HOOKS + self._WATCH:
+            for owner in self._OWNERS:
+                for count in self._COUNTS:
+                    keys.append(("app_fail", event, owner, count, "app_fail"))
         return keys
 
     def _cell(self, start, event, owner, count, mode):
@@ -3885,25 +4002,27 @@ class PaneWriteMatrixTests(unittest.TestCase):
         initial = self._initial_files(file_start, prepared, watching)
         if mode == "chooser":
             initial[f"pids/{self.gone.pid}"] = f"{os.getuid()}\nnot-the-start\nstale\n".encode()
+        planted = {}
+        if self._plants_pids(file_start, event, prepared, watching, mode):
+            planted = self._planted_pidfiles()
+            initial.update(planted)
+        self._planted_names = tuple(planted)
         self._write_files(state_root, initial)
         before = self._snapshot(state_root)
         expected_files, expected_osc = self._expect(file_start, event, prepared, watching)
         if mode == "chooser":
-            trial = copy.deepcopy(prepared) if prepared is not None else None
-            keep_pid = trial is None
-            if trial is not None:
-                chosen, _ok, _flag, _osc, _release = self._hook_fold(trial, event)
-                keep_pid = chosen in ("none", "refresh")
-            if keep_pid:
-                name = f"pids/{self.gone.pid}"
-                expected_files[name] = initial[name]
+            name = f"pids/{self.gone.pid}"
+            expected_files[name] = initial[name]
+        for name, raw in planted.items():
+            expected_files[name] = raw
         clock = [self._BASE]
-        if mode == "chooser":
-            hook._EXPLAIN_ENV = None
-            hook._SCREEN_CACHE.clear()
-            hook._RULES_DIR = None
         with mock.patch.dict(os.environ, env, clear=False):
             os.environ.pop("HERDR_KIRO_LOG", None)
+            # A cached explain env would skip the pid sweep. Each cell explains fresh.
+            if planted or mode == "chooser":
+                hook._EXPLAIN_ENV = None
+                hook._SCREEN_CACHE.clear()
+                hook._RULES_DIR = None
             path = hook.state_path("t7")
             self._drive(path, file_start, event, watching, clock, prepared, mode)
             self._kill_watchers(root)
@@ -3924,7 +4043,47 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return "gone_outer"
         if start == "held_unconfirmed":
             return "floor_ahead"
+        if start == "app_fail":
+            return "live_outer"
         return start
+
+    def _plants_pids(self, file_start, event, prepared, watching, mode):
+        if mode == "app_fail" or event in ("idle_clear", "settled"):
+            return True
+        return self._classify_write(file_start, event, prepared, watching) in ("none", "refresh")
+
+    def _planted_pidfiles(self):
+        stale = f"{os.getuid()}\nnot-the-live-start\nstale-comm\n".encode()
+        mismatch = f"{os.getuid()}\n1700000000.999999\nnot-the-comm\n".encode()
+        return {
+            f"pids/{self.gone.pid}": stale,
+            f"pids/{self.live.pid}": mismatch,
+        }
+
+    def _classify_write(self, _file_start, event, prepared, watching):
+        state = copy.deepcopy(prepared) if prepared is not None else hook.fresh_state()
+        if not watching:
+            chosen, _ok, _flag, _osc, _release = self._hook_fold(state, event)
+            return chosen
+        if hook._owner_exited(state, []):
+            write, _ok, _osc = self._commit(state, "process_exit", 0.0)
+            return write
+        if hook._owner_is_live_weak(state):
+            self._commit(state, "pid_reuse", 0.0)
+        if event == "blocked":
+            screen_event = "blocked"
+        elif event == "banner":
+            screen_event = "start"
+        elif event in ("continue", "reload") and state.get("busy"):
+            screen_event = "prompt"
+        elif event == "idle_clear":
+            screen_event = "idle_clear"
+        elif event == "settled":
+            screen_event = "stop"
+        else:
+            return "none"
+        write, _ok, _osc = self._commit(state, screen_event, self._BASE)
+        return write
 
     def _arm_unconfirmed_hold(self):
         hook._close_held_fd()
@@ -3943,6 +4102,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return None
 
         def screen(_pane, path=path, event=event, start=start, mode=mode):
+            if mode == "app_fail":
+                return None
             if mode == "chooser":
                 return self._BLOCKED
             if start == "stale_generation" and event in ("idle_clear", "settled"):
@@ -4146,7 +4307,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
         self._clear_watch_slot(book)
 
     def _watch_screen(self, book, event, now, quiet_since, reported, stale):
-        screen = self._screen_for(event)
+        # A failed App read is not a screen. It is not the prompt, so the
+        # oracle keeps the busy working report and does not paint done.
+        screen = "" if self._pane_mode == "app_fail" else self._screen_for(event)
         painted = []
         if hook.approval_text(screen):
             mark = {"write": "none", "ok": False}
@@ -4198,15 +4361,18 @@ class PaneWriteMatrixTests(unittest.TestCase):
             mark = {"write": "none"}
 
             def start(state, painted=painted, mark=mark):
-                write, _ok, osc = self._commit(state, "start", 0.0)
+                write, ok, osc = self._commit(state, "start", 0.0)
                 mark["write"] = write
+                mark["ok"] = ok
                 painted.append(osc)
+                if write == "working" and not ok:
+                    return "none"
                 return write
 
             held_done = self._done_via_held(book.state)
             self._arm_before(book, now, "start")
             book.apply(start, now)
-            if mark["write"] == "working":
+            if mark["write"] == "working" and mark.get("ok"):
                 self._arm_log(book, now)
                 self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
                 book.apply(lambda state: self._bump_report(state, "working"), now)
@@ -4246,15 +4412,18 @@ class PaneWriteMatrixTests(unittest.TestCase):
         mark = {"write": "none"}
 
         def prompt(state, painted=painted, mark=mark, now=now):
-            write, _ok, osc = self._commit(state, "prompt", now)
+            write, ok, osc = self._commit(state, "prompt", now)
             mark["write"] = write
+            mark["ok"] = ok
             painted.append(osc)
+            if write == "working" and not ok:
+                return "none"
             return write
 
         held_done = self._done_via_held(book.state)
         self._arm_before(book, now, "prompt", now)
         book.apply(prompt, now)
-        if mark["write"] == "working":
+        if mark["write"] == "working" and mark.get("ok"):
             self._arm_log(book, now)
             self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
             book.apply(lambda state: self._bump_report(state, "working"), now)
@@ -4283,6 +4452,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
         return ""
 
     def _report_after_hook(self, book, event, chosen, ok, release):
+        if self._pane_mode == "app_fail":
+            return ""
         if book.state is None:
             return ""
         action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), False, self._BASE)
@@ -4339,8 +4510,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
         stamp = clock if now is None else now
         base = book.state if book.state is not None else hook.fresh_state()
         trial = copy.deepcopy(base)
-        write, _ok, _osc = self._commit(trial, event, stamp)
-        if write in ("none", "refresh"):
+        write, ok, _osc = self._commit(trial, event, stamp)
+        if write in ("none", "refresh") or (not ok and trial == base):
             return
         self._arm_log(book, clock)
 
@@ -4440,10 +4611,12 @@ class PaneWriteMatrixTests(unittest.TestCase):
         expected_state["watcher_at"] = self._BASE
         expected["t7.json"] = self._dump(expected_state)
         expected.pop("pids/" + str(os.getpid()), None)
+        planted = {name: expected[name] for name in getattr(self, "_planted_names", ()) if name in expected}
         for name in list(expected):
             if name.startswith("pids/"):
                 expected.pop(name)
         expected[pid_name] = pid_bytes
+        expected.update(planted)
         raw_log = expected.get("hook.log")
         if raw_log and b"__SPAWN__" in raw_log:
             expected["hook.log"] = raw_log.replace(b"__SPAWN__", str(pid).encode())
@@ -4509,12 +4682,17 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return write, True, b""
         if write == "record_named":
             return write, True, b""
+        if write == "reap":
+            return write, True, b""
         if write == "done":
             owner_now = hook._pane_owner(state)
             if owner_now is not None and hook._held_pid_unconfirmed(owner_now[0], owner_now[1]):
                 return "none", False, b""
             return self._commit_done(state, event, now, session, hook_name, phase)
         if write == "working":
+            owner_now = hook._pane_owner(state)
+            if owner_now is not None and hook._held_pid_unconfirmed(owner_now[0], owner_now[1]):
+                return write, False, b""
             ok = self._can_paint(state)
             state["phase"] = hook.pane_next(phase, event)
             return write, ok, self._osc("working") if ok else b""
@@ -4785,6 +4963,271 @@ def _read_pty(master):
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+class _WriteTracer:
+    """Fail a hook write unless commit_pane is applying it."""
+
+    _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+    def __init__(self):
+        self.violations = []
+
+    def __enter__(self):
+        self._real_remove = os.remove
+        self._real_unlink = os.unlink
+        self._real_open = os.open
+        self._real_write = os.write
+        self._real_replace = os.replace
+        self._real_rename = os.rename
+        self._real_makedirs = os.makedirs
+        self._real_mkdir = os.mkdir
+        self._builtin_open = open
+
+        def traced_open(file, mode="r", *args, **kwargs):
+            if any(flag in mode for flag in ("w", "a", "x", "+")):
+                self._note("open", file)
+            return self._builtin_open(file, mode, *args, **kwargs)
+
+        self._traced_open = traced_open
+        self._bind(
+            os,
+            (
+                ("remove", self._remove),
+                ("unlink", self._unlink),
+                ("open", self._os_open),
+                ("write", self._os_write),
+                ("replace", self._replace),
+                ("rename", self._rename),
+                ("makedirs", self._makedirs),
+                ("mkdir", self._mkdir),
+            ),
+        )
+        self._bind(builtins, (("open", traced_open),))
+        return self
+
+    def __exit__(self, *_exc):
+        self._bind(
+            os,
+            (
+                ("remove", self._real_remove),
+                ("unlink", self._real_unlink),
+                ("open", self._real_open),
+                ("write", self._real_write),
+                ("replace", self._real_replace),
+                ("rename", self._real_rename),
+                ("makedirs", self._real_makedirs),
+                ("mkdir", self._real_mkdir),
+            ),
+        )
+        self._bind(builtins, (("open", self._builtin_open),))
+        return False
+
+    @staticmethod
+    def _bind(target, pairs):
+        for name, value in pairs:
+            setattr(target, name, value)
+
+    def _note(self, kind, target):
+        stack = traceback.extract_stack()
+        if not any(frame.filename.endswith("herdr_kiro_state.py") for frame in stack):
+            return
+        depth = getattr(hook, "_WRITE_DEPTH", 0)
+        applying = depth > 0 and any(frame.name == "commit_pane" for frame in stack)
+        if applying:
+            return
+        where = " <- ".join(frame.name for frame in stack[-8:])
+        self.violations.append(f"{kind} {target} via {where}")
+
+    def _remove(self, path):
+        self._note("remove", path)
+        return self._real_remove(path)
+
+    def _unlink(self, path):
+        self._note("unlink", path)
+        return self._real_unlink(path)
+
+    def _os_open(self, path, flags, *args, **kwargs):
+        if flags & self._WRITE_FLAGS and path != "/dev/null":
+            self._note("os.open", path)
+        return self._real_open(path, flags, *args, **kwargs)
+
+    def _os_write(self, fd, data):
+        self._note("os.write", fd)
+        return self._real_write(fd, data)
+
+    def _replace(self, src, dst):
+        self._note("replace", dst)
+        return self._real_replace(src, dst)
+
+    def _rename(self, src, dst):
+        self._note("rename", dst)
+        return self._real_rename(src, dst)
+
+    def _makedirs(self, path, *args, **kwargs):
+        if not os.path.isdir(path):
+            self._note("makedirs", path)
+        return self._real_makedirs(path, *args, **kwargs)
+
+    def _mkdir(self, path, *args, **kwargs):
+        if not os.path.isdir(path):
+            self._note("mkdir", path)
+        return self._real_mkdir(path, *args, **kwargs)
+
+
+class ScreenReadPurityTests(unittest.TestCase):
+    """Classifiers, watch_loop, and main write only while commit_pane applies."""
+
+    def _quiet(self):
+        return "› ask a question or describe a task\n"
+
+    def _reset_explain(self):
+        hook._EXPLAIN_ENV = None
+        hook._SCREEN_CACHE.clear()
+        hook._RULES_DIR = None
+
+    def _state_root(self):
+        root = tempfile.mkdtemp(prefix="herdr-kiro-purity-")
+        self.addCleanup(shutil.rmtree, root, True)
+        state = os.path.join(root, "herdr-kiro")
+        os.makedirs(os.path.join(state, "pids"), mode=0o700)
+        return root, state
+
+    def _plant(self, state):
+        dead = subprocess.Popen(["sleep", "30"])
+        dead.kill()
+        dead.wait(timeout=5)
+        files = {
+            str(dead.pid): f"{os.getuid()}\nnot-the-live-start\nstale-comm\n",
+            str(os.getpid()): f"{os.getuid()}\n1700000000.999999\nnot-the-comm\n",
+        }
+        for name, text in files.items():
+            with open(os.path.join(state, "pids", name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+        return files
+
+    def _snapshot(self, state):
+        found = {}
+        for dirpath, _dirs, names in os.walk(state):
+            for name in names:
+                path = os.path.join(dirpath, name)
+                with open(path, "rb") as handle:
+                    found[os.path.relpath(path, state)] = handle.read()
+        return found
+
+    def test_classifiers_watch_loop_and_main_do_not_write_outside_commit_pane(self):
+        root, state = self._state_root()
+        self._plant(state)
+        before = self._snapshot(state)
+        quiet = self._quiet()
+        self._reset_explain()
+        env = {
+            "XDG_STATE_HOME": root,
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
+        violations = []
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("HERDR_KIRO_LOG", None)
+            with _WriteTracer() as tracer:
+                hook.explain(quiet)
+                hook.explain(hook.ScreenSnapshot(None, None))
+                hook.screen_is_settled(quiet)
+                hook.screen_is_settled(hook.ScreenSnapshot(None, None))
+                hook.screen_is_quiet(quiet)
+                hook.report_for(quiet, "working")
+                hook.report_for(quiet, "idle")
+                hook.report_for(hook.ScreenSnapshot(None, None), "working")
+                hook.blocker_visible(quiet)
+                hook.blocker_visible(hook.ScreenSnapshot(None, None))
+                hook.prompt_visible(quiet)
+                hook.workflow_banner_from(quiet)
+                hook.approval_text(quiet)
+            violations.extend(tracer.violations)
+            after_classifiers = self._snapshot(state)
+            self._reset_explain()
+            pane = hook.state_path("t7")
+            weak = hook.fresh_state()
+            weak["phase"] = "weak"
+            weak["aggregate"] = 0
+            weak["busy"] = {hook.AGGREGATE: 10.0}
+            weak["owners"] = {hook.AGGREGATE: os.getpid()}
+            weak["owner_ident"] = {hook.AGGREGATE: "sec:10"}
+            weak["generation"] = 3
+            weak["seq"] = 4
+            with open(pane, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(weak))
+            before_watch = self._snapshot(state)
+
+            ticks = {"n": 0}
+
+            def wait(_self, _pids, _timeout, ticks=ticks):
+                ticks["n"] += 1
+                if ticks["n"] > 1:
+                    raise SystemExit
+                return False
+
+            def screen(_pane):
+                return quiet
+
+            with (
+                _WriteTracer() as tracer,
+                mock.patch.object(hook.OwnerExitWatch, "wait", wait),
+                mock.patch.object(hook, "pane_text", screen),
+                mock.patch.object(hook.time, "sleep", lambda _delay: None),
+                contextlib.suppress(SystemExit),
+            ):
+                hook.watch_loop("t7", pane)
+            violations.extend(tracer.violations)
+            after_watch = self._snapshot(state)
+            self._reset_explain()
+            proven = hook.fresh_state()
+            proven["phase"] = "proven"
+            proven["aggregate"] = 0
+            proven["busy"] = {hook.AGGREGATE: 10.0}
+            proven["owners"] = {hook.AGGREGATE: os.getpid()}
+            proven["owner_ident"] = {hook.AGGREGATE: hook.hires_start(os.getpid())}
+            proven["proven_pid"] = os.getpid()
+            proven["proven_ident"] = proven["owner_ident"][hook.AGGREGATE]
+            proven["generation"] = 3
+            proven["seq"] = 4
+            with open(pane, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(proven))
+            before_hook = self._snapshot(state)
+            with (
+                _WriteTracer() as tracer,
+                mock.patch.object(sys, "argv", ["herdr-kiro", "UserPromptSubmit"]),
+                mock.patch.object(sys, "stdin", io.StringIO("{}")),
+                mock.patch.object(hook, "pane_text", screen),
+                mock.patch.object(hook, "kiro_lineage", lambda: (os.getpid(), proven["proven_ident"], 0, "")),
+            ):
+                self.assertEqual(hook.main(), 0)
+            violations.extend(tracer.violations)
+            after_hook = self._snapshot(state)
+        problems = []
+        if after_classifiers != before:
+            problems.append(f"classifiers changed the state directory: {sorted(set(before) | set(after_classifiers))}")
+        if after_watch != before_watch:
+            problems.append("watch none tick changed the state directory")
+        refresh_names = sorted(set(before_hook) | set(after_hook))
+        changed = [name for name in refresh_names if before_hook.get(name) != after_hook.get(name)]
+        if changed != ["t7.json"]:
+            problems.append(f"refresh changed {changed}")
+        else:
+            saved = json.loads(after_hook["t7.json"])
+            original = json.loads(before_hook["t7.json"])
+            if saved["busy"][hook.AGGREGATE] == original["busy"][hook.AGGREGATE]:
+                problems.append("refresh did not move the busy timestamp")
+            else:
+                saved["busy"] = original["busy"]
+                if saved != original:
+                    problems.append("refresh changed more than the busy timestamp")
+        if violations:
+            problems.append(f"{len(violations)} writes outside commit_pane:\n" + "\n".join(violations[:20]))
+        if problems:
+            self.fail("\n".join(problems))
 
 
 if __name__ == "__main__":
