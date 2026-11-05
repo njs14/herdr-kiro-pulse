@@ -208,11 +208,10 @@ def normalize(state: dict, now: float) -> dict:
         except (TypeError, ValueError):
             continue
         key = str(session)
-        # A live owner stays, including a weak row and a stamp older than
-        # STALE_SECS. A dead owner stays until the exit write. A session
-        # with no owner pid drops once the stamp is that old.
-        dead = owner_is_dead(owners.get(key))
-        if owners.get(key) or dead or now - seen < STALE_SECS:
+        # A session with an owner pid stays, live or dead, including a stamp
+        # older than STALE_SECS. A session with no owner pid drops once the
+        # stamp is that old.
+        if owners.get(key) or now - seen < STALE_SECS:
             kept[key] = seen
             if owners.get(key):
                 kept_owners[key] = owners.get(key)
@@ -319,8 +318,9 @@ def _keep_proven_pane(state: dict, key: str) -> None:
     """Save a proven pane owner before END drops its row.
 
     identity_proven is required. An empty token or a sec: token is not
-    saved. Stop and SessionEnd drop the row only when pane_transition
-    returns done. A weak owner and a dead sec: owner stay.
+    saved. Stop and SessionEnd drop a recorded owner only when
+    pane_transition returns done. A slot with no owner pid still ends.
+    A weak owner and a dead sec: owner stay. A none result leaves the row.
     """
     owners = state.get("owners")
     if not isinstance(owners, dict):
@@ -343,6 +343,26 @@ def _pop_session(state: dict, key: str) -> None:
     state["busy"].pop(key, None)
     state["owners"].pop(key, None)
     state["owner_ident"].pop(key, None)
+
+
+def _drop_done_owner(state: dict, pid: int) -> None:
+    """Drop the owner a successful done write already ended.
+
+    Call this only when pane_transition returned done and the paint
+    succeeded. A none result does not call it, and it does not run from
+    phase exited alone.
+    """
+    owners = state.get("owners")
+    if not isinstance(owners, dict):
+        return
+    for key, owner in list(owners.items()):
+        try:
+            number = int(owner)
+        except (TypeError, ValueError):
+            continue
+        if number == pid:
+            _pop_session(state, key)
+            return
 
 
 def _owner_is_live_weak(state: dict) -> bool:
@@ -370,10 +390,11 @@ def _chooser_event(state: dict, event: str) -> str:
 def _chooser_drops_row(state: dict, event: str) -> bool:
     """True when Stop or SessionEnd may drop a busy slot.
 
-    A pane with no owner pid still ends the slot. A recorded owner is dropped
-    only when pane_transition returns done. none leaves the row, including a
-    dead sec: owner and a live weak owner. commit_pane stores exited after
-    that done write, and the row still drops from the proven token it saved.
+    A pane with no owner pid still ends the slot. A recorded owner is
+    dropped only when pane_transition returns done. none leaves that row.
+    Phase exited, a matching proven token, and a held token do not drop
+    it. A weak exit stores exited through pane_next, and a later Stop
+    still leaves the row.
     """
     if event not in END_EVENTS:
         return False
@@ -382,42 +403,29 @@ def _chooser_drops_row(state: dict, event: str) -> bool:
     if _owner_is_live_weak(state):
         return False
     ev = _chooser_event(state, hook_event(state, event))
-    if pane_transition(_phase_for_event(state, ev), ev) == "done":
-        return True
-    # commit_pane moves a proven process_exit to exited before this runs.
-    # That done result still drops the row. A sec: token and a weak exit do not.
-    if (state.get("phase") or "") != "exited":
-        return False
-    owner = _pane_owner(state)
-    if owner is None:
-        return False
-    pid, token = owner
-    if not fine_start(token):
-        return False
-    try:
-        proven_pid = int(state.get("proven_pid") or 0)
-    except (TypeError, ValueError):
-        proven_pid = 0
-    proven_ident = state.get("proven_ident") if isinstance(state.get("proven_ident"), str) else ""
-    if proven_pid == pid and proven_ident == token:
-        return True
-    return _held_proves(token)
+    return pane_transition(_phase_for_event(state, ev), ev) == "done"
 
 
-def _held_proves(token: str) -> bool:
-    """True when the held fd is open and its token equals this fine token.
+def _held_proves(token: str, pid: int) -> bool:
+    """True when the held fd was opened for this owner.
 
-    This does not check that `_held_pid` is the owner. The write does.
+    The fd is open, the token is that fine token, and `_held_pid` is this
+    pid. Zero and any other pid are not proof and do not write.
     """
-    return bool(fine_start(token) and _pane_fd >= 0 and _held_ident == token)
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return False
+    return bool(fine_start(token) and number > 1 and _pane_fd >= 0 and _held_ident == token and _held_pid == number)
 
 
 def _proven_exit_owed(state: dict) -> bool:
     """A proven outer is already gone and still owes state=done.
 
     The proof is a phase stored while the pid was proven, or the fd held
-    for that fine token. A stored weak or exited phase does not owe that
-    write. A gone fine token stored as proven or idle_clear does.
+    for that fine token when `_held_pid` is this owner. A stored weak or
+    exited phase does not owe that write. A gone fine token stored as
+    proven or idle_clear does. A mismatched or unconfirmed held pid does not.
     """
     owner = _pane_owner(state)
     if owner is None:
@@ -430,7 +438,7 @@ def _proven_exit_owed(state: dict) -> bool:
         return False
     if stored in ("proven", "idle_clear"):
         return True
-    return _held_proves(token)
+    return _held_proves(token, pid)
 
 
 def finish_if_idle(state: dict, now: float) -> None:
@@ -473,9 +481,9 @@ def apply_event(
                 count -= 1
             nxt["aggregate"] = count
             # The grace follows only this count returning to zero. A Stop
-            # whose count is already zero does not arm it. The row stays when
-            # pane_transition returns none, including a dead sec: owner and a
-            # live weak owner.
+            # whose count is already zero does not arm it. A recorded owner
+            # stays when pane_transition returns none, including a dead sec:
+            # owner and a live weak owner. A slot with no owner pid still ends.
             if previous > 0 and count == 0 and _chooser_drops_row(nxt, event):
                 _pop_session(nxt, AGGREGATE)
                 finish_if_idle(nxt, now)
@@ -505,8 +513,9 @@ def apply_event(
                 remember_owner(nxt, member, owner, owner_started)
         nxt["grace_until"] = 0.0
     elif event in END_EVENTS:
-        # A named Stop or SessionEnd does not arm the grace. The owner row
-        # stays when pane_transition returns none.
+        # A named Stop or SessionEnd does not arm the grace. A recorded
+        # owner stays when pane_transition returns none. A slot with no
+        # owner pid still ends.
         if _chooser_drops_row(nxt, event):
             if session in nxt["busy"]:
                 _pop_session(nxt, session)
@@ -638,8 +647,10 @@ def herdr(*args: str) -> bool:
 
 
 # Fd this process opened for the owner's stdout while that owner was alive.
-# The watcher opens it in this interpreter. The exit writes this fd.
-# The token is the identity that proved the owner when the fd was opened.
+# The watcher opens it in this interpreter. The exit writes this fd only
+# when _held_pid is that owner. A mismatched or unconfirmed pid writes
+# nothing. The token is the identity that proved the owner when the fd
+# was opened.
 _pane_fd = -1
 _held_ident = ""
 _held_pid = 0
@@ -1363,12 +1374,14 @@ def blocker_visible(text: str) -> bool:
 
 
 def screen_is_settled(text: str) -> bool:
-    """No workflow banner, no approval, and no working footer.
+    """No workflow banner, no blocked explain result, and no working footer.
 
+    A question panel is a blocked explain result with no approval text, so
+    it is not settled. Approval text is already a blocked result.
     The kiro idle prompt qualifies. So does the shell prompt left behind after
     the outer kiro-cli exits, which does not contain that prompt.
     """
-    if workflow_banner_from(text) or blocker_visible(text) or approval_text(text):
+    if workflow_banner_from(text) or blocker_visible(text):
         return False
     return "kiro is working" not in tail_text(text).lower()
 
@@ -1695,7 +1708,7 @@ def _save_proven_owner(state: dict) -> None:
     pid, token = owner
     stored = state.get("phase") or ""
     proven_now = identity_proven(pid, token)
-    proven_exit = fine_start(token) and not alive(pid) and (stored == "proven" or _held_proves(token))
+    proven_exit = fine_start(token) and not alive(pid) and (stored == "proven" or _held_proves(token, pid))
     if proven_now or proven_exit:
         state["proven_pid"] = pid
         state["proven_ident"] = token
@@ -1725,9 +1738,10 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     # write that fd when _held_pid is this owner.
     if not _pid_gone(pid) and not identity_proven(pid, token):
         return False
-    if kind == "idle" and _held_proves(token):
+    if kind == "idle" and fine_start(token) and _pane_fd >= 0 and _held_ident == token:
         # A matching start token is not enough. The fd was opened for
         # _held_pid. Zero, or any other pid, is a different terminal.
+        # Do not open another tty.
         if _held_pid <= 1 or _held_pid != pid:
             return False
         return _write_held_fd()
@@ -1735,15 +1749,19 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
 
 
 def commit_pane(state: dict, event: str) -> tuple[str, bool]:
-    """Choose the pane write, paint that one tty, and store the next state.
+    """Choose the pane write, paint that one tty, and store the next phase.
 
     pane_transition chooses working, done, or none. This is the only path
-    that paints working or done. A proven outer that is already gone makes
-    Stop, SessionEnd, and a prompt into process_exit, so they still choose
-    done. The held tty is written only when its pid is that owner. A
-    mismatched or unconfirmed held pid writes nothing and does not open
-    another tty. A failed done write does not change the phase. The caller
-    drops the row after a done write has succeeded.
+    that paints working or done. A none result does not drop the owner row
+    and does not change owners, idents, busy, or the proven pid. pane_next
+    may still store the next phase, and that store is not a drop. A proven
+    outer that is already gone makes Stop, SessionEnd, and a prompt into
+    process_exit, so they still choose done. The held tty is written only
+    when its pid is that owner. A mismatched or unconfirmed held pid writes
+    nothing and does not open another tty. A failed done write does not
+    change the phase. The caller drops the row after a done write has
+    succeeded, including when this store has already moved the phase to
+    exited.
     """
     event = _chooser_event(state, event)
     phase = _phase_for_event(state, event)
@@ -2498,6 +2516,9 @@ class OwnerExitWatch:
                     os.kill(pid, 0)
                 except OSError as exc:
                     if exc.errno == errno.ESRCH:
+                        # Already gone. Same capped backoff as a pidfd or
+                        # kqueue exit that was visible on entry.
+                        self._pause_for_ready_exit()
                         return True
             remaining = deadline - time.time()
             if remaining <= 0:
@@ -2531,8 +2552,9 @@ def _watch_loop(pane: str, path: str) -> None:
     held = None
     owner_watch = OwnerExitWatch()
     # A SessionEnd that pane_transition accepts drops the owner before the
-    # process exits. A weak owner and a dead sec: owner stay. Keep the last
-    # pid so a dropped owner's exit still wakes the watcher.
+    # process exits. A weak owner and a dead sec: owner stay. known_outers
+    # keeps the last pid so that exit still wakes the watcher. known_owners
+    # is only the live wait set, and an empty owner list clears it.
     known_owners = []
     known_outers = []
     gone_since = None
@@ -2581,14 +2603,14 @@ def _watch_loop(pane: str, path: str) -> None:
             if outers_now:
                 known_outers = outers_now
             live_wait = [pid for pid in current_owners if not _pid_gone(pid)]
-            if live_wait:
-                known_owners = live_wait
-            elif current_owners:
-                known_owners = []
+            # An empty owner list drops the previous pid. A list whose pids
+            # are already gone does too, so kill(0) is not spun on a miss.
+            known_owners = live_wait or []
             pane_owner = _pane_owner(state)
             owner_alive = False
-            # Phase changes only through pane_transition. Holding the tty
-            # does not write the phase.
+            # pane_transition returns working, done, or none. commit_pane
+            # stores pane_next. This loop does not assign phase. Holding
+            # the tty does not write the phase.
             if pane_owner is not None and not _pid_gone(pane_owner[0]) and alive(pane_owner[0]):
                 owner_alive = True
                 if identity_proven(pane_owner[0], pane_owner[1]):
@@ -2842,6 +2864,9 @@ def main() -> int:
             owner_now = _pane_owner(state)
             if write == "done" and ok and owner_now is not None and not alive(owner_now[0]):
                 chosen["release"] = True
+                # commit_pane already stored exited, so a later chooser
+                # pass sees none. The drop belongs to this done result.
+                _drop_done_owner(state, owner_now[0])
         revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
         if event in END_EVENTS:
             revised["phase"] = state.get("phase") or revised.get("phase") or ""
@@ -2855,16 +2880,7 @@ def main() -> int:
             owner_now = _pane_owner(revised)
             if write == "done" and ok and owner_now is not None and not alive(owner_now[0]):
                 chosen["release"] = True
-                owners = revised.get("owners")
-                if isinstance(owners, dict):
-                    for key, pid in list(owners.items()):
-                        try:
-                            number = int(pid)
-                        except (TypeError, ValueError):
-                            continue
-                        if number == owner_now[0]:
-                            _pop_session(revised, key)
-                            break
+                _drop_done_owner(revised, owner_now[0])
         state.clear()
         state.update(revised)
 

@@ -2829,6 +2829,459 @@ class PaneFindingTests(unittest.TestCase):
         holder.wait(timeout=5)
 
 
+def _owner_fields(state):
+    """The owner row a none result must leave unchanged."""
+    proven = state.get("proven_pid") or 0
+    ident = state.get("proven_ident") or ""
+    return (
+        dict(state.get("owners") or {}),
+        dict(state.get("owner_ident") or {}),
+        dict(state.get("busy") or {}),
+        proven,
+        ident,
+    )
+
+
+def _copy_pane(state):
+    copied = dict(state)
+    for key in ("owners", "owner_ident", "busy"):
+        raw = state.get(key)
+        if isinstance(raw, dict):
+            copied[key] = dict(raw)
+    return copied
+
+
+# One row per lifecycle or security finding from the fb5a842 reviews.
+# The five required rows are the unproven pid, the held fd whose pid is
+# not the owner, the gone chat child, the empty owner list, and the
+# bounded wait.
+PRIOR_FINDING_ROWS = (
+    {"name": "weak-or-unproven-pid", "case": "unproven_pid", "token": "sec:10"},
+    {"name": "empty-token-pid", "case": "unproven_pid", "token": ""},
+    {"name": "fine-token-mismatch-is-not-painted", "case": "fine_mismatch"},
+    {"name": "held-fd-pid-is-not-the-owner", "case": "held_other_pid"},
+    {"name": "held-proof-requires-the-owner-pid", "case": "held_proof"},
+    {"name": "chat-child-gone-outer-alive", "case": "chat_gone"},
+    {"name": "one-owner-record", "case": "one_owner"},
+    {"name": "empty-owner-list", "case": "empty_owners"},
+    {"name": "bounded-wait", "case": "bounded_wait"},
+    {"name": "weak-exit-then-stop-leaves-the-row", "case": "none_keeps_row"},
+    {"name": "done-drop-is-not-a-later-none", "case": "done_then_none"},
+    {"name": "missing-or-ambiguous-tty-writes-nothing", "case": "tty_closed"},
+    {"name": "dev-tty-is-a-whole-path", "case": "tty_path"},
+    {"name": "empty-screen-does-not-end", "case": "empty_screen"},
+    {"name": "question-panel-does-not-settle", "case": "question_panel"},
+    {"name": "no-owner-chevron-does-not-end", "case": "no_owner_chevron"},
+    {"name": "no-owner-slot-still-ends-on-stop", "case": "no_owner_stop"},
+    {"name": "watcher-does-not-assign-phase", "case": "watcher_phase"},
+)
+
+
+class PriorFindingTableTests(unittest.TestCase):
+    """Table of the lifecycle and security findings. Each row has to pass."""
+
+    def test_prior_findings_stay_closed(self):
+        for row in PRIOR_FINDING_ROWS:
+            with self.subTest(finding=row["name"]):
+                getattr(self, "_row_" + row["case"])(row)
+
+    def _sleep_proc(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda proc=proc: proc.poll() is not None or proc.kill())
+        return proc
+
+    def _row_unproven_pid(self, row):
+        proc = self._sleep_proc()
+        token = row["token"]
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": proc.pid}
+        state["owner_ident"] = {"sess": token} if token else {}
+        state["phase"] = "idle_clear"
+        state["generation"] = 1
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        hook._pane_fd = os.dup(slave)
+        hook._held_ident = "100.000000"
+        hook._held_pid = proc.pid
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        events = ("stop", "idle_clear", "piped_chat", "process_exit", "pid_reuse")
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "sec:10"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+            mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+        ):
+            self.assertEqual(hook.owner_phase(state), "weak")
+            self.assertFalse(hook._held_proves(token, proc.pid))
+            for event in events:
+                sample = _copy_pane(state)
+                before = _owner_fields(sample)
+                write, _ok = hook.commit_pane(sample, event)
+                self.assertEqual(write, "none", event)
+                self.assertEqual(_owner_fields(sample), before, event)
+            self.assertFalse(hook.clear_idle_if_current(state, 1, ["sess"]))
+        self.assertEqual(state["owners"].get("sess"), proc.pid)
+        self.assertIn("sess", state["busy"])
+        self.assertNotEqual(state["phase"], "idle_clear")
+        paint.assert_not_called()
+        held.assert_not_called()
+        self.assertEqual(_read_pty(master), b"")
+        hook._close_held_fd()
+
+    def _row_fine_mismatch(self, _row):
+        proc = self._sleep_proc()
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": proc.pid}
+        state["owner_ident"] = {"sess": "200.000000"}
+        state["phase"] = "proven"
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+            mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+        ):
+            self.assertEqual(hook.owner_phase(state), "weak")
+            before = _owner_fields(state)
+            write, _ok = hook.commit_pane(state, "stop")
+            self.assertEqual(write, "none")
+            self.assertEqual(_owner_fields(state), before)
+            # The live class is weak, so the stored phase follows that class.
+            # The owner row does not change, and nothing is painted.
+            self.assertEqual(state["phase"], "weak")
+            write, _ok = hook.commit_pane(state, "pid_reuse")
+            self.assertEqual(write, "none")
+            self.assertEqual(_owner_fields(state), before)
+            self.assertEqual(state["phase"], "weak")
+            self.assertEqual(state["owners"].get("sess"), proc.pid)
+        paint.assert_not_called()
+        held.assert_not_called()
+
+    def _row_held_other_pid(self, _row):
+        held_master, held_slave = os.openpty()
+        owner_master, owner_slave = os.openpty()
+        self.addCleanup(os.close, held_master)
+        self.addCleanup(os.close, held_slave)
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        owner = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=owner_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        other = self._sleep_proc()
+        self.addCleanup(lambda owner=owner: owner.poll() is not None or owner.kill())
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        hook._pane_fd = os.dup(held_slave)
+        hook._held_ident = "100.000000"
+        held_fd = hook._pane_fd
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        owner_name = os.ttyname(owner_slave)
+        opened = []
+        real_open = os.open
+
+        def spy_open(path, flags, *args, **kwargs):
+            text = os.fsdecode(path) if isinstance(path, bytes) else path
+            if text in ("/dev/tty", owner_name):
+                opened.append(text)
+            return real_open(path, flags, *args, **kwargs)
+
+        for held_pid in (other.pid, 0):
+            hook._held_pid = held_pid
+            state = hook.fresh_state()
+            state["busy"] = {"sess": 1.0}
+            state["owners"] = {"sess": owner.pid}
+            state["owner_ident"] = {"sess": "100.000000"}
+            state["phase"] = "proven"
+            _read_pty(held_master)
+            _read_pty(owner_master)
+            opened.clear()
+            with (
+                mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+                mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+                mock.patch.object(hook.herdr_kiro_osc, "write_pid", side_effect=AssertionError("tty")),
+                mock.patch.object(os, "open", spy_open),
+            ):
+                self.assertFalse(hook._held_proves("100.000000", owner.pid))
+                write, ok = hook.commit_pane(state, "stop")
+            self.assertEqual((write, ok), ("done", False))
+            self.assertEqual(state["phase"], "proven")
+            self.assertEqual(state["owners"].get("sess"), owner.pid)
+            self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
+            self.assertIn("sess", state["busy"])
+            self.assertEqual(hook._pane_fd, held_fd)
+            self.assertEqual(_read_pty(held_master), b"")
+            self.assertEqual(_read_pty(owner_master), b"")
+            self.assertEqual(opened, [])
+        hook._close_held_fd()
+
+    def _row_held_proof(self, _row):
+        _master, slave = os.openpty()
+        self.addCleanup(os.close, _master)
+        self.addCleanup(os.close, slave)
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        hook._pane_fd = os.dup(slave)
+        hook._held_ident = "100.000000"
+        hook._held_pid = 70
+        start = "100.000000"
+        self.assertFalse(hook._held_proves(start, 60))
+        self.assertFalse(hook._held_proves(start, 0))
+        self.assertTrue(hook._held_proves(start, 70))
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": 60}
+        state["owner_ident"] = {"sess": start}
+        state["phase"] = "exited"
+        state["proven_pid"] = 60
+        state["proven_ident"] = start
+        before = _owner_fields(state)
+
+        def gone(_pid, _sig=0):
+            raise OSError(errno.ESRCH, "gone")
+
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+            mock.patch.object(hook.os, "kill", gone),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            self.assertFalse(hook._chooser_drops_row(state, "Stop"))
+            self.assertFalse(hook._chooser_drops_row(state, "SessionEnd"))
+            revised = hook.apply_event(state, "Stop", "sess", 2.0)
+        self.assertEqual(_owner_fields(revised), before)
+        self.assertIn("sess", revised["busy"])
+        paint.assert_not_called()
+        hook._close_held_fd()
+
+    def _row_chat_gone(self, _row):
+        outer = self._sleep_proc()
+        chat = self._sleep_proc()
+        chat.kill()
+        chat.wait(timeout=5)
+        state = hook.fresh_state()
+        state["owners"] = {"sess": outer.pid}
+        state["owner_ident"] = {"sess": "100.000000"}
+        state["chat_pid"] = chat.pid
+        pairs = hook._outer_pairs(state)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][0], outer.pid)
+        self.assertTrue(hook._pid_gone(chat.pid))
+        self.assertFalse(hook._pid_gone(outer.pid))
+        self.assertFalse(hook._owner_exited(state, [outer.pid, chat.pid]))
+
+    def _row_one_owner(self, _row):
+        first = self._sleep_proc()
+        second = self._sleep_proc()
+        state = hook.fresh_state()
+        state["owners"] = {"sess": first.pid, "later": second.pid}
+        state["owner_ident"] = {"sess": "100.000000", "later": "200.000000"}
+        self.assertEqual([pid for pid, _token in hook._outer_pairs(state)], [first.pid])
+        self.assertFalse(hook._owner_exited(state, [first.pid, second.pid]))
+        first.kill()
+        first.wait(timeout=5)
+        pairs = hook._outer_pairs(state)
+        self.assertEqual([pid for pid, _token in pairs], [second.pid])
+        self.assertFalse(hook._owner_exited(state, [first.pid, second.pid]))
+
+    def _row_empty_owners(self, _row):
+        proc = self._sleep_proc()
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-empty-owners-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        seen = []
+
+        def wait(_self, pids, _timeout):
+            seen.append(list(pids))
+            if len(seen) == 2:
+
+                def clear(state):
+                    state["owners"] = {}
+
+                hook.update(path, clear)
+            if len(seen) >= 3:
+                raise SystemExit("stop")
+            return False
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": proc.pid}
+            state["owner_ident"] = {"sess": "sec:old"}
+            state["phase"] = "weak"
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook.OwnerExitWatch, "wait", wait),
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "pane_text", lambda _pane: ""),
+            mock.patch.object(hook, "screen_view", lambda _text: hook._unknown_screen()),
+            mock.patch.object(hook, "hires_start", lambda _pid: "sec:old"),
+            self.assertRaises(SystemExit),
+        ):
+            hook._watch_loop("t7", path)
+        self.assertEqual(seen[0], [])
+        self.assertEqual(seen[1], [proc.pid])
+        self.assertEqual(seen[2], [])
+        self.assertTrue(hook.alive(proc.pid))
+
+    def _row_bounded_wait(self, _row):
+        watch = hook.OwnerExitWatch()
+        self.addCleanup(watch.close)
+        slept = []
+
+        def kill(_pid, _sig):
+            raise OSError(errno.ESRCH, "gone")
+
+        def sleep(delay):
+            slept.append(delay)
+
+        calls = hook.POLL_SPIN_CAP + 2
+        with (
+            mock.patch.object(hook.os, "kill", kill),
+            mock.patch.object(hook.time, "sleep", sleep),
+        ):
+            for _ in range(calls):
+                self.assertTrue(watch._wait_kill([4242], 2.0))
+        cap = min(hook.TICK_SECS * hook.POLL_SPIN_CAP, hook.POLL_BACKOFF_CAP)
+        self.assertEqual(len(slept), calls)
+        self.assertEqual(slept[0], hook.TICK_SECS)
+        self.assertEqual(slept[-1], cap)
+        self.assertTrue(all(0 < delay <= hook.POLL_BACKOFF_CAP for delay in slept))
+        self.assertEqual(watch._spins, hook.POLL_SPIN_CAP)
+        self.assertTrue(watch.early)
+
+    def _row_none_keeps_row(self, _row):
+        def gone(_pid, _sig=0):
+            raise OSError(errno.ESRCH, "gone")
+
+        for token, phase in (("100.000000", "weak"), ("sec:10", "idle_clear"), ("", "idle_clear")):
+            state = hook.fresh_state()
+            state["busy"] = {"sess": 1.0}
+            state["owners"] = {"sess": 4242}
+            state["owner_ident"] = {"sess": token} if token else {}
+            state["phase"] = phase
+            state["proven_pid"] = 0
+            state["proven_ident"] = ""
+            before = _owner_fields(state)
+            with (
+                mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+                mock.patch.object(hook.os, "kill", gone),
+                mock.patch.object(hook, "hires_start", lambda _pid, token=token: token),
+                mock.patch.object(hook, "paint_status", return_value=True) as paint,
+                mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+                mock.patch.object(hook, "release_authority") as release,
+            ):
+                write, _ok = hook.commit_pane(state, "process_exit")
+                self.assertEqual(write, "none", token)
+                self.assertEqual(_owner_fields(state), before, token)
+                self.assertEqual(state["phase"], "exited", token)
+                self.assertFalse(hook._chooser_drops_row(state, "Stop"), token)
+                revised = hook.apply_event(state, "Stop", "sess", 2.0)
+            self.assertEqual(revised["owners"].get("sess"), 4242, token)
+            self.assertIn("sess", revised["busy"], token)
+            paint.assert_not_called()
+            held.assert_not_called()
+            release.assert_not_called()
+
+    def _row_done_then_none(self, _row):
+        def gone(_pid, _sig=0):
+            raise OSError(errno.ESRCH, "gone")
+
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": 4242}
+        state["owner_ident"] = {"sess": "100.000000"}
+        state["phase"] = "proven"
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+            mock.patch.object(hook.os, "kill", gone),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+            mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+        ):
+            write, ok = hook.commit_pane(state, "stop")
+            self.assertEqual((write, ok), ("done", True))
+            self.assertEqual(state["phase"], "exited")
+            self.assertEqual(state["owners"].get("sess"), 4242)
+            self.assertFalse(hook._chooser_drops_row(state, "Stop"))
+            self.assertFalse(hook._chooser_drops_row(state, "SessionEnd"))
+            hook._drop_done_owner(state, 4242)
+        self.assertNotIn("sess", state["owners"])
+        self.assertNotIn("sess", state["busy"])
+        self.assertEqual(state["proven_pid"], 4242)
+        paint.assert_called()
+        held.assert_not_called()
+
+    def _row_tty_closed(self, _row):
+        osc = hook.herdr_kiro_osc
+        self.assertEqual(osc._one_stdout(""), "")
+        self.assertEqual(osc._one_stdout("p1\n"), "")
+        self.assertEqual(osc._one_stdout("f1\nn/dev/pts/0\nf1\nn/dev/pts/1\n"), "")
+        self.assertEqual(osc._one_stdout("f1\nn/dev/tty\n"), "")
+
+    def _row_tty_path(self, _row):
+        osc = hook.herdr_kiro_osc
+        self.assertEqual(osc._one_stdout("f1\nn/dev/pts/0\n"), "/dev/pts/0")
+        self.assertEqual(osc._one_stdout("f1\nn/dev/ttys000\n"), "/dev/ttys000")
+        self.assertTrue(osc._TTY.fullmatch("/dev/ttys000"))
+        self.assertIsNone(osc._TTY.fullmatch("/dev/tty"))
+
+    def _row_empty_screen(self, _row):
+        self.assertFalse(hook.prompt_visible(""))
+        self.assertFalse(hook.screen_is_quiet(""))
+        self.assertFalse(hook.screen_is_quiet("\n"))
+
+    def _row_question_panel(self, _row):
+        text = "› ask a question or describe a task\n"
+        view = {"state": "blocked", "id": "question_panel", "ok": True}
+        with mock.patch.object(hook, "screen_view", return_value=view):
+            self.assertTrue(hook.blocker_visible(text))
+            self.assertFalse(hook.screen_is_settled(text))
+            self.assertFalse(hook.screen_is_quiet(text))
+        footer = "esc to close, arrows to navigate, and enter to select\n"
+        self.assertTrue(hook.approval_text(footer))
+        self.assertFalse(hook.screen_is_settled(footer))
+
+    def _row_no_owner_chevron(self, _row):
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        state["generation"] = 1
+        with mock.patch.object(hook, "paint_status", return_value=True) as paint:
+            self.assertFalse(hook.clear_idle_if_current(state, 1, ["sess"]))
+        self.assertIn("sess", state["busy"])
+        self.assertEqual(state["owners"], {})
+        self.assertNotEqual(state["phase"], "idle_clear")
+        paint.assert_not_called()
+
+    def _row_no_owner_stop(self, _row):
+        state = hook.fresh_state()
+        state["busy"] = {"sess": 1.0}
+        self.assertEqual(hook.pane_transition("no_owner", "stop"), "none")
+        revised = hook.apply_event(state, "Stop", "sess", 2.0)
+        self.assertNotIn("sess", revised["busy"])
+        self.assertEqual(revised["owners"], {})
+
+    def _row_watcher_phase(self, _row):
+        source = inspect.getsource(hook._watch_loop)
+        self.assertNotIn('["phase"] =', source)
+        self.assertNotIn("['phase'] =", source)
+
+
 def _read_pty(master):
     chunks = []
     while True:
