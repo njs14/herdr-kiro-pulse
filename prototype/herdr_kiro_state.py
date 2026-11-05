@@ -10,9 +10,9 @@ still drive `herdr pane report-agent`. A finished turn stays an idle report
 on the TUI, which herdr 0.9.5 shows as done until the pane is seen. A TUI
 pane that also has HC_TERMINAL_ID reads that pane and does not write OSC.
 
-Workflow steps are separate Kiro sessions. The parent pane paints its idle prompt
-while they run, so screen detection calls the pane idle. Each step session
-inherits HERDR_PANE_ID and fires the same hooks.
+Workflow steps are separate Kiro sessions. A workflow banner wins over the
+idle prompt, so screen detection does not call the pane idle while that
+banner is up. Each step session inherits HERDR_PANE_ID and fires the same hooks.
 
 Herdr also drops a custom hook's working authority when a foreground turn
 repaints from the "Kiro is working" footer to the idle prompt, about 0.2s
@@ -280,7 +280,11 @@ def normalize(state: dict, now: float) -> dict:
 
 
 def note_generation(previous: dict, nxt: dict) -> dict:
-    """Every hook event is a new generation, including a same-session prompt."""
+    """Advance generation for a pane write other than refresh.
+
+    Refresh changes only the busy timestamp, so it does not call this.
+    A same-session prompt still advances generation when it is not refresh.
+    """
     nxt["generation"] = int(previous.get("generation") or 0) + 1
     return nxt
 
@@ -393,9 +397,11 @@ def _chooser_drops_row(state: dict, event: str) -> bool:
 
     A pane with no owner pid still ends the slot. A recorded owner is
     dropped only when pane_transition returns done. none leaves that row.
-    A gone fine token stored as proven, or a held token that _held_proves,
-    becomes process_exit and the table returns done, so the row is dropped.
-    A weak process_exit is none, so the phase stays weak.
+    A failed done paint returns before the row drop, so the row stays.
+    A live owner is not dropped. A gone fine token stored as proven, or a
+    held token that _held_proves, becomes process_exit and the table returns
+    done, so that dead row can be dropped. A weak process_exit is none, so
+    the phase stays weak.
     """
     if event not in END_EVENTS:
         return False
@@ -458,7 +464,7 @@ def choose_pane_event(state: dict, event: str, session: str) -> str:
         if event in BUSY_EVENTS:
             if count > 0:
                 return "touch_aggregate"
-            return hook_event(state, event)
+            return "aggregate_zero"
         if event in END_EVENTS:
             if count == 0:
                 return "aggregate_zero"
@@ -467,8 +473,6 @@ def choose_pane_event(state: dict, event: str, session: str) -> str:
             return hook_event(state, event)
     if event in BUSY_EVENTS:
         return "record_named"
-    if event in END_EVENTS:
-        return hook_event(state, event)
     return hook_event(state, event)
 
 
@@ -531,10 +535,10 @@ def apply_event(
     none returns the same state. refresh changes only the aggregate timestamp.
     A Stop already at aggregate zero is aggregate_zero, not stop.
     """
-    nxt = normalize(copy.deepcopy(state), now)
-    ev = choose_pane_event(nxt, event, session)
+    owner_before = _pane_owner(state)
+    ev = choose_pane_event(state, event, session)
     write, ok = commit_pane(
-        nxt,
+        state,
         ev,
         now=now,
         owner=owner,
@@ -542,23 +546,19 @@ def apply_event(
         session=session,
         hook_name=event,
     )
-    release = False
-    if write == "done" and ok:
-        owner_now = _pane_owner(state)
-        release = owner_now is not None and not alive(owner_now[0])
+    release = bool(write == "done" and ok and owner_before is not None and not alive(owner_before[0]))
     _PANE_OUTCOME["write"] = write
     _PANE_OUTCOME["ok"] = ok
     _PANE_OUTCOME["event"] = ev
     _PANE_OUTCOME["release"] = release
-    if write == "none":
+    if write == "none" or not ok or write == "refresh":
         return state
-    if not ok:
-        return nxt
-    if write != "refresh" and chat_pid:
-        nxt["chat_pid"] = int(chat_pid)
+    if chat_pid:
+        state["chat_pid"] = int(chat_pid)
         token = hires_start(int(chat_pid))
-        nxt["chat_ident"] = token if fine_start(token) else ""
-    return note_generation(state, nxt)
+        state["chat_ident"] = token if fine_start(token) else ""
+    note_generation(state, state)
+    return copy.deepcopy(state)
 
 
 def note_banner(state: dict, now: float) -> dict:
@@ -619,34 +619,46 @@ def update(path: str, fn):
     with os.fdopen(fd, "r+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         raw = handle.read()
-        try:
-            loaded = json.loads(raw) if raw.strip() else fresh_state()
-        except ValueError:
+        parsed = None
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+        if isinstance(parsed, dict):
+            loaded = parsed
+            keep_bytes = True
+        else:
             loaded = fresh_state()
-        if not isinstance(loaded, dict):
-            loaded = fresh_state()
-        now = time.time()
-        state = normalize(loaded, now)
+            keep_bytes = False
+        before = copy.deepcopy(loaded)
+        fn(loaded)
         floor = read_seq_floor(path)
-        if state["seq"] < floor:
-            state["seq"] = floor
-        elif floor == 0 and state["seq"] == 0:
+        try:
+            seq = int(loaded.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        unchanged = keep_bytes and loaded == before
+        if seq < floor:
+            loaded["seq"] = floor
+            unchanged = False
+        elif floor == 0 and seq == 0 and not unchanged:
             # A deleted floor must not restart at seq 1. herdr ignores that.
-            state["seq"] = int(time.time())
-        fn(state)
-        died = bool(state.get("owners_died")) and not state.get("busy")
-        state = normalize(state, time.time())
-        if died and not state["busy"]:
-            state["owners_died"] = True
-        if state["seq"] < floor:
-            state["seq"] = floor
+            loaded["seq"] = int(time.time())
+        if unchanged:
+            os.chmod(path, FILE_MODE)
+            return loaded
         handle.seek(0)
         handle.truncate()
-        handle.write(json.dumps(state))
+        handle.write(json.dumps(loaded))
         handle.flush()
-        write_seq_floor(path, int(state["seq"]))
+        try:
+            written = int(loaded.get("seq") or 0)
+        except (TypeError, ValueError):
+            written = 0
+        write_seq_floor(path, written)
         os.chmod(path, FILE_MODE)
-        return state
+        return loaded
 
 
 def in_tui() -> bool:
@@ -1454,7 +1466,11 @@ def report_for(screen: str, action: str):
 
 
 def release_if_current(state: dict, generation: int, keys) -> bool:
-    """Clear only the snapshotted slots when no newer hook event has landed."""
+    """Clear only the snapshotted slots when no newer hook event has landed.
+
+    Idle clear and the watcher finish do not call this. A row is dropped
+    from commit_pane when a done result names it and that owner is not alive.
+    """
     if int(state.get("generation") or 0) != int(generation):
         state["retiring"] = False
         return False
@@ -1554,7 +1570,11 @@ _PANE_WRITES = {
 
 
 def pane_transition(state: str, event: str) -> str:
-    """The only choice of working, done, paint_blocked, refresh, or none."""
+    """The table result for one owner state and one event.
+
+    The result is working, done, paint_blocked, refresh, none,
+    record_aggregate, touch_aggregate, touch_partial, or record_named.
+    """
     if state not in OWNER_STATES:
         raise ValueError(state)
     if event not in OWNER_EVENTS:
@@ -1667,7 +1687,7 @@ def _owner_exited(state: dict, remembered: list) -> bool:
     if owner is not None:
         return _pid_gone(owner[0])
     pids = []
-    for item in remembered or []:
+    for item in remembered:
         try:
             number = int(item)
         except (TypeError, ValueError):
@@ -1814,7 +1834,7 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     # write that fd when _held_pid is this owner.
     if not _pid_gone(pid) and not identity_proven(pid, token):
         return False
-    if kind == "idle" and fine_start(token) and _pane_fd >= 0 and _held_ident == token:
+    if kind == "idle" and _pane_fd >= 0 and _held_ident == token:
         # A matching start token is not enough. The fd was opened for
         # _held_pid. Zero, or any other pid, is a different terminal.
         # Do not open another tty.
@@ -1837,14 +1857,23 @@ def commit_pane(
 ) -> tuple[str, bool]:
     """Apply one table result. none assigns nothing and writes no tty.
 
-    refresh updates only the aggregate busy timestamp. A Stop already at
-    aggregate zero is that result, not stop, so it does not paint done or
-    store idle_clear. record_aggregate, touch_aggregate, touch_partial, and
-    record_named are the only results that create a slot. paint_blocked is
-    the only result that calls emit_osc. remember_owner, including an
-    identity drop, runs only for a result that records an owner.
+    refresh updates only the aggregate busy timestamp. A prompt, a tool
+    event, or a Stop already at aggregate zero is aggregate_zero, so it
+    does not paint and does not drop a row. record_aggregate,
+    touch_aggregate, touch_partial, and record_named are the only results
+    that create a slot. paint_blocked is the only result that calls
+    emit_osc. remember_owner, including an identity drop, runs only for a
+    result that records an owner. A live owner is not dropped. A row drops
+    only for a done result when that process is not alive, or when the slot
+    has no owner.
     """
-    if event not in _DIRECT_EVENTS:
+    if (
+        session == AGGREGATE
+        and int(state.get("aggregate") or 0) == 0
+        and event in ("prompt", "start", "stop", "piped_chat")
+    ):
+        event = "aggregate_zero"
+    elif event not in _DIRECT_EVENTS:
         event = _chooser_event(state, event)
     phase = _phase_for_event(state, event)
     write = pane_transition(phase, event)
@@ -1878,9 +1907,11 @@ def commit_pane(
         state["grace_until"] = 0.0
         return write, True
     if write == "done":
-        hook_end = hook_name if hook_name in END_EVENTS else "Stop"
-        drops = bool(session) and _chooser_drops_row(state, hook_end)
-        if _pane_owner(state) is None:
+        drops = bool(session) and hook_name in END_EVENTS and _chooser_drops_row(state, hook_name)
+        owner_now = _pane_owner(state)
+        if owner_now is not None and alive(owner_now[0]):
+            drops = False
+        if owner_now is None:
             if drops:
                 _finish_slot(state, session, now)
             return write, True
@@ -1889,9 +1920,9 @@ def commit_pane(
         if not ok:
             return write, False
         state["phase"] = pane_next(phase, event)
-        owner_now = _pane_owner(state)
-        if owner_now is not None and not alive(owner_now[0]):
-            _drop_done_owner(state, owner_now[0])
+        owner_after = _pane_owner(state)
+        if owner_after is not None and not alive(owner_after[0]):
+            _drop_done_owner(state, owner_after[0])
         if drops:
             _finish_slot(state, session, now)
         return write, True
@@ -2348,18 +2379,18 @@ def commit_if_current(current: dict, event: str, generation: int) -> tuple[str, 
     return commit_pane(current, event)
 
 
-def clear_idle_if_current(current: dict, generation: int, keys: list) -> bool:
+def clear_idle_if_current(current: dict, generation: int, _keys: list) -> bool:
     """Write idle_clear only when this generation is still the current one.
 
     A newer prompt must not be painted done. A failed done leaves the row.
-    none does not release and does not change the row.
+    none does not change the row. A live owner stays: this does not pop
+    busy or owners. commit_pane drops a row only for a done result whose
+    owner process is not alive.
     """
     write, ok = commit_if_current(current, screen_event(current, "timer"), generation)
     if write != "done" or not ok:
         return False
-    if current.get("phase") != "idle_clear":
-        return False
-    return release_if_current(current, generation, keys)
+    return current.get("phase") == "idle_clear"
 
 
 def apply_owner_exit(pane: str, path: str) -> bool:
@@ -2399,11 +2430,11 @@ def apply_owner_exit(pane: str, path: str) -> bool:
 def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
     """Stop the watcher only while this process still owns its slot.
 
-    This does not write working or done. The caller paints before it asks.
+    This does not write working or done, and it does not pop busy or owners.
+    The caller paints before it asks.
     """
     me = os.getpid()
     generation = int(state.get("generation") or 0)
-    keys = list(state.get("busy") or {})
     decision = {"ok": False}
 
     def apply(current: dict) -> None:
@@ -2416,7 +2447,7 @@ def finish_if_unchanged(pane: str, path: str, state: dict, reason: str) -> bool:
         if reason == "idle" and current.get("busy"):
             current["retiring"] = False
             return
-        decision["ok"] = release_if_current(current, generation, keys)
+        decision["ok"] = True
 
     update(path, apply)
     if not decision["ok"]:
@@ -2731,8 +2762,10 @@ def _watch_loop(pane: str, path: str) -> None:
             pane_owner = _pane_owner(state)
             owner_alive = False
             # pane_transition returns working, done, paint_blocked, refresh,
-            # or none. commit_pane stores pane_next only for working and done.
-            # This loop does not assign phase. Holding the tty does not write the phase.
+            # none, record_aggregate, touch_aggregate, touch_partial, or
+            # record_named. commit_pane stores pane_next only for working and
+            # done. This loop does not assign phase. Holding the tty does not
+            # write the phase.
             if pane_owner is not None and not _pid_gone(pane_owner[0]) and alive(pane_owner[0]):
                 owner_alive = True
                 if identity_proven(pane_owner[0], pane_owner[1]):
@@ -2804,12 +2837,6 @@ def _watch_loop(pane: str, path: str) -> None:
                 continue
             if banner:
                 quiet_since = None
-
-                def extend(current: dict) -> None:
-                    revised = note_banner(current, time.time())
-                    current["grace_until"] = revised["grace_until"]
-
-                state = update(path, extend)
             elif prompt_visible(screen) and screen_is_settled(screen):
                 if quiet_since is None:
                     quiet_since = now
@@ -2988,7 +3015,7 @@ def main() -> int:
         chosen["release"] = bool(_PANE_OUTCOME["release"])
         # A busy hook can stamp the slot and then paint. A Stop already at
         # aggregate zero is only refresh, so it is not also committed as stop.
-        if event not in END_EVENTS:
+        if event not in END_EVENTS and slot_ev != "aggregate_zero":
             target = state if revised is state else revised
             pane_ev = hook_event(target, event)
             if pane_ev != slot_ev:

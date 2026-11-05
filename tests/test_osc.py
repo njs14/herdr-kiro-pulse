@@ -692,8 +692,10 @@ try:
 
     def stop(current):
         revised = hook.apply_event(current, "Stop", "sess", time.time(), owner, lstart, 0)
-        current.clear()
-        current.update(revised)
+        if revised is not current:
+            saved = dict(revised)
+            current.clear()
+            current.update(saved)
 
     hook.update(path, stop)
     hook.send_report("t7", path, "working")
@@ -1397,7 +1399,7 @@ class ReapedExitTests(unittest.TestCase):
     def test_stop_paints_done_on_the_proven_pty(self):
         # The outer process holds the pty and a fine owner token. The inner
         # chat has piped stdio and a fine chat token. commit_pane writes
-        # state=done on that outer pty before Stop drops the row.
+        # state=done on that outer pty. The owner is still alive, so the row stays.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-proven-stop-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1485,11 +1487,13 @@ class ReapedExitTests(unittest.TestCase):
                 if current.get("proven_pid"):
                     revised["proven_pid"] = current.get("proven_pid")
                     revised["proven_ident"] = current.get("proven_ident") or ""
-                current.clear()
-                current.update(revised)
+                if revised is not current:
+                    saved = dict(revised)
+                    current.clear()
+                    current.update(saved)
 
             stopped = hook.update(path, stop)
-            self.assertNotIn("sess", stopped["owners"])
+            self.assertEqual(stopped["owners"].get("sess"), outer.pid)
             self.assertEqual(stopped["chat_pid"], chat.pid)
             self.assertEqual(stopped["chat_ident"], chat_start)
         device = os.ttyname(slave)
