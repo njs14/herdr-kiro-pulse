@@ -5183,14 +5183,31 @@ class ScreenReadPurityTests(unittest.TestCase):
             violations.extend(tracer.violations)
             after_watch = self._snapshot(state)
             self._reset_explain()
+            # os.getpid() has no /proc start ticks on macOS, so its token is
+            # sec: and unproven. Refresh needs a live owner with a fine token.
+            # The pin applies only while this process is still running.
+            owner = subprocess.Popen(
+                ["sleep", "30"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+            start = "1700000000.111111"
+            pins = {owner.pid: (start, owner)}
+            real_hires = hook.hires_start
+
+            def hires(asked, real_hires=real_hires, pins=pins):
+                return pinned_start(real_hires, pins, asked)
+
             proven = hook.fresh_state()
             proven["phase"] = "proven"
             proven["aggregate"] = 0
             proven["busy"] = {hook.AGGREGATE: 10.0}
-            proven["owners"] = {hook.AGGREGATE: os.getpid()}
-            proven["owner_ident"] = {hook.AGGREGATE: hook.hires_start(os.getpid())}
-            proven["proven_pid"] = os.getpid()
-            proven["proven_ident"] = proven["owner_ident"][hook.AGGREGATE]
+            proven["owners"] = {hook.AGGREGATE: owner.pid}
+            proven["owner_ident"] = {hook.AGGREGATE: start}
+            proven["proven_pid"] = owner.pid
+            proven["proven_ident"] = start
             proven["generation"] = 3
             proven["seq"] = 4
             with open(pane, "w", encoding="utf-8") as handle:
@@ -5198,10 +5215,11 @@ class ScreenReadPurityTests(unittest.TestCase):
             before_hook = self._snapshot(state)
             with (
                 _WriteTracer() as tracer,
+                mock.patch.object(hook, "hires_start", side_effect=hires),
                 mock.patch.object(sys, "argv", ["herdr-kiro", "UserPromptSubmit"]),
                 mock.patch.object(sys, "stdin", io.StringIO("{}")),
                 mock.patch.object(hook, "pane_text", screen),
-                mock.patch.object(hook, "kiro_lineage", lambda: (os.getpid(), proven["proven_ident"], 0, "")),
+                mock.patch.object(hook, "kiro_lineage", lambda: (owner.pid, start, 0, "")),
             ):
                 self.assertEqual(hook.main(), 0)
             violations.extend(tracer.violations)
