@@ -3551,9 +3551,7 @@ class SettledDecisionTests(unittest.TestCase):
         paint.assert_called()
 
     def _row_emit_only(self, _row):
-        path = inspect.getsourcefile(hook)
-        with open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+        tree = ast.parse(inspect.getsource(hook))
         found = []
 
         class Finder(ast.NodeVisitor):
