@@ -296,27 +296,7 @@ def stop_times_since(start):
     return times
 
 
-def first_hook_event(start):
-    earliest = None
-    try:
-        with open(HOOK_LOG, encoding="utf-8") as handle:
-            for line in handle:
-                if " event=" not in line or "state event=" in line:
-                    continue
-                try:
-                    stamped = float(line.split()[0])
-                except ValueError:
-                    continue
-                if stamped < start:
-                    continue
-                if earliest is None or stamped < earliest:
-                    earliest = stamped
-    except OSError:
-        return None
-    return earliest
-
-
-def assert_run(name, rows, stops, _run_start=None):
+def assert_run(name, rows, stops):
     """Working for the whole banner, then idle within 3.5s of the later end."""
     banner_rows = [row for row in rows if row.get("banner")]
     if not banner_rows:
@@ -443,7 +423,7 @@ def run_case(name, text, seconds):
     while watcher_commands() and time.time() < deadline:
         time.sleep(0.1)
     ps_path, leftover = save_ps(name)
-    summary = assert_run(name, rows, stops, first_hook_event(start))
+    summary = assert_run(name, rows, stops)
     if leftover:
         raise AssertionError(f"{name}: watcher still running\n" + "\n".join(leftover))
     summary["log"] = path

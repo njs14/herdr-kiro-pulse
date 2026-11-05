@@ -125,22 +125,20 @@ class GraceTests(unittest.TestCase):
             "idle",
         )
 
-    def test_banner_holds_through_a_quiet_watch(self):
+    def test_banner_does_not_start_the_settle_grace(self):
         state = hook.fresh_state()
         state = hook.apply_event(state, "Stop", "parent", 5)
+        self.assertEqual(state["grace_until"], 5 + hook.SETTLE_SECS)
         state = hook.note_banner(state, True, 20)
+        self.assertEqual(state["grace_until"], 5 + hook.SETTLE_SECS)
         self.assertEqual(
             hook.next_action(len(state["busy"]), state["grace_until"], True, 20),
             "working",
         )
-        self.assertGreater(state["grace_until"], 20)
         quiet = hook.note_banner(state, False, 21)
+        self.assertEqual(quiet["grace_until"], 5 + hook.SETTLE_SECS)
         self.assertEqual(
-            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, quiet["grace_until"] - 0.05),
-            "working",
-        )
-        self.assertEqual(
-            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, quiet["grace_until"] + 0.05),
+            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, 21),
             "idle",
         )
 
@@ -176,9 +174,9 @@ class GraceTests(unittest.TestCase):
         self.assertFalse(hook.approval_text(text))
 
     def test_parallel_steps_with_session_ids_stripped(self):
-        key = hook.session_of({"cwd": "/work", "hook_event_name": "SessionStart"}, ppid=77)
+        key = hook.session_of({"cwd": "/work", "hook_event_name": "SessionStart"})
         self.assertEqual(key, hook.AGGREGATE)
-        self.assertEqual(key, hook.session_of({"cwd": "/work"}, ppid=78))
+        self.assertEqual(key, hook.session_of({"cwd": "/work"}))
         state = hook.fresh_state()
         for moment in range(10):
             state = hook.apply_event(state, "SessionStart", key, moment)
@@ -231,11 +229,11 @@ class GraceTests(unittest.TestCase):
         )
 
     def test_transcript_path_distinguishes_stripped_payloads(self):
-        first = hook.session_of({"transcript_path": "/tmp/one.jsonl", "cwd": "/work"}, ppid=5)
-        second = hook.session_of({"transcript_path": "/tmp/two.jsonl", "cwd": "/work"}, ppid=5)
+        first = hook.session_of({"transcript_path": "/tmp/one.jsonl", "cwd": "/work"})
+        second = hook.session_of({"transcript_path": "/tmp/two.jsonl", "cwd": "/work"})
         self.assertNotEqual(first, second)
         self.assertNotEqual(first, "unknown")
-        self.assertEqual(hook.session_of({"session_id": "sess_a", "cwd": "/work"}, ppid=5), "sess_a")
+        self.assertEqual(hook.session_of({"session_id": "sess_a", "cwd": "/work"}), "sess_a")
 
     def test_repeat_gap_is_inside_the_grace(self):
         state = hook.fresh_state()
@@ -374,7 +372,7 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first, hook.AGGREGATE)
 
-    def test_dead_kiro_drops_a_busy_session(self):
+    def test_dead_kiro_stays_until_the_exit_write(self):
         state = hook.apply_event(
             hook.fresh_state(),
             "UserPromptSubmit",
@@ -389,7 +387,8 @@ class GraceTests(unittest.TestCase):
 
         with mock.patch.object(hook, "process_snapshot", gone):
             later = hook.normalize(state, 10)
-        self.assertEqual(later["busy"], {})
+        self.assertEqual(later["owners"].get("sess"), 424242)
+        self.assertIn("sess", later["busy"])
 
     def test_a_live_unproven_pid_is_alive_and_not_painted(self):
         def snap(_pid):
@@ -399,10 +398,10 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
-            self.assertTrue(hook.alive(50, started="sec:THEN"))
-            self.assertTrue(hook.alive(50, started="sec:NOW"))
-            self.assertTrue(hook.alive(50, started="NOW"))
-            self.assertTrue(hook.alive(50, started=""))
+            self.assertTrue(hook.alive(50))
+            self.assertTrue(hook.alive(50))
+            self.assertTrue(hook.alive(50))
+            self.assertTrue(hook.alive(50))
             self.assertFalse(hook.identity_proven(50, "sec:NOW"))
             self.assertFalse(hook.identity_proven(50, "NOW"))
             self.assertFalse(hook.fine_start("NOW"))
@@ -411,8 +410,8 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", snap),
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
         ):
-            self.assertTrue(hook.alive(50, started="100.000000"))
-            self.assertTrue(hook.alive(50, started="200.000000"))
+            self.assertTrue(hook.alive(50))
+            self.assertTrue(hook.alive(50))
             self.assertTrue(hook.identity_proven(50, "100.000000"))
             self.assertFalse(hook.identity_proven(50, "200.000000"))
 
@@ -477,7 +476,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": holder.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 3
 
@@ -522,7 +520,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 1
 
@@ -559,7 +556,8 @@ class GraceTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             saved = json.load(handle)
         self.assertEqual(saved["watcher"], 0)
-        self.assertEqual(saved["busy"], {})
+        self.assertIn("sess", saved["busy"])
+        self.assertEqual(saved.get("phase"), "exited")
 
     def test_session_end_then_process_exit_stops_the_watcher(self):
         directory = tempfile.mkdtemp()
@@ -574,7 +572,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 2
 
@@ -590,7 +587,6 @@ class GraceTests(unittest.TestCase):
                 def clear(state):
                     state["busy"] = {}
                     state["owners"] = {}
-                    state["owner_started"] = {}
                     state["grace_until"] = 0.0
 
                 hook.update(path, clear)
@@ -703,18 +699,18 @@ class GraceTests(unittest.TestCase):
             hook.ensure_watcher("w1:p1", path)
         self.assertTrue(spawned.get("yes"))
 
-    def test_owner_death_is_visible_after_normalize(self):
+    def test_dead_owner_stays_until_the_exit_write(self):
         state = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "sess", 1.0, owner=424242, owner_started="old")
+        state["phase"] = "proven"
+        state["owner_ident"] = {"sess": "100.000000"}
 
         def gone(_pid):
             return None
 
         with mock.patch.object(hook, "process_snapshot", gone):
             later = hook.normalize(state, 10)
-        self.assertEqual(later["busy"], {})
-        self.assertTrue(later["owners_died"])
-        self.assertTrue(hook.should_stop_for_dead_owner(later, False))
-        self.assertFalse(hook.should_stop_for_dead_owner(later, True))
+        self.assertEqual(later["owners"].get("sess"), 424242)
+        self.assertIn("sess", later["busy"])
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
 
@@ -725,9 +721,21 @@ class GraceTests(unittest.TestCase):
         with mock.patch.object(hook, "process_snapshot", gone):
             first = hook.update(path, seed)
             second = hook.update(path, lambda _current: None)
-        self.assertTrue(first["owners_died"])
-        self.assertTrue(second["owners_died"])
-        self.assertEqual(second["busy"], {})
+        self.assertEqual(second["owners"].get("sess"), 424242)
+        self.assertIn("sess", second["busy"])
+        self.assertEqual(first["phase"], "proven")
+
+        def refuse(*_args, **_kwargs):
+            return False
+
+        with (
+            mock.patch.object(hook, "process_snapshot", gone),
+            mock.patch.object(hook, "paint_status", refuse),
+            mock.patch.object(hook, "_write_held_fd", refuse),
+        ):
+            write, ok = hook.commit_pane(second, "process_exit")
+        self.assertEqual((write, ok, second["phase"]), ("done", False, "proven"))
+        self.assertEqual(second["owners"].get("sess"), 424242)
 
     def test_failed_explain_is_not_cached_as_idle(self):
         hook._SCREEN_CACHE.clear()
@@ -877,15 +885,15 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
         ):
-            self.assertFalse(hook.owner_is_dead(50, "100.000000"))
-            self.assertFalse(hook.owner_is_dead(50, "200.000000"))
+            self.assertFalse(hook.owner_is_dead(50))
+            self.assertFalse(hook.owner_is_dead(50))
         with (
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
-            self.assertFalse(hook.owner_is_dead(50, "sec:then"))
-            self.assertFalse(hook.owner_is_dead(50, "then"))
-            self.assertFalse(hook.owner_is_dead(50, ""))
+            self.assertFalse(hook.owner_is_dead(50))
+            self.assertFalse(hook.owner_is_dead(50))
+            self.assertFalse(hook.owner_is_dead(50))
 
     def test_exit_prompt_text_does_not_release_a_live_owner(self):
         directory = tempfile.mkdtemp()
@@ -900,7 +908,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 1
 
@@ -995,7 +1002,6 @@ class GraceTests(unittest.TestCase):
         state = hook.fresh_state()
         state["busy"] = {"sess": 1.0}
         state["owners"] = {"sess": 50}
-        state["owner_started"] = {"sess": "10"}
         state["owner_ident"] = {"sess": "sec:10"}
         state["generation"] = 1
         snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
@@ -1004,15 +1010,14 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
         ):
             state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
-            self.assertTrue(hook.alive(50, "sec:10"))
-            self.assertIsNone(hook.tracked_exit(state, 0)[0])
+            self.assertTrue(hook.alive(50))
+            self.assertEqual(hook.owner_phase(state), "weak")
         self.assertIn("sess", state["busy"])
         self.assertNotIn("sess", state["owner_ident"])
 
     def test_a_gone_chat_child_is_not_an_owner_exit(self):
         state = hook.fresh_state()
         state["owners"] = {"sess": 50}
-        state["owner_started"] = {"sess": "outer"}
         state["owner_ident"] = {"sess": "100.000000"}
         state["chat_pid"] = 60
         state["chat_ident"] = "200.000000"
@@ -1030,14 +1035,10 @@ class GraceTests(unittest.TestCase):
         with (
             mock.patch.object(hook, "process_snapshot", snap),
             mock.patch.object(hook, "hires_start", hires),
-            mock.patch.object(hook, "chat_under", lambda _pid: None),
         ):
-            kind, hits = hook.tracked_exit(state, 0)
-            self.assertIsNone(kind)
-            kind, hits = hook.tracked_exit(state, hits)
-            self.assertIsNone(kind)
-            kind, _hits = hook.tracked_exit(state, hits)
-            self.assertIsNone(kind)
+            self.assertEqual(hook.owner_phase(state), "proven")
+            self.assertTrue(hook.alive(50))
+            self.assertFalse(hook.alive(60))
 
     def test_explain_failure_under_a_banner_stays_working(self):
         directory = tempfile.mkdtemp()
@@ -1052,7 +1053,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 1
 
@@ -1091,7 +1091,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 4
 
@@ -1159,7 +1158,6 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
-            state["owner_started"] = {"sess": ""}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
             state["generation"] = 4
 
@@ -1487,12 +1485,11 @@ class GraceTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
-        def seed(state, reported):
-            state["reported"] = reported
+        def seed(state):
             state["seq"] = 4
 
-        def states_for(reported, kind):
-            hook.update(path, lambda state: seed(state, reported))
+        def states_for(_reported, kind):
+            hook.update(path, seed)
             calls = []
 
             def fake_herdr(*args):
@@ -1521,8 +1518,7 @@ class GraceTests(unittest.TestCase):
             self.addCleanup(shutil.rmtree, directory, True)
             path = os.path.join(directory, "pane.json")
 
-            def seed(state, prior=prior):
-                state["reported"] = prior
+            def seed(state):
                 state["seq"] = 4
                 state["watcher"] = os.getpid()
                 state["generation"] = 1
@@ -1629,7 +1625,6 @@ class GraceTests(unittest.TestCase):
                     {
                         "busy": {},
                         "grace_until": 0,
-                        "reported": "working",
                         "proven_pid": owner.pid,
                         "proven_ident": "100.000000",
                     }
@@ -1652,7 +1647,7 @@ class GraceTests(unittest.TestCase):
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
-        prompt = "ask a question or describe a task\n"
+        prompt = "› ask a question or describe a task\n"
         both = {
             "HC_TERMINAL_ID": "t7",
             "HERDR_ENV": "1",
@@ -1717,7 +1712,6 @@ class GraceTests(unittest.TestCase):
                     {
                         "busy": {},
                         "grace_until": 0,
-                        "reported": "working",
                         "proven_pid": owner.pid,
                         "proven_ident": "100.000000",
                     }
@@ -1734,7 +1728,7 @@ class GraceTests(unittest.TestCase):
         app_dir = tempfile.mkdtemp(prefix="herdr-kiro-app-quiet-")
         self.addCleanup(shutil.rmtree, app_dir, True)
         app_path = os.path.join(app_dir, "t7.json")
-        hook.update(app_path, lambda state: state.update({"busy": {}, "grace_until": 0, "reported": "working"}))
+        hook.update(app_path, lambda state: state.update({"busy": {}, "grace_until": 0}))
         app = dict(both)
         app["HERDR_ENV"] = ""
         app["HERDR_PANE_ID"] = ""
@@ -1823,7 +1817,9 @@ class _ScreenCompletion:
 class PaneFindingTests(unittest.TestCase):
     def test_the_price_line_is_not_the_idle_prompt(self):
         self.assertFalse(hook.prompt_visible("the price is $\n"))
-        self.assertTrue(hook.prompt_visible("ask a question or describe a task\n"))
+        self.assertFalse(hook.prompt_visible("ask a question or describe a task\n"))
+        self.assertFalse(hook.prompt_visible("Please ask a question or describe a task now\n"))
+        self.assertTrue(hook.prompt_visible("› ask a question or describe a task\n"))
 
     def test_a_fractional_proc_token_is_proven(self):
         forms = (
@@ -1915,8 +1911,8 @@ class PaneFindingTests(unittest.TestCase):
             self.assertTrue(hook.identity_proven(50, "100.000000"))
             self.assertFalse(hook.identity_proven(50, "sec:10"))
             self.assertFalse(hook.identity_proven(50, "10"))
-            self.assertFalse(hook.owner_is_dead(50, "200.000000"))
-            self.assertIsNone(hook.tracked_exit(state, 3)[0])
+            self.assertFalse(hook.owner_is_dead(50))
+            self.assertEqual(hook.owner_phase(state), "proven")
             write, ok = hook.commit_pane(state, "start")
             self.assertEqual((write, ok, painted, state["phase"]), ("working", True, [50], "proven"))
             painted.clear()
@@ -1988,11 +1984,130 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.object(hook, "paint_status", return_value=True) as paint,
         ):
-            self.assertFalse(hook.owner_is_dead(50, "200.000000"))
+            self.assertFalse(hook.owner_is_dead(50))
             self.assertEqual(hook.owner_phase(state), "weak")
             write, _ok = hook.commit_pane(state, hook.screen_event(state, "reuse"))
         self.assertEqual((write, state["phase"], state["owners"].get("sess")), ("none", "weak", 50))
         paint.assert_not_called()
+
+    def test_a_stored_fine_token_is_not_replaced(self):
+        state = self._live_owner()
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "200.000000"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
+            self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
+            self.assertEqual(hook.owner_phase(state), "weak")
+            write, _ok = hook.commit_pane(state, "prompt")
+        self.assertEqual(write, "none")
+        paint.assert_not_called()
+
+    def test_a_second_pid_is_not_painted(self):
+        state = self._live_owner()
+        state["owners"]["other"] = 70
+        state["owner_ident"]["other"] = "300.000000"
+        state["busy"]["other"] = 2.0
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+
+        def hires(pid):
+            return {50: "100.000000", 70: "300.000000"}.get(int(pid), "")
+
+        painted = []
+
+        def paint(kind, pid, token, held_fd=-1, rule_id=""):
+            del kind, token, held_fd, rule_id
+            painted.append(pid)
+            return True
+
+        with (
+            mock.patch.dict(os.environ, {"HERDR_ENV": "", "HERDR_PANE_ID": "", "HC_TERMINAL_ID": "t7"}, clear=False),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", hires),
+            mock.patch.object(hook, "paint_status", paint),
+        ):
+            write, _ok = hook.commit_pane(state, "prompt")
+        self.assertEqual((write, painted), ("working", [50]))
+
+    def test_weak_exit_does_not_release(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-weak-exit-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+
+        def seed(current):
+            current["busy"] = {"sess": 1.0}
+            current["owners"] = {"sess": 4242}
+            current["owner_ident"] = {"sess": "100.000000"}
+            current["phase"] = "weak"
+            current["generation"] = 2
+
+        hook.update(path, seed)
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+            mock.patch.object(hook, "release_authority") as release,
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+        ):
+            stopped = hook.apply_owner_exit("t7", path)
+        self.assertTrue(stopped)
+        paint.assert_not_called()
+        release.assert_not_called()
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["phase"], "exited")
+        self.assertEqual(saved["owners"].get("sess"), 4242)
+
+    def test_stale_idle_clear_does_not_paint(self):
+        state = self._live_owner()
+        state["generation"] = 5
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            cleared = hook.clear_idle_if_current(state, 4, ["sess"])
+        self.assertFalse(cleared)
+        self.assertEqual(state["phase"], "")
+        self.assertIn("sess", state["owners"])
+        paint.assert_not_called()
+
+    def test_ps_error_and_eperm_are_not_death(self):
+        def denied(_pid, _sig):
+            raise OSError(errno.EPERM, "eperm")
+
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: {"error": True}),
+            mock.patch.object(hook.os, "kill", denied),
+        ):
+            self.assertTrue(hook.alive(50))
+            self.assertFalse(hook.owner_is_dead(50))
+
+    def test_send_report_does_not_paint_working_or_done(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-report-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+
+        def seed(current):
+            current["owners"] = {"sess": 50}
+            current["owner_ident"] = {"sess": "100.000000"}
+
+        hook.update(path, seed)
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", return_value="/dev/pts/1") as walked,
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as direct,
+        ):
+            self.assertTrue(hook.send_report("t7", path, "working"))
+            self.assertTrue(hook.send_report("t7", path, "idle"))
+        paint.assert_not_called()
+        walked.assert_not_called()
+        direct.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -92,10 +92,6 @@ def _kill_pidfiles(result, suffixes=(".watch", ".hook", ".owner")):
                 os.kill(pid, signal.SIGKILL)
 
 
-def _remembered_tty(value):
-    vars(hook)["_pane_tty"] = value
-
-
 class OscMapTests(unittest.TestCase):
     def test_spec_states_are_the_only_words(self):
         self.assertEqual(osc.fields_for("working"), {"state": "working", "app": "kiro-cli"})
@@ -321,6 +317,9 @@ class OscHookTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.dict(os.environ, env, clear=False),
         ):
+            with open(path, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            self.assertEqual(hook.commit_pane(loaded, "stop")[0], "done")
             self.assertTrue(hook.send_report("t7", path, "idle"))
         self.assertEqual([args[args.index("--state") + 1] for args in calls], ["idle"])
         self.assertNotIn("release-agent", [args[0] for args in calls])
@@ -332,7 +331,7 @@ class OscHookTests(unittest.TestCase):
         directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-")
         path = os.path.join(directory, "pane.json")
         self.addCleanup(shutil.rmtree, directory, True)
-        hook.update(path, lambda state: state.update({"reported": "working", "seq": 4}))
+        hook.update(path, lambda state: state.update({"seq": 4}))
         calls = []
 
         def fake_herdr(*args):
@@ -359,7 +358,7 @@ class OscHookTests(unittest.TestCase):
         directory = tempfile.mkdtemp(prefix="herdr-kiro-both-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
-        hook.update(path, lambda state: state.update({"reported": "working", "seq": 4, "generation": 1}))
+        hook.update(path, lambda state: state.update({"seq": 4, "generation": 1}))
         tui_text = "ask a question or describe a task\n"
         outer_text = "outer terminal\n"
         both = {
@@ -471,8 +470,9 @@ class OscHookTests(unittest.TestCase):
             mock.patch.object(hook.subprocess, "check_output", refuse_pane),
             mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
         ):
-            # No recorded owner. state=done has no proven pid, so it is not painted.
-            self.assertFalse(hook.send_report("t7", path, "idle"))
+            # No recorded owner. working and done are not painted here.
+            # The herdr report still succeeds.
+            self.assertTrue(hook.send_report("t7", path, "idle"))
             self.assertTrue(hook.finish_if_unchanged("t7", path, {"generation": 1, "busy": {}}, "idle"))
         self.assertEqual(osc_writes, [])
         self.assertEqual([row[row.index("--state") + 1] for row in calls if row[0] == "report-agent"], ["idle"])
@@ -512,6 +512,10 @@ class OscHookTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.dict(os.environ, env, clear=False),
         ):
+            with open(path, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            self.assertEqual(hook.commit_pane(loaded, "idle_clear")[0], "done")
+            self.assertEqual(hook.commit_pane(loaded, "idle_clear")[0], "done")
             self.assertTrue(hook.send_report("t7", path, "idle"))
             self.assertTrue(hook.send_report("t7", path, "idle"))
         got = _read_ready(master, 1.0)
@@ -528,10 +532,9 @@ class AppExitOscTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {} if busy is None else busy
             state["owners"] = {} if owners is None else owners
-            state["owner_started"] = dict.fromkeys(state["owners"], "alive")
             state["owner_ident"] = dict.fromkeys(state["owners"], "100.000000")
+            state["phase"] = "proven"
             state["chat_pid"] = 0
-            state["reported"] = "working"
             state["seq"] = 4
 
         snap = {"ppid": 1, "lstart": "alive", "comm": "kiro-cli"}
@@ -672,8 +675,8 @@ raise SystemExit(0 if ok else 1)
 
 
 # One unproven pid, the process that owns the pty. Its child runs every
-# status write: start, the ancestor walk, Stop then a write, the watch
-# loop, and the exit write. The pty under test is that owner's stdout.
+# status write: start, Stop, the watch loop, and the exit. The pty under
+# test is that owner's stdout, and it stays empty.
 _UNPROVEN_DRIVER = """\
 import contextlib
 import errno
@@ -744,7 +747,6 @@ try:
     state["generation"] = 3
     state["busy"] = {"sess": time.time()}
     state["owners"] = {"sess": owner}
-    state["owner_started"] = {"sess": lstart}
     state["owner_ident"] = {"sess": ident}
     state["chat_pid"] = 0
     state["chat_ident"] = ""
@@ -805,7 +807,6 @@ try:
             )
             stack.enter_context(mock.patch.object(hook, "agent_lookup", lambda _pane: "working"))
             stack.enter_context(mock.patch.object(hook, "herdr", lambda *_args: True))
-            stack.enter_context(mock.patch.object(hook, "kiro_in_pane", lambda _ids: False))
             stack.enter_context(mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait))
             stack.enter_context(mock.patch.object(hook.os, "kill", fake_kill))
             hook._watch_loop("t7", path)
@@ -828,11 +829,9 @@ except Exception:
 class ReapedExitTests(unittest.TestCase):
     def setUp(self):
         self._release_held_fd()
-        _remembered_tty("")
 
     def tearDown(self):
         self._release_held_fd()
-        _remembered_tty("")
 
     def _release_held_fd(self):
         fd = getattr(hook, "_pane_fd", -1)
@@ -847,10 +846,9 @@ class ReapedExitTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": 4242}
-            state["owner_started"] = {"sess": "alive"}
             state["owner_ident"] = {"sess": hook.hires_start(4242)}
+            state["phase"] = "proven"
             state["chat_pid"] = 0
-            state["reported"] = "working"
             state["seq"] = 4
 
         snap = {"ppid": 1, "lstart": "alive", "comm": "kiro-cli"}
@@ -921,7 +919,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
             mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
-            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
             mock.patch.object(hook, "pane_text", lambda _pane: ""),
             mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
@@ -934,7 +931,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook.subprocess, "Popen", refuse),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            _remembered_tty("/dev/pts/7")
             hook._watch_loop("t7", path)
         return waits["n"], during.get("state") or {}, calls
 
@@ -1007,7 +1003,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", lambda *_args: True),
             mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
-            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
             mock.patch.object(hook, "pane_text", lambda _pane: ""),
             mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
@@ -1021,7 +1016,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook.subprocess, "Popen", refuse),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            _remembered_tty(slave_name)
             phase["watch"] = True
             hook._watch_loop("t7", path)
         return _read_ready(master, 1.0), device_opens, proc_opens, done
@@ -1124,8 +1118,6 @@ class ReapedExitTests(unittest.TestCase):
         state["generation"] = 3
         state["busy"] = {"sess": time.time()}
         state["owners"] = {"sess": proc.pid}
-        state["owner_started"] = {"sess": "not-the-real-lstart"}
-        state["reported"] = "working"
         state["seq"] = 4
         self._write_state(path, state)
         hook.begin_tick()
@@ -1171,7 +1163,6 @@ class ReapedExitTests(unittest.TestCase):
         state["generation"] = 3
         state["busy"] = {"sess": stamp}
         state["owners"] = {"sess": 4242}
-        state["owner_started"] = {"sess": "alive"}
         state["seq"] = 4
         self._write_state(path, state)
         env = {
@@ -1240,9 +1231,8 @@ class ReapedExitTests(unittest.TestCase):
         self.assertLess(hook._pane_fd, 0)
 
     def test_same_second_reuse_does_not_receive_the_exit_write(self):
-        # owner_started is whole-second lstart. owner_ident is sec: plus a
-        # string that is not this process. That token is not proof, so the
-        # exit write does not reach this tty.
+        # owner_ident is sec: plus a string that is not this process.
+        # That token is not proof, so the exit write does not reach this tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-same-second-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1268,10 +1258,8 @@ class ReapedExitTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": stamp}
             state["owners"] = {"sess": proc.pid}
-            state["owner_started"] = {"sess": lstart}
             state["owner_ident"] = {"sess": "sec:not-this-process"}
             state["chat_pid"] = 0
-            state["reported"] = "working"
             state["seq"] = 4
 
         hook.update(path, seed)
@@ -1306,7 +1294,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", lambda *_args: True),
             mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
-            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
             mock.patch.object(hook, "pane_text", lambda _pane: ""),
             mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
@@ -1360,9 +1347,8 @@ class ReapedExitTests(unittest.TestCase):
             hook._watch_loop("t7", path)
 
     def test_same_second_lstart_does_not_receive_status(self):
-        # owner_started matches this pid's whole-second lstart and owner_ident
-        # is empty. That is not a proven owner. send_report is the real
-        # function. Neither state=done nor state=working may land on this tty.
+        # owner_ident is empty. That is not a proven owner. Neither
+        # state=done nor state=working may land on this tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-lstart-status-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1385,10 +1371,8 @@ class ReapedExitTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": stamp}
             state["owners"] = {"sess": proc.pid}
-            state["owner_started"] = {"sess": lstart}
             state["owner_ident"] = {}
             state["chat_pid"] = 0
-            state["reported"] = None
             state["seq"] = 4
 
         self._run_status_loop(path, seed)
@@ -1422,7 +1406,6 @@ class ReapedExitTests(unittest.TestCase):
             state["busy"] = {"sess": stamp}
             state["owners"] = {}
             state["chat_pid"] = proc.pid
-            state["reported"] = None
             state["seq"] = 4
 
         self._run_status_loop(path, seed)
@@ -1434,8 +1417,7 @@ class ReapedExitTests(unittest.TestCase):
 
     def test_unproven_process_is_not_painted(self):
         # Same pid, same start second, token is sec: plus that lstart.
-        # Start, the ancestor walk, Stop and the following write, the watch
-        # loop, and the exit write all have to leave that pty empty.
+        # Start, Stop, the watch loop, and the exit all have to leave that pty empty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-unproven-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1491,8 +1473,8 @@ class ReapedExitTests(unittest.TestCase):
 
     def test_stop_paints_done_on_the_proven_pty(self):
         # The outer process holds the pty and a fine owner token. The inner
-        # chat has piped stdio and a fine chat token. Stop drops the owner
-        # row. The idle report still writes state=done on that pty.
+        # chat has piped stdio and a fine chat token. commit_pane writes
+        # state=done on that outer pty before Stop drops the row.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-proven-stop-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1536,7 +1518,6 @@ class ReapedExitTests(unittest.TestCase):
         def seed(state):
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": outer.pid}
-            state["owner_started"] = {"sess": _live_start(outer.pid)}
             state["owner_ident"] = {"sess": outer_start}
             state["chat_pid"] = chat.pid
             state["chat_ident"] = chat_start
@@ -1559,11 +1540,15 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", hires),
             mock.patch.dict(os.environ, env, clear=False),
         ):
-            hook.update(path, seed)
-            self.assertTrue(hook.send_report("t7", path, "working"))
+            hook.begin_tick()
+            started = hook.update(path, seed)
+            self.assertEqual(hook.commit_pane(started, "start")[0], "working")
             self.assertIn(working, _read_ready(master, 0.5))
 
             def stop(current):
+                event = hook.hook_event(current, "Stop")
+                write, ok = hook.commit_pane(current, event)
+                self.assertEqual((write, ok), ("done", True))
                 revised = hook.apply_event(
                     current,
                     "Stop",
@@ -1573,6 +1558,10 @@ class ReapedExitTests(unittest.TestCase):
                     _live_start(outer.pid),
                     0,
                 )
+                revised["phase"] = current.get("phase") or revised.get("phase") or ""
+                if current.get("proven_pid"):
+                    revised["proven_pid"] = current.get("proven_pid")
+                    revised["proven_ident"] = current.get("proven_ident") or ""
                 current.clear()
                 current.update(revised)
 
@@ -1580,7 +1569,6 @@ class ReapedExitTests(unittest.TestCase):
             self.assertNotIn("sess", stopped["owners"])
             self.assertEqual(stopped["chat_pid"], chat.pid)
             self.assertEqual(stopped["chat_ident"], chat_start)
-            hook.send_report("t7", path, "idle")
         device = os.ttyname(slave)
         got = _read_ready(master, 0.5)
         self.assertIn(done, got, device)
@@ -1610,7 +1598,7 @@ class ReapedExitTests(unittest.TestCase):
         state["busy"] = {"sess": time.time()}
         state["owners"] = {"sess": 4242}
         state["owner_ident"] = {"sess": "100.000000"}
-        state["reported"] = "working"
+        state["phase"] = "proven"
         state["seq"] = 4
         self._write_state(path, state)
         proto = os.path.dirname(os.path.abspath(hook.__file__))
@@ -1640,7 +1628,7 @@ class ReapedExitTests(unittest.TestCase):
         self.assertIn(done, held_got, detail)
 
     def test_empty_owner_started_does_not_hold_the_live_pid(self):
-        # An empty start token must not attach the hold to whatever process
+        # An empty owner_ident must not attach the hold to whatever process
         # now has that pid, and the exit must not write that process's tty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-empty-start-")
         self.addCleanup(shutil.rmtree, directory, True)
@@ -1663,9 +1651,7 @@ class ReapedExitTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": stamp}
             state["owners"] = {"sess": proc.pid}
-            state["owner_started"] = {"sess": ""}
             state["chat_pid"] = 0
-            state["reported"] = "working"
             state["seq"] = 4
 
         # A warm ps cache would drop this live pid before the hold runs.
@@ -1702,7 +1688,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", lambda *_args: True),
             mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
-            mock.patch.object(hook, "kiro_in_pane", lambda _ids: True),
             mock.patch.object(hook, "pane_text", lambda _pane: ""),
             mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
@@ -1716,9 +1701,8 @@ class ReapedExitTests(unittest.TestCase):
         self.assertEqual(got, b"")
 
     def test_empty_owner_started_does_not_receive_a_status_write(self):
-        # send_report stays real. An empty start token is not that live pid,
-        # so the watch loop must not write state=working, or any other status,
-        # onto its pty.
+        # An empty owner_ident is not that live pid, so the watch loop must
+        # not write state=working, or any other status, onto its pty.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-empty-report-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1739,9 +1723,7 @@ class ReapedExitTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": proc.pid}
-            state["owner_started"] = {"sess": ""}
             state["chat_pid"] = 0
-            state["reported"] = None
             state["seq"] = 4
 
         # A warm ps cache treats this new sleep as dead and the write never runs.
@@ -1893,11 +1875,10 @@ class AncestorReportTests(unittest.TestCase):
                 break
             time.sleep(0.02)
         self.assertGreater(owner_pid, 1)
-        token = _live_start(owner_pid) if kind == "match" else ""
         ident = hook.hires_start(owner_pid) if kind == "match" else ""
         fine = kind == "match" and hook.fine_start(ident)
-        # update() normalizes with this process's ps cache. A stale cache
-        # treats the new owner as dead and drops it before the watcher starts.
+        # A stale process table treats the new owner as already gone.
+        # Refresh it before the watcher starts.
         hook.begin_tick()
 
         def seed(state):
@@ -1905,10 +1886,8 @@ class AncestorReportTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": time.time()}
             state["owners"] = {} if kind == "chat" else {"sess": owner_pid}
-            state["owner_started"] = {} if kind != "match" else {"sess": token}
             state["owner_ident"] = {} if not fine else {"sess": ident}
             state["chat_pid"] = owner_pid if kind == "chat" else 0
-            state["reported"] = None
             state["seq"] = 4
 
         hook.update(path, seed)
@@ -1980,9 +1959,8 @@ class AncestorReportTests(unittest.TestCase):
         self.assertNotIn(device, logged)
 
     def test_matching_ancestor_token_receives_working(self):
-        # emit_osc sends state=working and state=done through _paint_proven
-        # and paint_status, which call write_pid. write_to_pane is the
-        # blocked path. sec: plus lstart is not that token, so the pty stays empty.
+        # commit_pane paints state=working through paint_status, which calls
+        # write_pid. sec: plus lstart is not that token, so the pty stays empty.
         got, logged, device, ident = self._status("match")
         if hook.fine_start(ident):
             self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got, logged)
@@ -2130,7 +2108,6 @@ class AboveSkippedPidTests(unittest.TestCase):
                 break
             time.sleep(0.02)
         self.assertGreater(mid_pid, 1)
-        token = _live_start(mid_pid) if kind == "match" else ""
         ident = hook.hires_start(mid_pid) if kind == "match" else ""
         fine = kind == "match" and hook.fine_start(ident)
         hook.begin_tick()
@@ -2140,10 +2117,8 @@ class AboveSkippedPidTests(unittest.TestCase):
             state["generation"] = 3
             state["busy"] = {"sess": time.time()}
             state["owners"] = {} if kind == "chat" else {"sess": mid_pid}
-            state["owner_started"] = {} if kind != "match" else {"sess": token}
             state["owner_ident"] = {} if not fine else {"sess": ident}
             state["chat_pid"] = mid_pid if kind == "chat" else 0
-            state["reported"] = None
             state["seq"] = 4
 
         hook.update(path, seed)
