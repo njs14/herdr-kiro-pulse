@@ -3,7 +3,9 @@
 herdr-core 0.1.17 keeps a terminal's status only from OSC 7501 bytes on that
 terminal's output. `hc` can show the status and can paste input. It has no
 command that sets it. A Kiro hook often runs with a captured stdout and, for
-the watcher, in its own session, so the bytes go to the pane process's tty.
+the watcher, in its own session. The bytes go to that process's stdout tty
+only when the fd lookup names one tty. A missing, ambiguous, or unproven
+path writes nothing, and never the controlling terminal or `/dev/tty`.
 """
 
 from __future__ import annotations

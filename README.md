@@ -6,7 +6,7 @@
 
 A [herdr](https://herdr.dev) plugin that reports a [Kiro CLI](https://kiro.dev/docs/cli) V3 session to the Herdr App, and still to the Herdr TUI.
 
-The App reads status only from OSC 7501 on the program's own output. `hc` is the herdr-core CLI. It can print a screen and paste input. It cannot set status. Inside an App terminal, core sets `HC_TERMINAL_ID`, and this hook writes one report to that pane's tty:
+The App reads status only from OSC 7501 on the program's own output. `hc` is the herdr-core CLI. It can print a screen and paste input. It cannot set status. Inside an App terminal that is not a Herdr TUI pane, core sets `HC_TERMINAL_ID`, and this hook writes one report to that pane's tty:
 
 - a running turn is `state=working:app=kiro-cli`
 - a chooser or the workspace-trust dialog is `state=blocked:kind=permission:app=kiro-cli`
@@ -101,7 +101,7 @@ The stock idle rule matches `› ask a question or describe a task` on the botto
 
 - A line that starts with `▶`, then a name, then `running`, and contains `ctrl+x`, is working. `ctrl+g` may be on the next line.
 - `Allow once` / `Deny once`, the subagent widget, and `Trust this workspace?` are blocked, and they beat the banner.
-- The hook calls `release-agent` only when the proven outer `kiro-cli` process has exited. A gone `kiro-cli-chat` is not an exit and does not call `release-agent`, whether or not a replacement is under the outer process. An agent that is gone, and an empty owner table, are not that exit. A live pid with an empty token, `sec:` plus a whole-second start, a bare whole-second start, or a fine token that no longer matches is not an exit and is not painted. A weak exit does not call `release-agent`. `Stop` and `SessionEnd` end a turn or a session. They are not process exit. A proven owner still ends `state=done` on that pane, including when the chat child is piped. A TUI pane inside the App gets no OSC.
+- The hook calls `release-agent` only when the proven outer `kiro-cli` process has exited. A gone `kiro-cli-chat` is not an exit and does not call `release-agent`, whether or not a replacement is under the outer process. An agent that is gone, and an empty owner table, are not that exit. A live pid with an empty token, `sec:` plus a whole-second start, a bare whole-second start, or a fine token that no longer matches is not an exit and is not painted. A weak exit does not call `release-agent`. `Stop` and `SessionEnd` end a turn or a session. When a proven exit is already owed, both are `process_exit`. Otherwise they are not process exit. A proven owner still chooses `state=done` on that pane, including when the chat child is piped. The held tty is written only when its pid is that owner. A TUI pane inside the App gets no OSC.
 
 Stay on the stock file if you want herdr to keep applying newer remote Kiro rules. Switch to this if the idle pane during a workflow is the failure you are fixing. The rule-by-rule list is [docs/kiro-detection-diff.md](docs/kiro-detection-diff.md).
 

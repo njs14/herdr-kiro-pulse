@@ -305,7 +305,6 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
         idents = {}
         state["owner_ident"] = idents
     # A stored fine token stays. A later fractional start does not replace it.
-    # A token that no longer matches the live process stays weak.
     current = idents.get(key) or ""
     if isinstance(current, str) and fine_start(current):
         return
@@ -319,9 +318,9 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
 def _keep_proven_pane(state: dict, key: str) -> None:
     """Save a proven pane owner before END drops its row.
 
-    The idle report runs after that drop. state=done still has to reach the
-    tty this token proved. Stop and SessionEnd both drop the row. An empty
-    token or a sec: token is not saved.
+    identity_proven is required. An empty token or a sec: token is not
+    saved. Stop and SessionEnd drop the row only when pane_transition
+    returns done. A weak owner and a dead sec: owner stay.
     """
     owners = state.get("owners")
     if not isinstance(owners, dict):
@@ -406,7 +405,10 @@ def _chooser_drops_row(state: dict, event: str) -> bool:
 
 
 def _held_proves(token: str) -> bool:
-    """The held fd was opened for this fine token while the owner was proven."""
+    """True when the held fd is open and its token equals this fine token.
+
+    This does not check that `_held_pid` is the owner. The write does.
+    """
     return bool(fine_start(token) and _pane_fd >= 0 and _held_ident == token)
 
 
@@ -733,10 +735,12 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
     """Write state=working or state=done for one proven owner.
 
     commit_pane is the path that decides to paint. This writes the bytes on
-    that pane's one outer stdout tty, or on the fd opened for that stdout
-    while the token proved it. A missing token, sec: plus whole-second
-    lstart, a bare whole-second lstart, or a fine token that no longer
-    matches is not eligible, including on that held fd.
+    that pane's one outer stdout tty, or on the held fd after the caller
+    has confirmed `_held_pid` is the owner. A missing token, sec: plus
+    whole-second lstart, or a bare whole-second lstart is not eligible.
+    A live fine token that does not match the live start is not eligible,
+    including on that held fd. A gone pid has no live start, so the held
+    token is written when it is fine and equals the token stored for the fd.
     """
     if in_tui():
         return False
@@ -776,7 +780,10 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
 
 
 def _write_held_fd() -> bool:
-    """Write idle's wire state=done through the fd opened while the owner lived."""
+    """Write idle's wire state=done through the held fd.
+
+    Call this only when `_held_pid` is the owner. This does not open another tty.
+    """
     fd = _pane_fd
     if fd < 0 or not fine_start(_held_ident):
         return False
@@ -1633,9 +1640,10 @@ def owner_phase(state: dict) -> str:
     weak, including empty, sec: plus whole-second lstart, and a fine token
     that does not match, even when the stored phase is idle_clear. A gone
     unproven token is weak only while the stored phase is idle_clear. A
-    stored exited phase stays exited. Any other gone owner is exited. A
-    live proven owner is proven, and a live owner that is not proven is
-    weak. A chat child does not change this.
+    stored exited phase stays exited, including when that owner is still
+    live. When the stored phase is neither idle_clear nor exited, a live
+    identity-proven owner is proven and any other live owner is weak. Any
+    other gone owner is exited. A chat child does not change this.
     """
     stored = state.get("phase") or ""
     owner = _pane_owner(state)
@@ -1701,8 +1709,8 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     any held fd is written. An empty token or sec: plus whole-second lstart
     writes nothing, including when a held fd is open. The held fd is
     eligible only when its pid is this owner. If that pid cannot be
-    confirmed, this writes nothing and does not open another tty. A failed
-    hold is a failed write.
+    confirmed, this writes nothing and does not open another tty. With no
+    held fd, a live proven owner still paints through paint_status.
     """
     if in_tui():
         return True
@@ -1713,8 +1721,8 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     if not fine_start(token):
         return False
     # A live pid whose token does not match is not painted, including when
-    # a held fd is open. kill is the exit check, so a reaped pid can still
-    # write the fd opened while that token proved it.
+    # a held fd is open. kill is the exit check, so a reaped owner can still
+    # write that fd when _held_pid is this owner.
     if not _pid_gone(pid) and not identity_proven(pid, token):
         return False
     if kind == "idle" and _held_proves(token):
@@ -1730,9 +1738,11 @@ def commit_pane(state: dict, event: str) -> tuple[str, bool]:
     """Choose the pane write, paint that one tty, and store the next state.
 
     pane_transition chooses working, done, or none. This is the only path
-    that paints working or done. A proven outer that is already gone is
-    process_exit, so Stop, SessionEnd, and a prompt still write done on the
-    tty it held. A failed done write does not change the phase. The caller
+    that paints working or done. A proven outer that is already gone makes
+    Stop, SessionEnd, and a prompt into process_exit, so they still choose
+    done. The held tty is written only when its pid is that owner. A
+    mismatched or unconfirmed held pid writes nothing and does not open
+    another tty. A failed done write does not change the phase. The caller
     drops the row after a done write has succeeded.
     """
     event = _chooser_event(state, event)
@@ -2011,11 +2021,10 @@ def _process_matches(pid: int, started: str) -> bool:
 
 
 def alive(pid: int) -> bool:
-    """True when this pid is still running.
+    """True when the process table still names this pid.
 
-    An empty token, sec: plus whole-second lstart, a bare whole-second
-    lstart, or a fine token that no longer matches does not turn a live pid
-    into an exit. A ps error is not death. EPERM is not death.
+    A missing snapshot is death. A ps error is not death unless kill reports
+    ESRCH. EPERM is not death. The start token is not this check.
     """
     try:
         number = int(pid)
@@ -2521,8 +2530,9 @@ def _watch_loop(pane: str, path: str) -> None:
     quiet_since = None
     held = None
     owner_watch = OwnerExitWatch()
-    # SessionEnd drops the owner from the state file before the process exits.
-    # Keep the last pid so that exit still wakes the watcher.
+    # A SessionEnd that pane_transition accepts drops the owner before the
+    # process exits. A weak owner and a dead sec: owner stay. Keep the last
+    # pid so a dropped owner's exit still wakes the watcher.
     known_owners = []
     known_outers = []
     gone_since = None
