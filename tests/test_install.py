@@ -234,16 +234,24 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(os.path.exists(legacy_state))
         self.assertFalse(os.path.exists(marked))
         self.assertTrue(os.path.exists(decoy_marked))
-        watcher.wait(timeout=5)
-        self.assertIsNotNone(watcher.returncode)
+        # A fractional start is proof and is signaled. sec: plus whole-second
+        # lstart is the same form as a same-second reuse, so it is not.
+        if hook.fine_start(ident["start"]):
+            watcher.wait(timeout=5)
+            self.assertIsNotNone(watcher.returncode)
+        else:
+            self.assertIsNone(watcher.poll())
         self.assertIsNone(decoy.poll())
         self.assertIsNone(wrong_start.poll())
         self.assertIsNone(wrong_uid.poll())
         self.assertIsNone(reuse.poll())
+        if watcher.poll() is None:
+            watcher.kill()
         decoy.kill()
         wrong_start.kill()
         wrong_uid.kill()
         reuse.kill()
+        watcher.wait(timeout=5)
         decoy.wait(timeout=5)
         wrong_start.wait(timeout=5)
         wrong_uid.wait(timeout=5)
