@@ -3580,8 +3580,14 @@ class PaneWriteMatrixTests(unittest.TestCase):
     _BLOCKED = "esc to close · ↑↓ to navigate · ↵ to select\n"
     _PLAIN = "still writing the reply\n"
 
+    _PINNED_LIVE = "1700000000.111111"
+    _PINNED_GONE = "1700000000.222222"
+    _PINNED_CHAT = "1700000000.333333"
+
     @classmethod
     def setUpClass(cls):
+        cls._owner_pins = None
+        cls.addClassCleanup(cls._stop_owner_pins)
         hook.begin_tick()
         master, slave = os.openpty()
         cls.live_master = master
@@ -3593,10 +3599,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             start_new_session=True,
         )
         os.close(slave)
-        hook.begin_tick()
-        cls.live_token = hook.hires_start(cls.live.pid)
-        if not hook.fine_start(cls.live_token):
-            raise AssertionError("live owner has no fine start token")
         cls.gone = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(300)"],
             stdin=subprocess.DEVNULL,
@@ -3604,12 +3606,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        hook.begin_tick()
-        cls.gone_token = hook.hires_start(cls.gone.pid)
-        if not hook.fine_start(cls.gone_token):
-            raise AssertionError("gone owner has no fine start token")
-        os.kill(cls.gone.pid, signal.SIGKILL)
-        cls.gone.wait(timeout=5)
         cls.chat = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(300)"],
             stdin=subprocess.DEVNULL,
@@ -3618,13 +3614,58 @@ class PaneWriteMatrixTests(unittest.TestCase):
             start_new_session=True,
         )
         hook.begin_tick()
+        cls.live_token = hook.hires_start(cls.live.pid)
+        cls.gone_token = hook.hires_start(cls.gone.pid)
         cls.chat_token = hook.hires_start(cls.chat.pid)
+        # No /proc start ticks means sec: plus a whole-second lstart.
+        # fine_start rejects that, so these pids report a fractional token
+        # and identity_proven still has to match it. Other pids stay real.
+        if not hook.fine_start(cls.live_token) or not hook.fine_start(cls.gone_token):
+            cls._pin_owners_without_proc_ticks()
+        if not hook.fine_start(cls.live_token) or not hook.fine_start(cls.gone_token):
+            raise AssertionError("live owner has no fine start token")
+        os.kill(cls.gone.pid, signal.SIGKILL)
+        cls.gone.wait(timeout=5)
         os.kill(cls.chat.pid, signal.SIGKILL)
         cls.chat.wait(timeout=5)
         hook.begin_tick()
         cls.watcher_token = hook.hires_start(os.getpid())
         if not cls.watcher_token:
             raise AssertionError("watcher token is empty")
+        if cls.watcher_token in (cls.live_token, cls.gone_token, cls.chat_token):
+            raise AssertionError("watcher token must stay the process start")
+
+    @classmethod
+    def _pin_owners_without_proc_ticks(cls):
+        pins = {
+            cls.live.pid: cls._PINNED_LIVE,
+            cls.gone.pid: cls._PINNED_GONE,
+            cls.chat.pid: cls._PINNED_CHAT,
+        }
+        real = hook.hires_start
+
+        def hires(asked, real=real, pins=pins):
+            try:
+                number = int(asked)
+            except (TypeError, ValueError):
+                return real(asked)
+            pinned = pins.get(number)
+            if pinned is not None:
+                return pinned
+            return real(asked)
+
+        cls._owner_pins = mock.patch.object(hook, "hires_start", side_effect=hires)
+        cls._owner_pins.start()
+        cls.live_token = pins[cls.live.pid]
+        cls.gone_token = pins[cls.gone.pid]
+        cls.chat_token = pins[cls.chat.pid]
+
+    @classmethod
+    def _stop_owner_pins(cls):
+        patch = cls._owner_pins
+        cls._owner_pins = None
+        if patch is not None:
+            patch.stop()
 
     @classmethod
     def tearDownClass(cls):
@@ -4259,20 +4300,44 @@ class PaneWriteMatrixTests(unittest.TestCase):
 
     def _kill_watchers(self, root):
         needle = root.encode()
-        for name in os.listdir("/proc"):
-            if not name.isdigit():
-                continue
-            pid = int(name)
-            if pid == os.getpid():
-                continue
-            try:
-                with open(f"/proc/{pid}/cmdline", "rb") as handle:
-                    command = handle.read()
-            except OSError:
+        with contextlib.suppress(OSError):
+            for name in os.listdir("/proc"):
+                if not name.isdigit():
+                    continue
+                pid = int(name)
+                if pid == os.getpid():
+                    continue
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                        command = handle.read()
+                except OSError:
+                    continue
+                if b"--watch" in command and needle in command:
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGKILL)
+        self._kill_ps_watchers(needle)
+
+    def _kill_ps_watchers(self, needle):
+        env = dict(os.environ)
+        env["COLUMNS"] = "4096"
+        try:
+            completed = subprocess.run(
+                ["ps", "-axww", "-o", "pid=,command="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        for line in (completed.stdout or b"").splitlines():
+            pid_text, _sep, command = line.strip().partition(b" ")
+            if not pid_text.isdigit() or int(pid_text) == os.getpid():
                 continue
             if b"--watch" in command and needle in command:
                 with contextlib.suppress(OSError):
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(int(pid_text), signal.SIGKILL)
 
     def _format_problem(self, start, event, owner, count, before, actual, expected, osc, expected_osc):
         lines = [f"{start} {event} {owner} count={count}"]
