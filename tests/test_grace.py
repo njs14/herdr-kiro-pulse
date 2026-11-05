@@ -2433,6 +2433,65 @@ class PaneFindingTests(unittest.TestCase):
         self.assertTrue(wrote)
         self.assertIn(payload, _read_pty(master))
 
+    def test_held_fd_of_another_pid_writes_nothing(self):
+        held_master, held_slave = os.openpty()
+        owner_master, owner_slave = os.openpty()
+        self.addCleanup(os.close, held_master)
+        self.addCleanup(os.close, held_slave)
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        owner = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=owner_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        self.addCleanup(lambda: other.poll() is not None or other.kill())
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        hook._pane_fd = os.dup(held_slave)
+        hook._held_ident = "100.000000"
+        held_fd = hook._pane_fd
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        owner_name = os.ttyname(owner_slave)
+        opened = []
+        real_open = os.open
+
+        def spy_open(path, flags, *args, **kwargs):
+            text = os.fsdecode(path) if isinstance(path, bytes) else path
+            if text in ("/dev/tty", owner_name):
+                opened.append(text)
+            return real_open(path, flags, *args, **kwargs)
+
+        for name, held_pid in (("other-pid", other.pid), ("unrecorded", 0)):
+            with self.subTest(name=name):
+                hook._held_pid = held_pid
+                state = hook.fresh_state()
+                state["busy"] = {"sess": 1.0}
+                state["owners"] = {"sess": owner.pid}
+                state["owner_ident"] = {"sess": "100.000000"}
+                state["phase"] = "proven"
+                _read_pty(held_master)
+                _read_pty(owner_master)
+                opened.clear()
+                with (
+                    mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+                    mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+                    mock.patch.object(hook.herdr_kiro_osc, "write_pid", side_effect=AssertionError("tty")),
+                    mock.patch.object(os, "open", spy_open),
+                ):
+                    write, ok = hook.commit_pane(state, "stop")
+                self.assertEqual((write, ok), ("done", False))
+                self.assertEqual(state["phase"], "proven")
+                self.assertEqual(state["owners"].get("sess"), owner.pid)
+                self.assertEqual(hook._pane_fd, held_fd)
+                self.assertEqual(hook._held_pid, held_pid)
+                self.assertEqual(_read_pty(held_master), b"")
+                self.assertEqual(_read_pty(owner_master), b"")
+                self.assertEqual(opened, [])
+
     def test_live_sec_idle_clear_is_weak_and_reaches_pid_reuse(self):
         proc = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: proc.poll() is not None or proc.kill())

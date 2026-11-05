@@ -414,8 +414,8 @@ def _proven_exit_owed(state: dict) -> bool:
     """A proven outer is already gone and still owes state=done.
 
     The proof is a phase stored while the pid was proven, or the fd held
-    for that fine token. A weak row, including a fine token that never
-    matched, does not owe that write.
+    for that fine token. A stored weak or exited phase does not owe that
+    write. A gone fine token stored as proven or idle_clear does.
     """
     owner = _pane_owner(state)
     if owner is None:
@@ -1628,12 +1628,14 @@ def screen_event(state: dict, which: str) -> str:
 def owner_phase(state: dict) -> str:
     """The stored ending, or the outer pid's live class.
 
-    idle_clear stays until process_exit only for a proven owner. A live
-    owner whose token is empty, sec: plus whole-second lstart, or any other
-    unproven token is weak, including when the stored phase is idle_clear.
-    A gone owner with that unproven token is weak, so process_exit does not
-    write done. A chat child does not change this. A gone proven outer is
-    exited.
+    A stored idle_clear phase stays idle_clear for a gone fine token, and
+    for a live owner that is identity_proven. A live unproven token is
+    weak, including empty, sec: plus whole-second lstart, and a fine token
+    that does not match, even when the stored phase is idle_clear. A gone
+    unproven token is weak only while the stored phase is idle_clear. A
+    stored exited phase stays exited. Any other gone owner is exited. A
+    live proven owner is proven, and a live owner that is not proven is
+    weak. A chat child does not change this.
     """
     stored = state.get("phase") or ""
     owner = _pane_owner(state)
@@ -1662,10 +1664,10 @@ def owner_phase(state: dict) -> str:
 def _phase_for_event(state: dict, event: str) -> str:
     """The stored class for the one process_exit that still owes state=done.
 
-    owner_phase reports exited once the outer pid is gone. A phase stored
-    while that pid was proven, or the fd held for that fine token, makes
-    the exit write done. A fine token that never matched is weak, and that
-    exit writes none.
+    A stored idle_clear phase is idle_clear or weak from owner_phase, not
+    exited. process_exit chooses done for a gone fine token whose stored
+    phase is proven or idle_clear. A stored weak phase stays weak, and
+    that exit writes none.
     """
     phase = owner_phase(state)
     if event != "process_exit" or phase == "idle_clear":
@@ -1697,8 +1699,10 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     A TUI pane, including one inside the App, gets no OSC. A chat pty and a
     second recorded pid are not targets. The current token is checked before
     any held fd is written. An empty token or sec: plus whole-second lstart
-    writes nothing, including when a held fd is open. A failed hold is a
-    failed write.
+    writes nothing, including when a held fd is open. The held fd is
+    eligible only when its pid is this owner. If that pid cannot be
+    confirmed, this writes nothing and does not open another tty. A failed
+    hold is a failed write.
     """
     if in_tui():
         return True
@@ -1714,6 +1718,10 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     if not _pid_gone(pid) and not identity_proven(pid, token):
         return False
     if kind == "idle" and _held_proves(token):
+        # A matching start token is not enough. The fd was opened for
+        # _held_pid. Zero, or any other pid, is a different terminal.
+        if _held_pid <= 1 or _held_pid != pid:
+            return False
         return _write_held_fd()
     return paint_status(kind, pid, token)
 

@@ -530,11 +530,13 @@ class AppExitOscTests(unittest.TestCase):
         self.addCleanup(os.close, slave)
         hook._pane_fd = os.dup(slave)
         hook._held_ident = "100.000000"
+        hook._held_pid = 4242
 
         def drop_held():
             fd = hook._pane_fd
             hook._pane_fd = -1
             hook._held_ident = ""
+            hook._held_pid = 0
             if isinstance(fd, int) and fd >= 0:
                 os.close(fd)
 
@@ -592,6 +594,7 @@ if mode == "mid":
 
 hook._pane_fd = held
 hook._held_ident = "100.000000"
+hook._held_pid = 4242
 ok = hook.apply_owner_exit("t7", path)
 with open(result, "w", encoding="utf-8") as handle:
     handle.write("ok\\n" if ok else "miss\\n")
@@ -969,6 +972,8 @@ class ReapedExitTests(unittest.TestCase):
         self.addCleanup(os.close, slave)
         hook._pane_fd = os.dup(slave)
         hook._held_ident = "100.000000"
+        hook._held_pid = 4242
+        self.addCleanup(hook._close_held_fd)
         calls = []
         painted = []
 
@@ -2239,6 +2244,7 @@ class StdoutTtyTests(unittest.TestCase):
         hook._close_held_fd()
         hook._pane_fd = os.dup(owner_slave)
         hook._held_ident = "100.000000"
+        hook._held_pid = 4242
         self.addCleanup(hook._close_held_fd)
         state = hook.fresh_state()
         state["owners"] = {"sess": 4242}
