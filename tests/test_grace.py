@@ -4,6 +4,7 @@ The hook sends one working report. It does not send that report again for
 the rest of a SessionStart grace. A named Stop does not start that grace.
 """
 
+import ast
 import errno
 import inspect
 import io
@@ -419,7 +420,17 @@ class GraceTests(unittest.TestCase):
 
     def test_pane_transition_covers_every_pair(self):
         states = ("no_owner", "proven", "weak", "exited", "idle_clear")
-        events = ("start", "prompt", "stop", "idle_clear", "process_exit", "pid_reuse", "piped_chat")
+        events = (
+            "start",
+            "prompt",
+            "stop",
+            "idle_clear",
+            "process_exit",
+            "pid_reuse",
+            "piped_chat",
+            "blocked",
+            "aggregate_zero",
+        )
         working = {("proven", "start"), ("proven", "prompt")}
         done = {
             ("proven", "stop"),
@@ -433,7 +444,7 @@ class GraceTests(unittest.TestCase):
         }
         self.assertEqual(hook.OWNER_STATES, states)
         self.assertEqual(hook.OWNER_EVENTS, events)
-        self.assertEqual(len(states) * len(events), 35)
+        self.assertEqual(len(states) * len(events), 45)
         for state in states:
             for event in events:
                 got = hook.pane_transition(state, event)
@@ -442,6 +453,10 @@ class GraceTests(unittest.TestCase):
                     self.assertEqual(got, "working", pair)
                 elif pair in done:
                     self.assertEqual(got, "done", pair)
+                elif pair == ("proven", "blocked"):
+                    self.assertEqual(got, "paint_blocked", pair)
+                elif pair == ("proven", "aggregate_zero"):
+                    self.assertEqual(got, "refresh", pair)
                 else:
                     self.assertEqual(got, "none", pair)
 
@@ -559,7 +574,7 @@ class GraceTests(unittest.TestCase):
             saved = json.load(handle)
         self.assertEqual(saved["watcher"], 0)
         self.assertIn("sess", saved["busy"])
-        self.assertEqual(saved.get("phase"), "exited")
+        self.assertEqual(saved.get("phase"), "")
 
     def test_session_end_then_process_exit_stops_the_watcher(self):
         directory = tempfile.mkdtemp()
@@ -1988,7 +2003,8 @@ class PaneFindingTests(unittest.TestCase):
             self.assertFalse(hook.owner_is_dead(50))
             self.assertEqual(hook.owner_phase(state), "weak")
             write, _ok = hook.commit_pane(state, hook.screen_event(state, "reuse"))
-        self.assertEqual((write, state["phase"], state["owners"].get("sess")), ("none", "weak", 50))
+            self.assertEqual(hook.owner_phase(state), "weak")
+        self.assertEqual((write, state["phase"], state["owners"].get("sess")), ("none", "", 50))
         paint.assert_not_called()
 
     def test_a_stored_fine_token_is_not_replaced(self):
@@ -2058,7 +2074,7 @@ class PaneFindingTests(unittest.TestCase):
         release.assert_not_called()
         with open(path, encoding="utf-8") as handle:
             saved = json.load(handle)
-        self.assertEqual(saved["phase"], "exited")
+        self.assertEqual(saved["phase"], "weak")
         self.assertEqual(saved["owners"].get("sess"), 4242)
 
     def test_stale_idle_clear_does_not_paint(self):
@@ -2516,7 +2532,8 @@ class PaneFindingTests(unittest.TestCase):
                         phase = hook.owner_phase(state)
                         self.assertEqual(hook.pane_transition(phase, event), "none", event)
                     write, _ok = hook.commit_pane(state, "pid_reuse")
-                self.assertEqual((write, state["phase"]), ("none", "weak"))
+                self.assertEqual((write, state["phase"]), ("none", "idle_clear"))
+                self.assertEqual(hook.owner_phase(state), "weak")
                 self.assertEqual(state["owners"].get("sess"), proc.pid)
                 paint.assert_not_called()
                 self.assertEqual(hook.pane_next("idle_clear", "pid_reuse"), "weak")
@@ -2588,7 +2605,7 @@ class PaneFindingTests(unittest.TestCase):
                 with open(path, encoding="utf-8") as handle:
                     saved = json.load(handle)
                 self.assertEqual(saved["owners"].get("sess"), 4242)
-                self.assertNotEqual(saved["phase"], "idle_clear")
+                self.assertEqual(saved["phase"], "idle_clear")
 
     def test_stop_does_not_drop_a_dead_sec_row(self):
         snap_gone = None
@@ -2658,7 +2675,8 @@ class PaneFindingTests(unittest.TestCase):
         paint.assert_not_called()
         with open(path, encoding="utf-8") as handle:
             saved = json.load(handle)
-        self.assertEqual(saved["phase"], "weak")
+        self.assertEqual(saved["phase"], "idle_clear")
+        self.assertEqual(hook.owner_phase(saved), "weak")
         self.assertEqual(saved["owners"].get("sess"), proc.pid)
 
     def test_empty_app_screen_does_not_end_the_turn(self):
@@ -2926,7 +2944,7 @@ class PriorFindingTableTests(unittest.TestCase):
             self.assertFalse(hook.clear_idle_if_current(state, 1, ["sess"]))
         self.assertEqual(state["owners"].get("sess"), proc.pid)
         self.assertIn("sess", state["busy"])
-        self.assertNotEqual(state["phase"], "idle_clear")
+        self.assertEqual(state["phase"], "idle_clear")
         paint.assert_not_called()
         held.assert_not_called()
         self.assertEqual(_read_pty(master), b"")
@@ -2951,13 +2969,12 @@ class PriorFindingTableTests(unittest.TestCase):
             write, _ok = hook.commit_pane(state, "stop")
             self.assertEqual(write, "none")
             self.assertEqual(_owner_fields(state), before)
-            # The live class is weak, so the stored phase follows that class.
-            # The owner row does not change, and nothing is painted.
-            self.assertEqual(state["phase"], "weak")
+            self.assertEqual(hook.owner_phase(state), "weak")
+            self.assertEqual(state["phase"], "proven")
             write, _ok = hook.commit_pane(state, "pid_reuse")
             self.assertEqual(write, "none")
             self.assertEqual(_owner_fields(state), before)
-            self.assertEqual(state["phase"], "weak")
+            self.assertEqual(state["phase"], "proven")
             self.assertEqual(state["owners"].get("sess"), proc.pid)
         paint.assert_not_called()
         held.assert_not_called()
@@ -3190,7 +3207,7 @@ class PriorFindingTableTests(unittest.TestCase):
                 write, _ok = hook.commit_pane(state, "process_exit")
                 self.assertEqual(write, "none", token)
                 self.assertEqual(_owner_fields(state), before, token)
-                self.assertEqual(state["phase"], "exited", token)
+                self.assertEqual(state["phase"], phase, token)
                 self.assertFalse(hook._chooser_drops_row(state, "Stop"), token)
                 revised = hook.apply_event(state, "Stop", "sess", 2.0)
             self.assertEqual(revised["owners"].get("sess"), 4242, token)
@@ -3280,6 +3297,292 @@ class PriorFindingTableTests(unittest.TestCase):
         source = inspect.getsource(hook._watch_loop)
         self.assertNotIn('["phase"] =', source)
         self.assertNotIn("['phase'] =", source)
+
+
+SETTLED_ROWS = (
+    {"name": "weak-owner-at-zero", "case": "weak_zero"},
+    {"name": "proven-owner-at-zero", "case": "proven_zero"},
+    {"name": "none-never-mutates", "case": "none_pure"},
+    {"name": "proven-blocked", "case": "proven_blocked"},
+    {"name": "weak-blocked", "case": "weak_blocked"},
+    {"name": "no-owner-blocked", "case": "no_owner_blocked"},
+    {"name": "watcher-blocked", "case": "watcher_blocked"},
+    {"name": "blocked-exit-prompt", "case": "exit_prompt"},
+    {"name": "blocked-exit-process", "case": "exit_process"},
+    {"name": "blocked-exit-idle-clear", "case": "exit_idle"},
+    {"name": "emit-osc-only-from-commit-pane", "case": "emit_only"},
+)
+
+
+class SettledDecisionTests(unittest.TestCase):
+    def test_settled_decisions(self):
+        paints = set(hook._PANE_WRITES.values())
+        self.assertEqual(paints, {"working", "done", "paint_blocked", "refresh"})
+        for row in SETTLED_ROWS:
+            with self.subTest(row["name"]):
+                getattr(self, "_row_" + row["case"])(row)
+
+    def _live(self):
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        return (
+            mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+        )
+
+    def _pane_fields(self, state):
+        return {
+            "phase": state.get("phase"),
+            "busy": dict(state.get("busy") or {}),
+            "owners": dict(state.get("owners") or {}),
+            "owner_ident": dict(state.get("owner_ident") or {}),
+            "aggregate": state.get("aggregate"),
+            "proven_pid": state.get("proven_pid"),
+            "proven_ident": state.get("proven_ident"),
+        }
+
+    def _aggregate(self, phase, token, stamp=10.0):
+        state = hook.fresh_state()
+        state["phase"] = phase
+        state["aggregate"] = 0
+        state["busy"] = {hook.AGGREGATE: stamp}
+        state["owners"] = {hook.AGGREGATE: 50}
+        state["owner_ident"] = {hook.AGGREGATE: token}
+        state["seq"] = 4
+        return state
+
+    def _row_weak_zero(self, _row):
+        state = self._aggregate("weak", "sec:10")
+        before = self._pane_fields(state)
+        with self._live()[0], mock.patch.object(hook, "hires_start", lambda _pid: "sec:10"):
+            self.assertEqual(hook.owner_phase(state), "weak")
+            self.assertEqual(hook.pane_transition("weak", "aggregate_zero"), "none")
+            revised = hook.apply_event(state, "Stop", hook.AGGREGATE, 25.0)
+        self.assertEqual(self._pane_fields(revised), before)
+
+    def _row_proven_zero(self, _row):
+        state = self._aggregate("proven", "100.000000")
+        before = self._pane_fields(state)
+        with self._live()[0], self._live()[1]:
+            self.assertEqual(hook.owner_phase(state), "proven")
+            self.assertEqual(hook.pane_transition("proven", "aggregate_zero"), "refresh")
+            revised = hook.apply_event(state, "Stop", hook.AGGREGATE, 25.0)
+        self.assertEqual(revised["busy"][hook.AGGREGATE], 25.0)
+        changed = self._pane_fields(revised)
+        changed["busy"] = dict(before["busy"])
+        self.assertEqual(changed, before)
+
+    def _row_none_pure(self, _row):
+        def gone(_pid, _sig=0):
+            raise OSError(errno.ESRCH, "gone")
+
+        weak = hook.fresh_state()
+        weak["phase"] = "weak"
+        weak["busy"] = {"sess": 1.0}
+        weak["owners"] = {"sess": 4242}
+        weak["owner_ident"] = {"sess": "sec:10"}
+        before = self._pane_fields(weak)
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+            mock.patch.object(hook.os, "kill", gone),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+            mock.patch.object(hook, "_write_held_fd", return_value=True) as held,
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc,
+        ):
+            write, ok = hook.commit_pane(weak, "process_exit")
+            self.assertEqual((write, ok), ("none", True))
+            self.assertEqual(self._pane_fields(weak), before)
+            live = hook.fresh_state()
+            live["phase"] = "idle_clear"
+            live["busy"] = {"sess": 1.0}
+            live["owners"] = {"sess": 50}
+            live["owner_ident"] = {"sess": "sec:10"}
+            live_before = self._pane_fields(live)
+            with mock.patch.object(hook, "process_snapshot", lambda _pid: {"ppid": 1, "lstart": "10", "comm": "kiro"}):
+                self.assertEqual(hook.owner_phase(live), "weak")
+                write, ok = hook.commit_pane(live, "pid_reuse")
+            self.assertEqual((write, ok), ("none", True))
+            self.assertEqual(self._pane_fields(live), live_before)
+        paint.assert_not_called()
+        held.assert_not_called()
+        osc.assert_not_called()
+
+    def _blocked_owner(self, phase, token):
+        state = hook.fresh_state()
+        state["phase"] = phase
+        state["busy"] = {"sess": 1.0}
+        state["owners"] = {"sess": 50}
+        state["owner_ident"] = {"sess": token}
+        state["seq"] = 4
+        return state
+
+    def _row_proven_blocked(self, _row):
+        state = self._blocked_owner("proven", "100.000000")
+        before = self._pane_fields(state)
+        with (
+            self._live()[0],
+            self._live()[1],
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc,
+        ):
+            write, ok = hook.commit_pane(state, "blocked", "workflow_question_esc_cancel")
+        self.assertEqual((write, ok), ("paint_blocked", True))
+        self.assertEqual(self._pane_fields(state), before)
+        payload, pid = osc.call_args.args
+        self.assertEqual(pid, 50)
+        self.assertIn(b"state=blocked", payload)
+        self.assertIn(b"kind=question", payload)
+
+    def _row_weak_blocked(self, _row):
+        state = self._blocked_owner("weak", "sec:10")
+        before = self._pane_fields(state)
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: {"ppid": 1, "lstart": "10", "comm": "kiro"}),
+            mock.patch.object(hook, "hires_start", lambda _pid: "sec:10"),
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc,
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            self.assertEqual(hook.pane_transition("weak", "blocked"), "none")
+            write, ok = hook.commit_pane(state, "blocked")
+        self.assertEqual((write, ok), ("none", True))
+        self.assertEqual(self._pane_fields(state), before)
+        osc.assert_not_called()
+        paint.assert_not_called()
+
+    def _row_no_owner_blocked(self, _row):
+        state = hook.fresh_state()
+        before = self._pane_fields(state)
+        with mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc:
+            self.assertEqual(hook.pane_transition("no_owner", "blocked"), "none")
+            write, ok = hook.commit_pane(state, "blocked")
+        self.assertEqual((write, ok), ("none", True))
+        self.assertEqual(self._pane_fields(state), before)
+        osc.assert_not_called()
+
+    def _save(self, state):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-settled-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        return path
+
+    def _row_watcher_blocked(self, _row):
+        source = inspect.getsource(hook._watch_loop)
+        self.assertIn("commit_blocked", source)
+        self.assertNotIn("emit_osc", source)
+        self.assertNotIn("send_report", source)
+        proven = self._save(self._blocked_owner("proven", "100.000000"))
+        weak = self._save(self._blocked_owner("weak", "sec:10"))
+        empty = self._save(hook.fresh_state())
+        with (
+            self._live()[0],
+            self._live()[1],
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc,
+        ):
+            write, ok = hook.commit_blocked("t7", proven, "workflow_requires_approval")
+            self.assertEqual((write, ok), ("paint_blocked", True))
+            weak_write, weak_ok = hook.commit_blocked("t7", weak, "workflow_requires_approval")
+            empty_write, empty_ok = hook.commit_blocked("t7", empty, "")
+        self.assertEqual((weak_write, weak_ok), ("none", True))
+        self.assertEqual((empty_write, empty_ok), ("none", True))
+        self.assertEqual(osc.call_count, 1)
+        with open(weak, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["phase"], "weak")
+        self.assertEqual(saved["busy"].get("sess"), 1.0)
+        self.assertEqual(saved["owners"].get("sess"), 50)
+        with open(empty, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["owners"], {})
+        self.assertEqual(saved["phase"], "")
+
+    def _row_exit_prompt(self, _row):
+        state = self._blocked_owner("proven", "100.000000")
+        with (
+            self._live()[0],
+            self._live()[1],
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            blocked, ok = hook.commit_pane(state, "blocked")
+            self.assertEqual((blocked, ok, state["phase"]), ("paint_blocked", True, "proven"))
+            self.assertEqual(hook.pane_transition("proven", "prompt"), "working")
+            write, ok = hook.commit_pane(state, "prompt")
+        self.assertEqual((write, ok, state["phase"]), ("working", True, "proven"))
+        paint.assert_called_once()
+
+    def _row_exit_process(self, _row):
+        def gone(_pid, _sig=0):
+            raise OSError(errno.ESRCH, "gone")
+
+        state = self._blocked_owner("proven", "100.000000")
+        with (
+            self._live()[0],
+            self._live()[1],
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            blocked, ok = hook.commit_pane(state, "blocked")
+            self.assertEqual((blocked, ok, state["phase"]), ("paint_blocked", True, "proven"))
+        with (
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+            mock.patch.object(hook.os, "kill", gone),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            self.assertEqual(hook.pane_transition("proven", "process_exit"), "done")
+            write, ok = hook.commit_pane(state, "process_exit")
+        self.assertEqual((write, ok), ("done", True))
+        self.assertEqual(state["phase"], "exited")
+        paint.assert_called()
+
+    def _row_exit_idle(self, _row):
+        state = self._blocked_owner("proven", "100.000000")
+        with (
+            self._live()[0],
+            self._live()[1],
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1"),
+            mock.patch.object(hook, "paint_status", return_value=True) as paint,
+        ):
+            blocked, ok = hook.commit_pane(state, "blocked")
+            self.assertEqual((blocked, ok, state["phase"]), ("paint_blocked", True, "proven"))
+            self.assertEqual(hook.pane_transition("proven", "idle_clear"), "done")
+            write, ok = hook.commit_pane(state, "idle_clear")
+        self.assertEqual((write, ok), ("done", True))
+        self.assertEqual(state["phase"], "idle_clear")
+        paint.assert_called()
+
+    def _row_emit_only(self, _row):
+        path = inspect.getsourcefile(hook)
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        found = []
+
+        class Finder(ast.NodeVisitor):
+            def __init__(self):
+                self.stack = []
+
+            def visit_FunctionDef(self, node):
+                self.stack.append(node.name)
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_AsyncFunctionDef(self, node):
+                self.visit_FunctionDef(node)
+
+            def visit_Lambda(self, node):
+                self.stack.append("<lambda>")
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_Call(self, node):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else ""
+                if name == "emit_osc":
+                    found.append(self.stack[-1] if self.stack else "<module>")
+                self.generic_visit(node)
+
+        Finder().visit(tree)
+        self.assertEqual(found, ["commit_pane"])
+        self.assertNotIn("emit_osc", inspect.getsource(hook.send_report))
 
 
 def _read_pty(master):

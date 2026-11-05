@@ -482,13 +482,15 @@ def apply_event(
             nxt["aggregate"] = count
             # The grace follows only this count returning to zero. A Stop
             # whose count is already zero does not arm it. A recorded owner
-            # stays when pane_transition returns none, including a dead sec:
-            # owner and a live weak owner. A slot with no owner pid still ends.
+            # stays when pane_transition returns none. A slot with no owner
+            # pid still ends. At aggregate zero the table returns refresh
+            # for a proven owner, and that updates only the timestamp. A
+            # weak or unproven owner gets none and the timestamp stays.
             if previous > 0 and count == 0 and _chooser_drops_row(nxt, event):
                 _pop_session(nxt, AGGREGATE)
                 finish_if_idle(nxt, now)
             elif count == 0:
-                if _owner_is_live_weak(nxt):
+                if pane_transition(owner_phase(nxt), "aggregate_zero") == "refresh" and AGGREGATE in nxt["busy"]:
                     nxt["busy"][AGGREGATE] = now
             else:
                 nxt["busy"][AGGREGATE] = now
@@ -804,7 +806,7 @@ def _write_held_fd() -> bool:
 def _watcher_still_us(path: str) -> bool:
     """True when this pid is still the watcher recorded in the state file.
 
-    Read the file directly. update() normalizes, and a dead owner stays until the exit write.
+    Read the file directly. update() normalizes. A weak or sec: exit writes none and leaves the row.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -831,21 +833,26 @@ def _load_state(path: str) -> dict:
     return state
 
 
-def emit_osc(path: str, kind: str, rule_id: str = "") -> bool:
+def emit_osc(state: dict | str, kind: str, rule_id: str = "") -> bool:
     """Write blocked on the pane's one outer tty.
 
-    working and done are painted only by commit_pane. A chat pty, a second
-    recorded pid, and this process's tty are not targets. Unknown is not a
-    protocol state, so it is a no-op.
+    commit_pane is the only caller in this module. working and done are
+    painted there through paint_status. A chat pty, a second recorded pid,
+    and this process's tty are not targets. Unknown is not a protocol
+    state, so it is a no-op. A path loads the saved pane.
     """
+    if isinstance(state, str):
+        state = _load_state(state)
+    if not isinstance(state, dict):
+        return False
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None:
         return True
     if fields.get("state") != "blocked":
         return True
     if in_tui():
-        return False
-    owner = _pane_owner(_load_state(path))
+        return True
+    owner = _pane_owner(state)
     if owner is None:
         return False
     pid, token = owner
@@ -875,16 +882,8 @@ def send_report(pane: str, path: str, kind: str) -> bool:
     # place while kiro-cli is running. release-agent after it drops done:
     # an idle screen settles to idle with no completion, and a working
     # footer returns to working before that later idle screen also settles idle.
-    tui_ok = emit_report(pane, path, kind)
-    # A TUI pane can inherit HC_TERMINAL_ID. Return herdr's result before OSC.
-    # working and done are painted only by commit_pane. Blocked, when it is
-    # painted, goes to the one outer tty and not to a chat pty.
-    if in_tui() or not in_app() or kind != "blocked":
-        return tui_ok
-    blocked_screen = pane_text(pane) or ""
-    rule_id = str(screen_view(blocked_screen).get("id") or "")
-    emit_osc(path, kind, rule_id)
-    return tui_ok
+    # OSC is commit_pane's paint. This report is the Herdr TUI only.
+    return emit_report(pane, path, kind)
 
 
 def emit_report(pane: str, path: str, kind: str) -> bool:
@@ -1462,7 +1461,17 @@ def _ident_map(state: dict) -> dict:
 
 
 OWNER_STATES = ("no_owner", "proven", "weak", "exited", "idle_clear")
-OWNER_EVENTS = ("start", "prompt", "stop", "idle_clear", "process_exit", "pid_reuse", "piped_chat")
+OWNER_EVENTS = (
+    "start",
+    "prompt",
+    "stop",
+    "idle_clear",
+    "process_exit",
+    "pid_reuse",
+    "piped_chat",
+    "blocked",
+    "aggregate_zero",
+)
 _PANE_WRITES = {
     ("proven", "start"): "working",
     ("proven", "prompt"): "working",
@@ -1474,11 +1483,13 @@ _PANE_WRITES = {
     ("idle_clear", "idle_clear"): "done",
     ("idle_clear", "process_exit"): "done",
     ("idle_clear", "piped_chat"): "done",
+    ("proven", "blocked"): "paint_blocked",
+    ("proven", "aggregate_zero"): "refresh",
 }
 
 
 def pane_transition(state: str, event: str) -> str:
-    """The only choice of working, done, or none for one owner state and event."""
+    """The only choice of working, done, paint_blocked, refresh, or none."""
     if state not in OWNER_STATES:
         raise ValueError(state)
     if event not in OWNER_EVENTS:
@@ -1748,34 +1759,53 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     return paint_status(kind, pid, token)
 
 
-def commit_pane(state: dict, event: str) -> tuple[str, bool]:
-    """Choose the pane write, paint that one tty, and store the next phase.
+def commit_pane(state: dict, event: str, rule_id: str = "") -> tuple[str, bool]:
+    """Apply one table result. none and refresh change nothing here.
 
-    pane_transition chooses working, done, or none. This is the only path
-    that paints working or done. A none result does not drop the owner row
-    and does not change owners, idents, busy, or the proven pid. pane_next
-    may still store the next phase, and that store is not a drop. A proven
+    pane_transition chooses working, done, paint_blocked, refresh, or none.
+    none does not assign phase, busy, or an owner row, and it does not write
+    a tty. A weak process_exit stays unstored. A live idle_clear owner is
+    not rewritten to weak. refresh is applied by the caller as a timestamp
+    only. paint_blocked is the only result that calls emit_osc. A proven
     outer that is already gone makes Stop, SessionEnd, and a prompt into
     process_exit, so they still choose done. The held tty is written only
     when its pid is that owner. A mismatched or unconfirmed held pid writes
     nothing and does not open another tty. A failed done write does not
     change the phase. The caller drops the row after a done write has
-    succeeded, including when this store has already moved the phase to
-    exited.
+    succeeded.
     """
     event = _chooser_event(state, event)
     phase = _phase_for_event(state, event)
     write = pane_transition(phase, event)
-    ok = True
+    if write == "none" or write == "refresh":
+        return write, True
+    if write == "paint_blocked":
+        return write, emit_osc(state, "blocked", rule_id)
     if write == "done":
         _save_proven_owner(state)
         ok = _paint_one_owner(state, "idle")
-    elif write == "working":
-        ok = _paint_one_owner(state, "working")
-    if write == "done" and not ok:
+        if not ok:
+            return write, ok
+        state["phase"] = pane_next(phase, event)
         return write, ok
-    state["phase"] = pane_next(phase, event)
-    return write, ok
+    if write == "working":
+        ok = _paint_one_owner(state, "working")
+        state["phase"] = pane_next(phase, event)
+        return write, ok
+    raise ValueError(write)
+
+
+def commit_blocked(_pane: str, path: str, rule_id: str = "") -> tuple[str, bool]:
+    """Run the blocked event through the table and paint only that result."""
+    chosen = {"write": "none", "ok": False}
+
+    def apply(current: dict, chosen: dict = chosen, rule_id: str = rule_id) -> None:
+        write, ok = commit_pane(current, "blocked", rule_id)
+        chosen["write"] = write
+        chosen["ok"] = ok
+
+    update(path, apply)
+    return str(chosen["write"]), bool(chosen["ok"])
 
 
 def gone_confirmed(since, now: float, hits: int) -> bool:
@@ -2231,9 +2261,10 @@ def clear_idle_if_current(current: dict, generation: int, keys: list) -> bool:
     """Write idle_clear only when this generation is still the current one.
 
     A newer prompt must not be painted done. A failed done leaves the row.
+    none does not release and does not change the row.
     """
     write, ok = commit_if_current(current, screen_event(current, "timer"), generation)
-    if write == "done" and not ok:
+    if write != "done" or not ok:
         return False
     if current.get("phase") != "idle_clear":
         return False
@@ -2605,7 +2636,7 @@ def _watch_loop(pane: str, path: str) -> None:
             live_wait = [pid for pid in current_owners if not _pid_gone(pid)]
             # An empty owner list drops the previous pid. A list whose pids
             # are already gone does too, so kill(0) is not spun on a miss.
-            known_owners = live_wait or []
+            known_owners = live_wait
             pane_owner = _pane_owner(state)
             owner_alive = False
             # pane_transition returns working, done, or none. commit_pane
@@ -2673,9 +2704,12 @@ def _watch_loop(pane: str, path: str) -> None:
             if blocked:
                 quiet_since = None
                 if reported != "blocked":
-                    reported, misses = note_report(pane, path, "blocked", reported, misses)
-                    if reported is None and misses >= 30:
-                        return
+                    rule_id = str(view.get("id") or "")
+                    write, ok = commit_blocked(pane, path, rule_id)
+                    if write == "paint_blocked" and ok:
+                        reported, misses = note_report(pane, path, "blocked", reported, misses)
+                        if reported is None and misses >= 30:
+                            return
                 continue
             if banner:
                 quiet_since = None
@@ -2869,7 +2903,7 @@ def main() -> int:
                 _drop_done_owner(state, owner_now[0])
         revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
         if event in END_EVENTS:
-            revised["phase"] = state.get("phase") or revised.get("phase") or ""
+            revised["phase"] = state.get("phase") or ""
             if state.get("proven_pid"):
                 revised["proven_pid"] = state.get("proven_pid")
                 revised["proven_ident"] = state.get("proven_ident") or ""
@@ -2900,7 +2934,10 @@ def main() -> int:
     elif kind == "working" and chosen["write"] == "working":
         send_report(pane, path, "working")
     elif kind == "blocked":
-        send_report(pane, path, kind)
+        rule_id = str(screen_view(screen).get("id") or "")
+        write, ok = commit_blocked(pane, path, rule_id)
+        if write == "paint_blocked" and ok:
+            send_report(pane, path, kind)
     if chosen["release"]:
         release_authority(pane, path)
     return 0
