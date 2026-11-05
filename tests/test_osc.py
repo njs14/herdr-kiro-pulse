@@ -2441,7 +2441,10 @@ class StdoutTtyTests(unittest.TestCase):
                     self.assertEqual(written, "")
                     self.assertEqual(_drain(owner_master), b"")
                 self.assertEqual(_drain(other_master), b"")
-                self.assertNotIn("/dev/tty", written)
+                # macOS names the pty /dev/ttys000. That string contains the
+                # characters /dev/tty, so the forbidden device is an exact path.
+                self.assertNotEqual(written, "/dev/tty")
+                self.assertTrue(not written or osc._TTY.fullmatch(written))
 
 
 def _drain(master):
