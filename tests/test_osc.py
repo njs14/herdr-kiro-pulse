@@ -1441,6 +1441,7 @@ class ReapedExitTests(unittest.TestCase):
             return real_hires(pid)
 
         def seed(state):
+            state["aggregate"] = 1
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": outer.pid}
             state["owner_ident"] = {"sess": outer_start}
@@ -1483,7 +1484,7 @@ class ReapedExitTests(unittest.TestCase):
                     _live_start(outer.pid),
                     0,
                 )
-                revised["phase"] = current.get("phase") or revised.get("phase") or ""
+                revised["phase"] = current.get("phase")
                 if current.get("proven_pid"):
                     revised["proven_pid"] = current.get("proven_pid")
                     revised["proven_ident"] = current.get("proven_ident") or ""
@@ -1810,6 +1811,7 @@ class AncestorReportTests(unittest.TestCase):
 
         def seed(state):
             state["watcher"] = 0
+            state["aggregate"] = 1
             state["generation"] = 3
             state["busy"] = {"sess": time.time()}
             state["owners"] = {} if kind == "chat" else {"sess": owner_pid}
@@ -2040,6 +2042,7 @@ class AboveSkippedPidTests(unittest.TestCase):
 
         def seed(state):
             state["watcher"] = 0
+            state["aggregate"] = 1
             state["generation"] = 3
             state["busy"] = {"sess": time.time()}
             state["owners"] = {} if kind == "chat" else {"sess": mid_pid}

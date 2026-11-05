@@ -128,23 +128,6 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(state["grace_until"], 0.0)
         self.assertEqual(hook.next_action(0, state["grace_until"], False, 4.05), "idle")
 
-    def test_banner_does_not_start_the_settle_grace(self):
-        state = hook.fresh_state()
-        state = hook.apply_event(state, "Stop", "parent", 5)
-        self.assertEqual(state["grace_until"], 0.0)
-        state = hook.note_banner(state, 20)
-        self.assertEqual(state["grace_until"], 0.0)
-        self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], True, 20),
-            "working",
-        )
-        quiet = hook.note_banner(state, 21)
-        self.assertEqual(quiet["grace_until"], 0.0)
-        self.assertEqual(
-            hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, 21),
-            "idle",
-        )
-
     def test_stale_session_is_dropped(self):
         state = hook.fresh_state()
         state = hook.apply_event(state, "UserPromptSubmit", "stuck", 0)
@@ -665,8 +648,6 @@ class GraceTests(unittest.TestCase):
         state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0)
         self.assertNotEqual(state["generation"], seen)
         self.assertIn("sess", state["busy"])
-        self.assertFalse(hook.release_if_current(state, seen, ["sess"]))
-        self.assertIn("sess", state["busy"])
 
     def test_late_release_does_not_fire_after_the_slot_moves(self):
         directory = tempfile.mkdtemp()
@@ -687,17 +668,6 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(calls, [])
         with open(path, encoding="utf-8") as handle:
             self.assertIn("sess", json.load(handle)["busy"])
-
-    def test_newer_session_survives_a_stale_clear(self):
-        state = hook.fresh_state()
-        state = hook.apply_event(state, "SessionStart", "older", 1.0)
-        seen = state["generation"]
-        state = hook.apply_event(state, "SessionStart", "newer", 2.0)
-        self.assertNotEqual(state["generation"], seen)
-        self.assertFalse(hook.release_if_current(state, seen, ["older"]))
-        self.assertIn("older", state["busy"])
-        self.assertIn("newer", state["busy"])
-        self.assertFalse(state["retiring"])
 
     def test_retiring_watcher_does_not_block_the_next_one(self):
         directory = tempfile.mkdtemp()
@@ -833,18 +803,6 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(view["state"], "blocked")
         self.assertEqual(view["id"], "crew_approval")
         self.assertEqual(hook.report_for(screen, "working"), "blocked")
-
-    def test_duplicate_start_clears_when_the_screen_stays_idle(self):
-        state = hook.fresh_state()
-        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 1)
-        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 2)
-        self.assertEqual(state["aggregate"], 2)
-        quiet = "› ask a question or describe a task\n"
-        self.assertTrue(hook.screen_is_quiet(quiet))
-        self.assertTrue(hook.release_if_current(state, state["generation"], list(state["busy"])))
-        self.assertEqual(state["aggregate"], 0)
-        self.assertEqual(state["busy"], {})
-        self.assertEqual(hook.next_action(0, state["grace_until"], False, 3), "idle")
 
     def test_quiet_screen_waits_before_clearing_a_live_slot(self):
         state = hook.fresh_state()
@@ -1078,6 +1036,7 @@ class GraceTests(unittest.TestCase):
         self.addCleanup(pinned.stop)
 
         def seed(state):
+            state["aggregate"] = 1
             state["busy"] = {"sess": time.time()}
             state["owners"] = {"sess": owner.pid}
             state["owner_ident"] = {"sess": hook.hires_start(state["owners"]["sess"])}
@@ -1648,6 +1607,7 @@ class GraceTests(unittest.TestCase):
                 path,
                 lambda state: state.update(
                     {
+                        "aggregate": 1,
                         "busy": {},
                         "grace_until": 0,
                         "proven_pid": owner.pid,
@@ -1936,6 +1896,7 @@ class PaneFindingTests(unittest.TestCase):
             self.assertFalse(hook.identity_proven(50, "10"))
             self.assertIsNotNone(hook.process_snapshot(50))
             self.assertEqual(hook.owner_phase(state), "proven")
+            state["aggregate"] = 1
             write, ok = hook.commit_pane(state, "start")
             self.assertEqual((write, ok, state["phase"]), ("working", True, "proven"))
             self.assertEqual(painted, [("working", 50, "100.000000", -1, "")])
@@ -1946,8 +1907,6 @@ class PaneFindingTests(unittest.TestCase):
             self.assertEqual(state["phase"], "idle_clear")
             self.assertEqual(state["proven_pid"], 50)
             self.assertIn("sess", state["owners"])
-            self.assertTrue(hook.release_if_current(state, 4, ["sess"]))
-            self.assertNotIn("sess", state["owners"])
             painted.clear()
             write, _ok = hook.commit_pane(state, "stop")
             self.assertEqual(write, "done")
@@ -2054,6 +2013,7 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", hires),
             mock.patch.object(hook, "paint_status", paint),
         ):
+            state["aggregate"] = 1
             write, _ok = hook.commit_pane(state, "prompt")
         self.assertEqual(write, "working")
         self.assertEqual(painted, [("working", 50, "100.000000", -1, "")])
@@ -2096,7 +2056,7 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.object(hook, "paint_status", return_value=True) as paint,
         ):
-            cleared = hook.clear_idle_if_current(state, 4, ["sess"])
+            cleared = hook.clear_idle_if_current(state, 4)
         self.assertFalse(cleared)
         self.assertEqual(state["phase"], "")
         self.assertIn("sess", state["owners"])
@@ -2256,11 +2216,16 @@ class PaneFindingTests(unittest.TestCase):
             ):
                 self.assertEqual(hook.main(), 0)
         done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
-        self.assertIn(done, _read_pty(master))
-        self.assertIn(("release-agent", "t7"), [args[:2] for args in calls])
         with open(path, encoding="utf-8") as handle:
             saved = json.load(handle)
-        self.assertNotIn("sess", saved.get("owners") or {})
+        if event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            self.assertNotIn(done, _read_pty(master))
+            self.assertNotIn(("release-agent", "t7"), [args[:2] for args in calls])
+            self.assertEqual(saved["owners"].get("sess"), proc.pid)
+        else:
+            self.assertIn(done, _read_pty(master))
+            self.assertIn(("release-agent", "t7"), [args[:2] for args in calls])
+            self.assertNotIn("sess", saved.get("owners") or {})
         hook._close_held_fd()
 
     def test_gone_chat_leaves_the_wait_set(self):
@@ -2951,7 +2916,7 @@ class PriorFindingTableTests(unittest.TestCase):
                 write, _ok = hook.commit_pane(sample, event)
                 self.assertEqual(write, "none", event)
                 self.assertEqual(_owner_fields(sample), before, event)
-            self.assertFalse(hook.clear_idle_if_current(state, 1, ["sess"]))
+            self.assertFalse(hook.clear_idle_if_current(state, 1))
         self.assertEqual(state["owners"].get("sess"), proc.pid)
         self.assertIn("sess", state["busy"])
         self.assertEqual(state["phase"], "idle_clear")
@@ -3289,7 +3254,7 @@ class PriorFindingTableTests(unittest.TestCase):
         state["busy"] = {"sess": 1.0}
         state["generation"] = 1
         with mock.patch.object(hook, "paint_status", return_value=True) as paint:
-            self.assertFalse(hook.clear_idle_if_current(state, 1, ["sess"]))
+            self.assertFalse(hook.clear_idle_if_current(state, 1))
         self.assertIn("sess", state["busy"])
         self.assertEqual(state["owners"], {})
         self.assertNotEqual(state["phase"], "idle_clear")
@@ -3519,6 +3484,7 @@ class SettledDecisionTests(unittest.TestCase):
 
     def _row_exit_prompt(self, _row):
         state = self._blocked_owner("proven", "100.000000")
+        state["aggregate"] = 1
         with (
             self._live()[0],
             self._live()[1],
@@ -3606,6 +3572,8 @@ class SettledDecisionTests(unittest.TestCase):
 
 
 class PaneWriteMatrixTests(unittest.TestCase):
+    _FLOOR = 50
+
     def test_every_event_against_every_owner_and_count(self):
         events = (
             "SessionStart",
@@ -3616,6 +3584,10 @@ class PaneWriteMatrixTests(unittest.TestCase):
             "SessionEnd",
             "blocked",
             "watcher",
+            "no_session_prompt",
+            "no_session_start",
+            "watcher_continue",
+            "watcher_banner",
         )
         owners = ("no_owner", "weak", "proven", "outer_gone", "chat_gone")
         counts = (0, 1, 2)
@@ -3645,14 +3617,16 @@ class PaneWriteMatrixTests(unittest.TestCase):
         raw = json.dumps(state)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(raw)
-        floor = hook.seq_floor_path(path)
-        if os.path.exists(floor):
-            os.remove(floor)
+        floor_path = hook.seq_floor_path(path)
+        with open(floor_path, "w", encoding="utf-8") as handle:
+            handle.write(str(self._FLOOR))
         tty = []
         released = []
         with self._patches(owner, tty, released, now):
             if event in ("blocked", "watcher"):
                 hook.commit_blocked(path, "workflow_requires_approval")
+            elif event in ("no_session_prompt", "no_session_start", "watcher_continue", "watcher_banner"):
+                self._direct(path, event)
             else:
                 with (
                     mock.patch.object(sys, "argv", ["herdr-kiro", event]),
@@ -3661,94 +3635,186 @@ class PaneWriteMatrixTests(unittest.TestCase):
                     self.assertEqual(hook.main(), 0)
         with open(path, "rb") as handle:
             saved = handle.read()
-        self._assert_saved(owner, count, event, raw, saved, tty, released, now)
+        with open(floor_path, encoding="utf-8") as handle:
+            floor_text = handle.read()
+        self._assert_saved(owner, count, event, raw, saved, tty, released, now, floor_text)
 
-    def _assert_saved(self, owner, count, event, raw, saved, tty, released, now):
+    def _direct(self, path, event):
+        """The watcher and a call that omits session. Both go through update."""
+
+        def apply(current, event=event):
+            if event == "no_session_prompt":
+                hook.commit_pane(current, "prompt")
+            elif event == "no_session_start":
+                hook.commit_pane(current, "start")
+            elif event == "watcher_continue":
+                hook.commit_pane(current, hook.screen_event(current, "continue"))
+            elif event == "watcher_banner":
+                hook.commit_pane(current, hook.screen_event(current, "banner"))
+            else:
+                raise AssertionError(event)
+
+        hook.update(path, apply)
+
+    def _assert_saved(self, owner, count, event, raw, saved, tty, released, now, floor_text):
         before = json.loads(raw)
-        after = json.loads(saved)
-        kind = self._kind(owner, event, count)
-        prompts = ("UserPromptSubmit", "PreToolUse", "PostToolUse")
-        ends = ("Stop", "SessionEnd")
-        if kind == "none":
+        expected, want_tty, want_released, want_floor = self._snapshot(before, owner, count, event, now)
+        self.assertEqual(tty, want_tty)
+        self.assertEqual(released, want_released)
+        self.assertEqual(floor_text, want_floor)
+        if expected is None:
             self.assertEqual(saved, raw.encode())
-            self.assertEqual(after, before)
-            self.assertEqual(tty, [])
-            self.assertEqual(released, [])
-        elif kind == "refresh":
-            self.assertIn(owner, ("proven", "chat_gone"))
-            self.assertEqual(tty, [])
-            self.assertEqual(released, [])
-            self.assertEqual(after["generation"], before["generation"])
-            self.assertEqual(after["busy"][hook.AGGREGATE], now)
-            self.assertNotEqual(after["busy"][hook.AGGREGATE], before["busy"][hook.AGGREGATE])
-            restored = json.loads(saved)
-            restored["busy"][hook.AGGREGATE] = before["busy"][hook.AGGREGATE]
-            self.assertEqual(restored, before)
-        elif kind == "paint_blocked":
-            self.assertEqual(saved, raw.encode())
-            self.assertEqual(after, before)
-            self.assertEqual(tty, [("osc", 50)])
-            self.assertEqual(released, [])
-        elif kind == "done_dead":
-            self.assertEqual(owner, "outer_gone")
-            self.assertIn(("paint", "idle", 50), tty)
-            self.assertNotIn("osc", [item[0] for item in tty])
-        if owner in ("proven", "weak", "chat_gone"):
-            self.assertEqual(after["owners"].get(hook.AGGREGATE), 50)
-            self.assertIn(hook.AGGREGATE, after["busy"])
-        if owner == "weak":
-            self.assertEqual(tty, [])
-        if event in prompts and count == 0:
-            self.assertEqual(tty, [])
-            self.assertEqual(after["owners"], before["owners"])
-            self.assertEqual(set(after["busy"]), set(before["busy"]))
-            self.assertEqual(after["generation"], before["generation"])
-            self.assertEqual(after["phase"], before["phase"])
-            self.assertEqual(released, [])
-        if event == "SessionStart" and owner != "outer_gone":
-            self.assertEqual(after["aggregate"], count + 1)
-            self.assertEqual(after["grace_until"], 0.0)
-            self.assertEqual(after["busy"][hook.AGGREGATE], now)
-        if event in prompts and count > 0 and owner != "outer_gone":
-            self.assertEqual(after["aggregate"], count)
-            self.assertEqual(after["grace_until"], before["grace_until"])
-            self.assertEqual(after["busy"][hook.AGGREGATE], now)
-        if event in ends and count > 1:
-            self.assertEqual(after["aggregate"], count - 1)
-            self.assertEqual(after["grace_until"], 0.0)
-            self.assertEqual(after["phase"], before["phase"])
-            self.assertEqual(after["owners"], before["owners"])
-            self.assertEqual(after["owner_ident"], before["owner_ident"])
-            self.assertEqual(tty, [])
-        if event in ends and count == 1 and owner == "no_owner":
-            self.assertEqual(tty, [])
-            self.assertNotIn(hook.AGGREGATE, after["busy"])
-            self.assertEqual(after["aggregate"], 0)
-            self.assertEqual(released, [])
-        if event in ends and count == 1 and owner in ("proven", "chat_gone"):
-            self.assertIn(("paint", "idle", 50), tty)
-            self.assertEqual(after["phase"], "idle_clear")
-            self.assertEqual(after["aggregate"], count)
-            self.assertEqual(released, [])
-        if event in ends and count == 1 and owner == "outer_gone":
-            self.assertIn(("paint", "idle", 50), tty)
-            self.assertEqual(released, ["release"])
+            self.assertEqual(json.loads(saved), before)
+            return
+        self.assertEqual(json.loads(saved), expected)
+        self.assertEqual(saved, json.dumps(expected).encode())
 
-    def _kind(self, owner, event, count):
+    def _is_unchanged(self, owner, count, event):
         live = owner in ("proven", "chat_gone")
         prompts = ("UserPromptSubmit", "PreToolUse", "PostToolUse")
         ends = ("Stop", "SessionEnd")
-        if (event in prompts or event in ends) and count == 0:
-            return "refresh" if live else "none"
+        direct = ("no_session_prompt", "no_session_start", "watcher_continue", "watcher_banner")
         if event in ("blocked", "watcher"):
-            if live:
-                return "paint_blocked"
-            if owner == "outer_gone":
-                return "done_dead"
-            return "none"
-        if event in ends and count == 1 and owner == "weak":
-            return "none"
-        return "mutate"
+            return owner in ("no_owner", "weak")
+        if event in direct:
+            return owner in ("no_owner", "weak") or (count == 0 and not live)
+        if count == 0 and event in prompts + ends:
+            return not live
+        return event in ends and count == 1 and owner == "weak"
+
+    def _is_refresh(self, owner, count, event):
+        prompts = ("UserPromptSubmit", "PreToolUse", "PostToolUse")
+        ends = ("Stop", "SessionEnd")
+        direct = ("no_session_prompt", "no_session_start", "watcher_continue", "watcher_banner")
+        return count == 0 and owner in ("proven", "chat_gone") and event in prompts + ends + direct
+
+    def _snapshot(self, before, owner, count, event, now):
+        """The whole pane file, the seq floor, and every tty write for one cell.
+
+        none keeps the saved bytes and the floor file. SessionStart is
+        record_aggregate: a gone proven owner is not painted done, dropped,
+        or released.
+        """
+        if self._is_unchanged(owner, count, event):
+            return None, [], [], str(self._FLOOR)
+        expected = json.loads(json.dumps(before))
+        if self._is_refresh(owner, count, event):
+            expected["busy"][hook.AGGREGATE] = now
+            expected["seq"] = self._FLOOR
+            return expected, [], [], str(self._FLOOR)
+        if event in (
+            "blocked",
+            "watcher",
+            "no_session_prompt",
+            "no_session_start",
+            "watcher_continue",
+            "watcher_banner",
+        ):
+            return self._snapshot_side(expected, owner, event)
+        return self._snapshot_hook(expected, owner, count, event, now)
+
+    def _snapshot_side(self, expected, owner, event):
+        if event in ("blocked", "watcher") and owner in ("proven", "chat_gone"):
+            expected["seq"] = self._FLOOR
+            return expected, [("osc", 50)], [], str(self._FLOOR)
+        if owner == "outer_gone":
+            self._exit_row(expected)
+            expected["seq"] = self._FLOOR
+            return expected, [("paint", "idle", 50)], [], str(self._FLOOR)
+        expected["seq"] = self._FLOOR
+        return expected, [("paint", "working", 50)], [], str(self._FLOOR)
+
+    def _snapshot_hook(self, expected, owner, count, event, now):
+        if event == "SessionStart":
+            return self._snapshot_start(expected, owner, count, now)
+        if event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            return self._snapshot_prompt(expected, owner, now)
+        if event in ("Stop", "SessionEnd") and count > 1:
+            return self._snapshot_partial(expected, owner, count, now)
+        if event in ("Stop", "SessionEnd") and count == 1:
+            return self._snapshot_end(expected, owner)
+        raise AssertionError((owner, count, event))
+
+    def _snapshot_start(self, expected, owner, count, now):
+        self._record(expected, owner, now)
+        expected["aggregate"] = count + 1
+        if owner in ("outer_gone", "weak"):
+            expected["seq"] = self._FLOOR
+            return expected, [], [], str(self._FLOOR)
+        expected["phase"] = "proven"
+        return expected, [("paint", "working", 50)], [], self._report(expected, "working")
+
+    def _snapshot_prompt(self, expected, owner, now):
+        self._touch(expected, owner, now)
+        if owner == "outer_gone":
+            self._exit_row(expected)
+            return expected, [("paint", "idle", 50)], ["release"], self._report(expected, "idle")
+        if owner == "weak":
+            expected["seq"] = self._FLOOR
+            return expected, [], [], str(self._FLOOR)
+        expected["phase"] = "proven"
+        return expected, [("paint", "working", 50)], [], self._report(expected, "working")
+
+    def _snapshot_partial(self, expected, owner, count, now):
+        expected["aggregate"] = count - 1
+        expected["grace_until"] = 0.0
+        expected["busy"][hook.AGGREGATE] = now
+        expected["generation"] = 8
+        self._chat(expected, owner)
+        expected["seq"] = self._FLOOR
+        return expected, [], [], str(self._FLOOR)
+
+    def _snapshot_end(self, expected, owner):
+        expected["generation"] = 8
+        self._chat(expected, owner)
+        if owner == "no_owner":
+            expected["aggregate"] = 0
+            expected["busy"].pop(hook.AGGREGATE, None)
+            return expected, [], [], self._report(expected, "idle")
+        if owner == "outer_gone":
+            self._exit_row(expected)
+            expected["aggregate"] = 0
+            return expected, [("paint", "idle", 50)], ["release"], self._report(expected, "idle")
+        expected["phase"] = "idle_clear"
+        return expected, [("paint", "idle", 50)], [], self._report(expected, "idle")
+
+    def _record(self, expected, owner, now):
+        expected["grace_until"] = 0.0
+        expected["busy"][hook.AGGREGATE] = now
+        expected["generation"] = 8
+        self._remember(expected, owner)
+        self._chat(expected, owner)
+
+    def _touch(self, expected, owner, now):
+        expected["busy"][hook.AGGREGATE] = now
+        expected["generation"] = 8
+        self._remember(expected, owner)
+        self._chat(expected, owner)
+
+    def _remember(self, expected, owner):
+        expected["owners"][hook.AGGREGATE] = 50
+        if owner == "weak":
+            expected["owner_ident"].pop(hook.AGGREGATE, None)
+        elif owner == "no_owner":
+            expected["owner_ident"][hook.AGGREGATE] = "100.000000"
+
+    def _chat(self, expected, owner):
+        if owner != "chat_gone":
+            return
+        expected["chat_pid"] = 70
+        expected["chat_ident"] = ""
+
+    def _exit_row(self, expected):
+        expected["phase"] = "exited"
+        expected["busy"].pop(hook.AGGREGATE, None)
+        expected["owners"].pop(hook.AGGREGATE, None)
+        expected["owner_ident"].pop(hook.AGGREGATE, None)
+
+    def _report(self, expected, kind):
+        expected["seq"] = self._FLOOR + 1
+        if kind == "idle":
+            expected["grace_until"] = 0.0
+        return str(expected["seq"])
 
     def _fixture(self, owner, count, now):
         state = hook.fresh_state()
@@ -3793,7 +3859,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
         released = []
 
         def apply(current):
-            hook.clear_idle_if_current(current, 7, list(current["busy"]))
+            hook.clear_idle_if_current(current, 7)
 
         with self._patches("proven", tty, released, now):
             hook.update(path, apply)
