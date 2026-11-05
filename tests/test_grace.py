@@ -2182,11 +2182,15 @@ class PaneFindingTests(unittest.TestCase):
         )
         self.addCleanup(lambda: proc.poll() is not None or proc.kill())
         hook.begin_tick()
-        token = hook.hires_start(proc.pid)
-        self.assertTrue(hook.fine_start(token), token)
+        # Where /proc start ticks are absent, hires_start is sec: plus a
+        # whole-second lstart. That form is unproven. The exit under test
+        # is a fractional token that matched while the pid was alive.
+        start = "100.000000"
+        self.assertTrue(hook.fine_start(start))
         hook._close_held_fd()
-        hook._hold_live_owner(proc.pid, token)
-        self.assertGreaterEqual(hook._pane_fd, 0)
+        with pin_owner(proc.pid, start):
+            hook._hold_live_owner(proc.pid, start)
+            self.assertGreaterEqual(hook._pane_fd, 0)
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=5)
         hook.begin_tick()
@@ -2207,7 +2211,7 @@ class PaneFindingTests(unittest.TestCase):
             def seed(state):
                 state["busy"] = {"sess": time.time()}
                 state["owners"] = {"sess": proc.pid}
-                state["owner_ident"] = {"sess": token}
+                state["owner_ident"] = {"sess": start}
                 state["phase"] = phase
                 state["seq"] = 4
 

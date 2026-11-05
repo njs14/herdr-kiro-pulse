@@ -2328,8 +2328,11 @@ class StdoutTtyTests(unittest.TestCase):
         )
         self.addCleanup(lambda: proc.poll() is not None or proc.kill())
         hook.begin_tick()
-        token = hook.hires_start(proc.pid)
-        self.assertTrue(hook.fine_start(token), token)
+        # A host without /proc start ticks reports sec: plus a whole-second
+        # lstart. That token is unproven. This exit uses a fractional token
+        # recorded while the pid was alive.
+        start = "100.000000"
+        self.assertTrue(hook.fine_start(start))
         real_isdir = os.path.isdir
 
         def hide_proc(path):
@@ -2345,15 +2348,16 @@ class StdoutTtyTests(unittest.TestCase):
             mock.patch.object(osc.os.path, "isdir", hide_proc),
             mock.patch.object(osc, "_lsof_text", lambda _pid: lsof_text),
             mock.patch.object(osc, "_fd_devices", lambda _pid: {"1": owner}),
+            mock.patch.object(hook, "hires_start", lambda _pid: start),
         ):
-            hook._hold_live_owner(proc.pid, token)
+            hook._hold_live_owner(proc.pid, start)
         self.assertGreaterEqual(hook._pane_fd, 0)
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=5)
         hook.begin_tick()
         state = hook.fresh_state()
         state["owners"] = {"sess": proc.pid}
-        state["owner_ident"] = {"sess": token}
+        state["owner_ident"] = {"sess": start}
         state["phase"] = "proven"
         state["busy"] = {"sess": 1.0}
         env = {"HERDR_ENV": "", "HERDR_PANE_ID": "", "HC_TERMINAL_ID": "t7"}
