@@ -25,6 +25,30 @@ import herdr_kiro_osc as osc
 import herdr_kiro_state as hook
 
 
+def _reaped_pid():
+    """A pid this process has waited out. kill reports ESRCH until reuse."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pid = proc.pid
+    proc.kill()
+    proc.wait(timeout=5)
+    return pid
+
+
+def _gone_pid():
+    """A reaped pid that is still absent. A live pid is not an exited owner."""
+    for _ in range(8):
+        pid = _reaped_pid()
+        if hook._pid_gone(pid):
+            return pid
+    raise AssertionError("reaped pid stayed visible")
+
+
 def _read_ready(fd, timeout):
     """Read until the pty is quiet. One write can arrive as its own read."""
     deadline = time.monotonic() + timeout
@@ -528,9 +552,10 @@ class AppExitOscTests(unittest.TestCase):
         master, slave = os.openpty()
         self.addCleanup(os.close, master)
         self.addCleanup(os.close, slave)
+        owner = _gone_pid()
         hook._pane_fd = os.dup(slave)
         hook._held_ident = "100.000000"
-        hook._held_pid = 4242
+        hook._held_pid = owner
 
         def drop_held():
             fd = hook._pane_fd
@@ -544,7 +569,7 @@ class AppExitOscTests(unittest.TestCase):
         env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
         done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
         busy = {"sess": time.time()}
-        owners = {"sess": 4242}
+        owners = {"sess": owner}
         path = os.path.join(directory, "owner-exit.json")
         self._seed(path, busy=busy, owners=owners)
         ok, order, payloads, _pid_lists = self._finish(path, "t7", env)
@@ -569,6 +594,7 @@ proto = sys.argv[2]
 held = int(sys.argv[3])
 path = sys.argv[4]
 result = sys.argv[5]
+owner = int(sys.argv[6])
 os.environ["HC_TERMINAL_ID"] = "t7"
 os.environ["HERDR_ENV"] = ""
 os.environ["HERDR_PANE_ID"] = ""
@@ -582,7 +608,7 @@ if mode == "mid":
     os.set_inheritable(held, True)
     with open(result + ".err", "w", encoding="utf-8") as err:
         proc = subprocess.Popen(
-            [sys.executable, __file__, "leaf", proto, str(held), path, result],
+            [sys.executable, __file__, "leaf", proto, str(held), path, result, str(owner)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=err,
@@ -592,9 +618,11 @@ if mode == "mid":
         code = proc.wait(timeout=20)
     raise SystemExit(code)
 
+if not hook._pid_gone(owner):
+    raise SystemExit(2)
 hook._pane_fd = held
 hook._held_ident = "100.000000"
-hook._held_pid = 4242
+hook._held_pid = owner
 ok = hook.apply_owner_exit("t7", path)
 with open(result, "w", encoding="utf-8") as handle:
     handle.write("ok\\n" if ok else "miss\\n")
@@ -1524,25 +1552,31 @@ class ReapedExitTests(unittest.TestCase):
         state["watcher"] = 0
         state["generation"] = 3
         state["busy"] = {"sess": time.time()}
-        state["owners"] = {"sess": 4242}
         state["owner_ident"] = {"sess": "100.000000"}
         state["phase"] = "proven"
         state["seq"] = 4
-        self._write_state(path, state)
         proto = os.path.dirname(os.path.abspath(hook.__file__))
-        proc = subprocess.Popen(
-            [sys.executable, driver, "mid", proto, str(held_slave), path, result],
-            stdin=subprocess.DEVNULL,
-            stdout=parent_slave,
-            stderr=subprocess.PIPE,
-            pass_fds=(held_slave,),
-        )
-        try:
-            _out, err = proc.communicate(timeout=20)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-            raise
+        proc = None
+        err = b""
+        for _ in range(8):
+            owner = _gone_pid()
+            state["owners"] = {"sess": owner}
+            self._write_state(path, state)
+            proc = subprocess.Popen(
+                [sys.executable, driver, "mid", proto, str(held_slave), path, result, str(owner)],
+                stdin=subprocess.DEVNULL,
+                stdout=parent_slave,
+                stderr=subprocess.PIPE,
+                pass_fds=(held_slave,),
+            )
+            try:
+                _out, err = proc.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+                raise
+            if proc.returncode != 2:
+                break
         detail = err.decode("utf-8", "replace")
         err_path = result + ".err"
         if os.path.exists(err_path):
@@ -2248,13 +2282,14 @@ class StdoutTtyTests(unittest.TestCase):
                 self.assertEqual(_drain(other_master), b"")
 
         # The exit write uses the fd recorded for that stdout, not a new open.
+        owner = _gone_pid()
         hook._close_held_fd()
         hook._pane_fd = os.dup(owner_slave)
         hook._held_ident = "100.000000"
-        hook._held_pid = 4242
+        hook._held_pid = owner
         self.addCleanup(hook._close_held_fd)
         state = hook.fresh_state()
-        state["owners"] = {"sess": 4242}
+        state["owners"] = {"sess": owner}
         state["owner_ident"] = {"sess": "100.000000"}
         state["phase"] = "proven"
         state["busy"] = {"sess": 1.0}
