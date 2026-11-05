@@ -193,92 +193,6 @@ def fresh_state() -> dict:
     }
 
 
-def normalize(state: dict, now: float) -> dict:
-    raw_busy = state.get("busy")
-    raw_owners = state.get("owners")
-    raw_ident = state.get("owner_ident")
-    busy = raw_busy if isinstance(raw_busy, dict) else {}
-    owners = raw_owners if isinstance(raw_owners, dict) else {}
-    owner_ident = raw_ident if isinstance(raw_ident, dict) else {}
-    kept = {}
-    kept_owners = {}
-    kept_ident = {}
-    for session, stamp in busy.items():
-        try:
-            seen = float(stamp)
-        except (TypeError, ValueError):
-            continue
-        key = str(session)
-        # A session with an owner pid stays, live or dead, including a stamp
-        # older than STALE_SECS. A session with no owner pid drops once the
-        # stamp is that old.
-        if owners.get(key) or now - seen < STALE_SECS:
-            kept[key] = seen
-            if owners.get(key):
-                kept_owners[key] = owners.get(key)
-                raw_ident = owner_ident.get(key)
-                if isinstance(raw_ident, str):
-                    kept_ident[key] = raw_ident
-    raw_chat = state.get("chat_ident")
-    chat_ident = raw_chat if isinstance(raw_chat, str) else ""
-    if not fine_start(chat_ident):
-        chat_ident = ""
-    raw_proven = state.get("proven_ident")
-    proven_ident = raw_proven if isinstance(raw_proven, str) else ""
-    try:
-        proven_pid = int(state.get("proven_pid") or 0)
-    except (TypeError, ValueError):
-        proven_pid = 0
-    if not fine_start(proven_ident) or proven_pid <= 1:
-        proven_pid = 0
-        proven_ident = ""
-    try:
-        seq = int(state.get("seq") or 0)
-    except (TypeError, ValueError):
-        seq = 0
-    try:
-        grace_until = float(state.get("grace_until") or 0)
-    except (TypeError, ValueError):
-        grace_until = 0.0
-    try:
-        watcher = int(state.get("watcher") or 0)
-    except (TypeError, ValueError):
-        watcher = 0
-    try:
-        watcher_at = float(state.get("watcher_at") or 0)
-    except (TypeError, ValueError):
-        watcher_at = 0.0
-    try:
-        aggregate = int(state.get("aggregate") or 0)
-    except (TypeError, ValueError):
-        aggregate = 0
-    if AGGREGATE not in kept:
-        aggregate = 0
-    # The second normalize in update() sees an already-empty busy map, so a
-    # death noticed on the first pass would otherwise disappear. Keep the
-    # flag until a live owner is stored again.
-    owners_died = bool(state.get("owners_died")) and not kept and not kept_owners
-    return {
-        "busy": kept,
-        "seq": seq,
-        "grace_until": grace_until,
-        "watcher": watcher,
-        "watcher_at": watcher_at,
-        "watcher_started": state.get("watcher_started") or "",
-        "owners": kept_owners,
-        "owner_ident": kept_ident,
-        "phase": state.get("phase") if state.get("phase") in OWNER_STATES else "",
-        "aggregate": aggregate,
-        "generation": int(state.get("generation") or 0),
-        "retiring": bool(state.get("retiring")),
-        "owners_died": owners_died,
-        "chat_pid": int(state.get("chat_pid") or 0),
-        "chat_ident": chat_ident,
-        "proven_pid": proven_pid,
-        "proven_ident": proven_ident,
-    }
-
-
 def note_generation(previous: dict, nxt: dict) -> dict:
     """Advance generation for a pane write other than refresh.
 
@@ -533,7 +447,8 @@ def apply_event(
     """Apply the one table result for this hook callback.
 
     none returns the same state. refresh changes only the aggregate timestamp.
-    A Stop already at aggregate zero is aggregate_zero, not stop.
+    A Stop at aggregate zero is aggregate_zero only for the aggregate session.
+    A named Stop stays stop.
     """
     owner_before = _pane_owner(state)
     ev = choose_pane_event(state, event, session)
@@ -605,6 +520,8 @@ def update(path: str, fn):
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
+    existed = os.path.isfile(path)
+    silent = False
     fd = os.open(path, os.O_RDWR | os.O_CREAT, FILE_MODE)
     with os.fdopen(fd, "r+") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
@@ -615,12 +532,8 @@ def update(path: str, fn):
                 parsed = json.loads(raw)
             except ValueError:
                 parsed = None
-        if isinstance(parsed, dict):
-            loaded = parsed
-            keep_bytes = True
-        else:
-            loaded = fresh_state()
-            keep_bytes = False
+        readable = isinstance(parsed, dict)
+        loaded = parsed if readable else fresh_state()
         before = copy.deepcopy(loaded)
         _PANE_OUTCOME["write"] = ""
         fn(loaded)
@@ -629,32 +542,36 @@ def update(path: str, fn):
             seq = int(loaded.get("seq") or 0)
         except (TypeError, ValueError):
             seq = 0
-        unchanged = keep_bytes and loaded == before
-        # commit_pane none does not store a seq floor and does not rewrite
-        # the pane. A no-op that did not return none still raises seq.
-        if unchanged and _PANE_OUTCOME["write"] == "none":
-            os.chmod(path, FILE_MODE)
-            return loaded
-        if seq < floor:
-            loaded["seq"] = floor
-            unchanged = False
-        elif floor == 0 and seq == 0 and not unchanged:
-            # A deleted floor must not restart at seq 1. herdr ignores that.
-            loaded["seq"] = int(time.time())
-        if unchanged:
-            os.chmod(path, FILE_MODE)
-            return loaded
-        handle.seek(0)
-        handle.truncate()
-        handle.write(json.dumps(loaded))
-        handle.flush()
-        try:
-            written = int(loaded.get("seq") or 0)
-        except (TypeError, ValueError):
-            written = 0
-        write_seq_floor(path, written)
-        os.chmod(path, FILE_MODE)
-        return loaded
+        changed = loaded != before
+        write = _PANE_OUTCOME.get("write") or ""
+        # none, and a read that did not change the pane, leave the file and
+        # the seq floor untouched. A missing file is removed afterwards.
+        # Unreadable bytes stay. A real mutation still raises seq to the floor.
+        if not changed and write in ("", "none"):
+            silent = True
+        else:
+            if seq < floor:
+                loaded["seq"] = floor
+            elif floor == 0 and seq == 0 and (changed or not readable):
+                # A deleted floor must not restart at seq 1. herdr ignores that.
+                loaded["seq"] = int(time.time())
+            if readable and loaded == before:
+                silent = True
+            else:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(json.dumps(loaded))
+                handle.flush()
+                try:
+                    written = int(loaded.get("seq") or 0)
+                except (TypeError, ValueError):
+                    written = 0
+                write_seq_floor(path, written)
+                os.chmod(path, FILE_MODE)
+    if silent and not existed:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    return loaded
 
 
 def in_tui() -> bool:
@@ -846,7 +763,7 @@ def _write_held_fd() -> bool:
 def _watcher_still_us(path: str) -> bool:
     """True when this pid is still the watcher recorded in the state file.
 
-    Read the file directly. update() normalizes. A weak or sec: exit writes none and leaves the row.
+    Read the file directly. A weak or sec: exit writes none and leaves the row.
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -2358,7 +2275,7 @@ def commit_if_current(current: dict, event: str, generation: int) -> tuple[str, 
     A prompt that landed in the tick must not be overwritten with done.
     """
     if int(current.get("generation") or 0) != int(generation):
-        return "none", False
+        return _pane_result("none", False)
     return commit_pane(current, event)
 
 
@@ -2995,8 +2912,9 @@ def main() -> int:
         chosen["write"] = write
         chosen["ok"] = ok
         chosen["release"] = bool(_PANE_OUTCOME["release"])
-        # A busy hook can stamp the slot and then paint. A Stop already at
-        # aggregate zero is only refresh, so it is not also committed as stop.
+        # A busy hook can stamp the slot and then paint. A Stop at aggregate
+        # zero is refresh for a proven owner and none for every other phase.
+        # The follow-up commit is skipped because Stop is an end event.
         # SessionStart is record_aggregate, not an exit. Do not follow it
         # with start when that owner already owes process_exit.
         if event not in END_EVENTS and slot_ev != "aggregate_zero":
@@ -3020,7 +2938,9 @@ def main() -> int:
 
     state = update(path, fold)
     log(f"state event={event} busy={len(state['busy'])} grace_until={state['grace_until']:.3f}")
-    ensure_watcher(pane, path)
+    # none does not store the floor, claim the watcher, or spawn one.
+    if chosen["write"] != "none":
+        ensure_watcher(pane, path)
     screen = pane_text(pane) or ""
     action = next_action(
         len(state["busy"]),

@@ -6,6 +6,7 @@ the rest of a SessionStart grace. A named Stop does not start that grace.
 
 import ast
 import contextlib
+import copy
 import errno
 import inspect
 import io
@@ -127,13 +128,6 @@ class GraceTests(unittest.TestCase):
         state = hook.apply_event(state, "Stop", "b", 4)
         self.assertEqual(state["grace_until"], 0.0)
         self.assertEqual(hook.next_action(0, state["grace_until"], False, 4.05), "idle")
-
-    def test_stale_session_is_dropped(self):
-        state = hook.fresh_state()
-        state = hook.apply_event(state, "UserPromptSubmit", "stuck", 0)
-        later = hook.normalize(state, hook.STALE_SECS + 1)
-        self.assertEqual(later["busy"], {})
-        self.assertEqual(hook.next_action(0, later["grace_until"], False, hook.STALE_SECS + 1), "idle")
 
     def test_chooser_footer_is_an_approval(self):
         footer = "esc to close · ↑↓ to navigate · ↵ to select · Tab to edit"
@@ -305,13 +299,26 @@ class GraceTests(unittest.TestCase):
         raw["seq"] = 0
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(raw, handle)
-        state = hook.update(path, lambda _state: None)
+
+        def touch(state):
+            state["grace_until"] = 1
+
+        state = hook.update(path, touch)
         self.assertGreaterEqual(state["seq"], 50)
+        with open(path, "rb") as handle:
+            saved = handle.read()
+        hook.update(path, lambda _state: None)
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), saved)
 
     def test_state_file_is_private(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
-        hook.update(path, lambda _state: None)
+
+        def touch(state):
+            state["grace_until"] = 1
+
+        hook.update(path, touch)
         mode = os.stat(path).st_mode & 0o777
         self.assertEqual(mode, 0o600)
 
@@ -358,24 +365,6 @@ class GraceTests(unittest.TestCase):
         second = run()
         self.assertEqual(first, second)
         self.assertEqual(first, hook.AGGREGATE)
-
-    def test_dead_kiro_stays_until_the_exit_write(self):
-        state = hook.apply_event(
-            hook.fresh_state(),
-            "UserPromptSubmit",
-            "sess",
-            1,
-            owner=424242,
-            owner_started="old",
-        )
-
-        def gone(_pid):
-            return None
-
-        with mock.patch.object(hook, "process_snapshot", gone):
-            later = hook.normalize(state, 10)
-        self.assertEqual(later["owners"].get("sess"), 424242)
-        self.assertIn("sess", later["busy"])
 
     def test_a_live_unproven_pid_is_alive_and_not_painted(self):
         def snap(_pid):
@@ -704,10 +693,6 @@ class GraceTests(unittest.TestCase):
         def gone(_pid):
             return None
 
-        with mock.patch.object(hook, "process_snapshot", gone):
-            later = hook.normalize(state, 10)
-        self.assertEqual(later["owners"].get("sess"), 424242)
-        self.assertIn("sess", later["busy"])
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
 
@@ -2094,20 +2079,6 @@ class PaneFindingTests(unittest.TestCase):
             self.assertTrue(hook.send_report("t7", path, "idle"))
         paint.assert_not_called()
         direct.assert_not_called()
-
-    def test_live_owner_older_than_the_stale_window_stays(self):
-        proc = subprocess.Popen(["sleep", "30"])
-        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
-        state = hook.fresh_state()
-        state["busy"] = {"sess": time.time() - (hook.STALE_SECS + 5)}
-        state["owners"] = {"sess": proc.pid}
-        state["owner_ident"] = {"sess": "sec:old"}
-        state["phase"] = "weak"
-        hook.begin_tick()
-        kept = hook.normalize(state, time.time())
-        self.assertEqual(kept["owners"].get("sess"), proc.pid)
-        self.assertIn("sess", kept["busy"])
-        self.assertEqual(kept["phase"], "weak")
 
     def test_stop_on_a_live_weak_owner_keeps_the_row(self):
         proc = subprocess.Popen(["sleep", "30"])
@@ -3572,398 +3543,802 @@ class SettledDecisionTests(unittest.TestCase):
 
 
 class PaneWriteMatrixTests(unittest.TestCase):
+    """Real hook and watcher runs against a temporary state directory.
+
+    Every start, event, owner, and count is one cell. The hook cells call
+    main(). The watcher cells call watch_loop(). Nothing that writes is
+    stubbed. A none result keeps every file byte, including which files
+    exist, and it writes no tty. A read, a reload, and a generation mismatch
+    are none results: they do not store the seq floor.
+    """
+
     _FLOOR = 50
+    _BASE = 1_700_000_000.0
+    _RAISED = 80
+    _STARTS = (
+        "missing",
+        "unreadable",
+        "stale_generation",
+        "floor_ahead",
+        "watcher_flag",
+        "gone_outer",
+        "live_outer",
+    )
+    _OWNERS = ("no_owner", "weak", "proven", "chat_gone")
+    _COUNTS = (0, 1, 2)
+    _HOOKS = (
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+    )
+    _WATCH = ("reload", "banner", "continue", "blocked", "idle_clear", "settled")
+    _QUIET = "› ask a question or describe a task\n"
+    _BANNER = "▶ watch-step running 0/0 · ctrl+x expand · ctrl+g monitor\n"
+    _BLOCKED = "esc to close · ↑↓ to navigate · ↵ to select\n"
+    _PLAIN = "still writing the reply\n"
 
-    def test_every_event_against_every_owner_and_count(self):
-        events = (
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "Stop",
-            "SessionEnd",
-            "blocked",
-            "watcher",
-            "no_session_prompt",
-            "no_session_start",
-            "watcher_continue",
-            "watcher_banner",
+    @classmethod
+    def setUpClass(cls):
+        hook.begin_tick()
+        master, slave = os.openpty()
+        cls.live_master = master
+        cls.live = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        owners = ("no_owner", "weak", "proven", "outer_gone", "chat_gone")
-        counts = (0, 1, 2)
-        now = 1_700_000_000.0
-        with tempfile.TemporaryDirectory() as root:
-            env = {
-                "HERDR_ENV": "",
-                "HERDR_PANE_ID": "",
-                "HC_TERMINAL_ID": "t7",
-                "XDG_STATE_HOME": root,
-                "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
-            }
-            with mock.patch.dict(os.environ, env, clear=False):
-                path = hook.state_path("t7")
-                for owner in owners:
-                    for count in counts:
-                        for event in events:
-                            with self.subTest(owner=owner, count=count, event=event):
-                                self._cell(path, owner, count, event, now)
-                with self.subTest(path="idle-clear"):
-                    self._idle_clear_leaves_a_live_row(path, now)
-                with self.subTest(path="finish"):
-                    self._finish_leaves_a_live_row(path, now)
+        os.close(slave)
+        hook.begin_tick()
+        cls.live_token = hook.hires_start(cls.live.pid)
+        if not hook.fine_start(cls.live_token):
+            raise AssertionError("live owner has no fine start token")
+        cls.gone = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        hook.begin_tick()
+        cls.gone_token = hook.hires_start(cls.gone.pid)
+        if not hook.fine_start(cls.gone_token):
+            raise AssertionError("gone owner has no fine start token")
+        os.kill(cls.gone.pid, signal.SIGKILL)
+        cls.gone.wait(timeout=5)
+        cls.chat = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        hook.begin_tick()
+        cls.chat_token = hook.hires_start(cls.chat.pid)
+        os.kill(cls.chat.pid, signal.SIGKILL)
+        cls.chat.wait(timeout=5)
+        hook.begin_tick()
+        cls.watcher_token = hook.hires_start(os.getpid())
+        if not cls.watcher_token:
+            raise AssertionError("watcher token is empty")
 
-    def _cell(self, path, owner, count, event, now):
-        state = self._fixture(owner, count, now)
-        raw = json.dumps(state)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(raw)
-        floor_path = hook.seq_floor_path(path)
-        with open(floor_path, "w", encoding="utf-8") as handle:
-            handle.write(str(self._FLOOR))
-        tty = []
-        released = []
-        with self._patches(owner, tty, released, now):
-            if event in ("blocked", "watcher"):
-                hook.commit_blocked(path, "workflow_requires_approval")
-            elif event in ("no_session_prompt", "no_session_start", "watcher_continue", "watcher_banner"):
-                self._direct(path, event)
-            else:
-                with (
-                    mock.patch.object(sys, "argv", ["herdr-kiro", event]),
-                    mock.patch.object(sys, "stdin", io.StringIO("{}")),
-                ):
-                    self.assertEqual(hook.main(), 0)
-        with open(path, "rb") as handle:
-            saved = handle.read()
-        with open(floor_path, encoding="utf-8") as handle:
-            floor_text = handle.read()
-        self._assert_saved(owner, count, event, raw, saved, tty, released, now, floor_text)
+    @classmethod
+    def tearDownClass(cls):
+        if cls.live.poll() is None:
+            os.kill(cls.live.pid, signal.SIGKILL)
+            cls.live.wait(timeout=5)
+        os.close(cls.live_master)
+        hook._close_held_fd()
 
-    def _direct(self, path, event):
-        """The watcher and a call that omits session. Both go through update."""
+    def test_every_public_entry_snapshots_the_state_directory(self):
+        events = self._HOOKS + self._WATCH
+        ran = []
+        problems = []
+        for start in self._STARTS:
+            for event in events:
+                for owner in self._OWNERS:
+                    for count in self._COUNTS:
+                        key = (start, event, owner, count)
+                        ran.append(key)
+                        try:
+                            problem = self._cell(start, event, owner, count)
+                        except Exception as exc:
+                            problem = f"{key} raised {type(exc).__name__}: {exc}"
+                        if problem:
+                            problems.append(problem)
+        product = len(self._STARTS) * len(events) * len(self._OWNERS) * len(self._COUNTS)
+        self.assertEqual(len(ran), product)
+        self.assertEqual(len(set(ran)), product)
+        if problems:
+            preview = "\n".join(problems[:12])
+            self.fail(f"{len(problems)} cells differed\n{preview}")
 
-        def apply(current, event=event):
-            if event == "no_session_prompt":
-                hook.commit_pane(current, "prompt")
-            elif event == "no_session_start":
-                hook.commit_pane(current, "start")
-            elif event == "watcher_continue":
-                hook.commit_pane(current, hook.screen_event(current, "continue"))
-            elif event == "watcher_banner":
-                hook.commit_pane(current, hook.screen_event(current, "banner"))
-            else:
-                raise AssertionError(event)
+    def _cell(self, start, event, owner, count):
+        root = tempfile.mkdtemp(prefix="herdr-kiro-matrix-")
+        previous_hup = signal.getsignal(signal.SIGHUP)
+        previous_term = signal.getsignal(signal.SIGTERM)
+        try:
+            return self._run_cell(root, start, event, owner, count)
+        finally:
+            signal.signal(signal.SIGHUP, previous_hup)
+            signal.signal(signal.SIGTERM, previous_term)
+            self._kill_watchers(root)
+            hook._close_held_fd()
+            shutil.rmtree(root, ignore_errors=True)
 
-        hook.update(path, apply)
+    def _run_cell(self, root, start, event, owner, count):
+        state_root = os.path.join(root, "herdr-kiro")
+        os.makedirs(state_root, mode=0o700)
+        env = {
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t7",
+            "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
+        hook.begin_tick()
+        self._drain(self.live_master)
+        prepared = self._prepared_state(start, event, owner, count)
+        watching = event in self._WATCH
+        spawned = start in ("missing", "unreadable") and event == "SessionStart"
+        if prepared is not None and (watching or self._seeds_watcher(prepared, event) or start == "watcher_flag"):
+            prepared["watcher"] = os.getpid()
+            prepared["watcher_started"] = self.watcher_token
+        initial = self._initial_files(start, prepared, watching)
+        self._write_files(state_root, initial)
+        before = self._snapshot(state_root)
+        expected_files, expected_osc = self._expect(start, event, prepared, watching)
+        clock = [self._BASE]
+        with mock.patch.dict(os.environ, env, clear=False):
+            path = hook.state_path("t7")
+            self._drive(path, start, event, watching, clock, prepared)
+            self._kill_watchers(root)
+            actual = self._snapshot(state_root)
+            osc = self._drain(self.live_master)
+        if spawned:
+            problem = self._check_spawn(expected_files, actual)
+            if problem:
+                return f"{start} {event} {owner} count={count} {problem}"
+        if actual != expected_files or osc != expected_osc:
+            return self._format_problem(start, event, owner, count, before, actual, expected_files, osc, expected_osc)
+        return ""
 
-    def _assert_saved(self, owner, count, event, raw, saved, tty, released, now, floor_text):
-        before = json.loads(raw)
-        expected, want_tty, want_released, want_floor = self._snapshot(before, owner, count, event, now)
-        self.assertEqual(tty, want_tty)
-        self.assertEqual(released, want_released)
-        self.assertEqual(floor_text, want_floor)
-        if expected is None:
-            self.assertEqual(saved, raw.encode())
-            self.assertEqual(json.loads(saved), before)
+    def _drive(self, path, start, event, watching, clock, prepared):
+        def now():
+            return clock[0]
+
+        def sleep(_delay):
+            return None
+
+        if not watching:
+            with (
+                mock.patch.object(hook.time, "time", now),
+                mock.patch.object(hook.time, "sleep", sleep),
+                mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+                mock.patch.object(sys, "stdin", io.StringIO("{}")),
+            ):
+                self.assertEqual(hook.main(), 0)
             return
-        self.assertEqual(json.loads(saved), expected)
-        self.assertEqual(saved, json.dumps(expected).encode())
+        limit = self._tick_limit(event, prepared)
+        ticks = {"n": 0}
 
-    def _is_unchanged(self, owner, count, event):
-        live = owner in ("proven", "chat_gone")
-        prompts = ("UserPromptSubmit", "PreToolUse", "PostToolUse")
-        ends = ("Stop", "SessionEnd")
-        direct = ("no_session_prompt", "no_session_start", "watcher_continue", "watcher_banner")
-        if event in ("blocked", "watcher"):
-            return owner in ("no_owner", "weak")
-        if event in direct:
-            return owner in ("no_owner", "weak") or (count == 0 and not live)
-        if count == 0 and event in prompts + ends:
-            return not live
-        return event in ends and count == 1 and owner == "weak"
+        def wait(_self, _pids, _timeout, clock=clock, limit=limit, event=event, ticks=ticks):
+            ticks["n"] += 1
+            if event == "idle_clear" and ticks["n"] == 2:
+                clock[0] = self._BASE + hook.IDLE_CLEAR_SECS + 1
+            if ticks["n"] > limit:
+                raise SystemExit
+            return False
 
-    def _is_refresh(self, owner, count, event):
-        prompts = ("UserPromptSubmit", "PreToolUse", "PostToolUse")
-        ends = ("Stop", "SessionEnd")
-        direct = ("no_session_prompt", "no_session_start", "watcher_continue", "watcher_banner")
-        return count == 0 and owner in ("proven", "chat_gone") and event in prompts + ends + direct
+        def screen(_pane, path=path, event=event, start=start):
+            if start == "stale_generation" and event in ("idle_clear", "settled"):
+                self._bump_generation(path)
+            return self._screen_for(event)
 
-    def _snapshot(self, before, owner, count, event, now):
-        """The whole pane file, the seq floor, and every tty write for one cell.
+        def logged(message, path=path):
+            hook_log(message)
+            if message == "screen idle clear":
+                hook.write_seq_floor(path, self._RAISED)
 
-        none keeps the saved bytes and the floor file. SessionStart is
-        record_aggregate: a gone proven owner is not painted done, dropped,
-        or released.
-        """
-        if self._is_unchanged(owner, count, event):
-            return None, [], [], str(self._FLOOR)
-        expected = json.loads(json.dumps(before))
-        if self._is_refresh(owner, count, event):
-            expected["busy"][hook.AGGREGATE] = now
-            expected["seq"] = self._FLOOR
-            return expected, [], [], str(self._FLOOR)
-        if event in (
-            "blocked",
-            "watcher",
-            "no_session_prompt",
-            "no_session_start",
-            "watcher_continue",
-            "watcher_banner",
+        hook_log = hook.log
+        with (
+            mock.patch.object(hook.time, "time", now),
+            mock.patch.object(hook.time, "sleep", sleep),
+            mock.patch.object(hook.OwnerExitWatch, "wait", wait),
+            mock.patch.object(hook, "pane_text", screen),
+            mock.patch.object(hook, "log", logged),
         ):
-            return self._snapshot_side(expected, owner, event)
-        return self._snapshot_hook(expected, owner, count, event, now)
+            try:
+                hook.watch_loop("t7", path)
+            except SystemExit:
+                return
 
-    def _snapshot_side(self, expected, owner, event):
-        if event in ("blocked", "watcher") and owner in ("proven", "chat_gone"):
-            expected["seq"] = self._FLOOR
-            return expected, [("osc", 50)], [], str(self._FLOOR)
-        if owner == "outer_gone":
-            self._exit_row(expected)
-            expected["seq"] = self._FLOOR
-            return expected, [("paint", "idle", 50)], [], str(self._FLOOR)
-        expected["seq"] = self._FLOOR
-        return expected, [("paint", "working", 50)], [], str(self._FLOOR)
+    def _tick_limit(self, event, prepared):
+        if prepared is not None and self._exit_retries(prepared):
+            return hook.EXIT_RETRY_CAP + 2
+        if event == "idle_clear" and prepared is not None and prepared.get("busy"):
+            return 2
+        return 1
 
-    def _snapshot_hook(self, expected, owner, count, event, now):
-        if event == "SessionStart":
-            return self._snapshot_start(expected, owner, count, now)
-        if event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
-            return self._snapshot_prompt(expected, owner, now)
-        if event in ("Stop", "SessionEnd") and count > 1:
-            return self._snapshot_partial(expected, owner, count, now)
-        if event in ("Stop", "SessionEnd") and count == 1:
-            return self._snapshot_end(expected, owner)
-        raise AssertionError((owner, count, event))
+    def _seeds_watcher(self, state, event):
+        if event in self._WATCH:
+            return True
+        trial = copy.deepcopy(state)
+        chosen, _ok, _flag, _osc, _release = self._hook_fold(trial, event)
+        return chosen != "none"
 
-    def _snapshot_start(self, expected, owner, count, now):
-        self._record(expected, owner, now)
-        expected["aggregate"] = count + 1
-        if owner in ("outer_gone", "weak"):
-            expected["seq"] = self._FLOOR
-            return expected, [], [], str(self._FLOOR)
-        expected["phase"] = "proven"
-        return expected, [("paint", "working", 50)], [], self._report(expected, "working")
-
-    def _snapshot_prompt(self, expected, owner, now):
-        self._touch(expected, owner, now)
-        if owner == "outer_gone":
-            self._exit_row(expected)
-            return expected, [("paint", "idle", 50)], ["release"], self._report(expected, "idle")
-        if owner == "weak":
-            expected["seq"] = self._FLOOR
-            return expected, [], [], str(self._FLOOR)
-        expected["phase"] = "proven"
-        return expected, [("paint", "working", 50)], [], self._report(expected, "working")
-
-    def _snapshot_partial(self, expected, owner, count, now):
-        expected["aggregate"] = count - 1
-        expected["grace_until"] = 0.0
-        expected["busy"][hook.AGGREGATE] = now
-        expected["generation"] = 8
-        self._chat(expected, owner)
-        expected["seq"] = self._FLOOR
-        return expected, [], [], str(self._FLOOR)
-
-    def _snapshot_end(self, expected, owner):
-        expected["generation"] = 8
-        self._chat(expected, owner)
-        if owner == "no_owner":
-            expected["aggregate"] = 0
-            expected["busy"].pop(hook.AGGREGATE, None)
-            return expected, [], [], self._report(expected, "idle")
-        if owner == "outer_gone":
-            self._exit_row(expected)
-            expected["aggregate"] = 0
-            return expected, [("paint", "idle", 50)], ["release"], self._report(expected, "idle")
-        expected["phase"] = "idle_clear"
-        return expected, [("paint", "idle", 50)], [], self._report(expected, "idle")
-
-    def _record(self, expected, owner, now):
-        expected["grace_until"] = 0.0
-        expected["busy"][hook.AGGREGATE] = now
-        expected["generation"] = 8
-        self._remember(expected, owner)
-        self._chat(expected, owner)
-
-    def _touch(self, expected, owner, now):
-        expected["busy"][hook.AGGREGATE] = now
-        expected["generation"] = 8
-        self._remember(expected, owner)
-        self._chat(expected, owner)
-
-    def _remember(self, expected, owner):
-        expected["owners"][hook.AGGREGATE] = 50
-        if owner == "weak":
-            expected["owner_ident"].pop(hook.AGGREGATE, None)
-        elif owner == "no_owner":
-            expected["owner_ident"][hook.AGGREGATE] = "100.000000"
-
-    def _chat(self, expected, owner):
-        if owner != "chat_gone":
-            return
-        expected["chat_pid"] = 70
-        expected["chat_ident"] = ""
-
-    def _exit_row(self, expected):
-        expected["phase"] = "exited"
-        expected["busy"].pop(hook.AGGREGATE, None)
-        expected["owners"].pop(hook.AGGREGATE, None)
-        expected["owner_ident"].pop(hook.AGGREGATE, None)
-
-    def _report(self, expected, kind):
-        expected["seq"] = self._FLOOR + 1
-        if kind == "idle":
-            expected["grace_until"] = 0.0
-        return str(expected["seq"])
-
-    def _fixture(self, owner, count, now):
+    def _prepared_state(self, start, event, owner, count):
+        if start in ("missing", "unreadable"):
+            return None
         state = hook.fresh_state()
         state["seq"] = 4
         state["aggregate"] = count
-        state["busy"] = {hook.AGGREGATE: now - 10, "old": now - 10000}
+        state["busy"] = {hook.AGGREGATE: self._BASE - 10, "old": self._BASE - 10000}
         state["grace_until"] = 3.5
-        state["watcher"] = 9
-        state["watcher_at"] = 2.5
-        state["watcher_started"] = "sec:1"
         state["generation"] = 7
-        state["retiring"] = True
-        state["owners_died"] = True
-        state["chat_pid"] = 3
-        state["chat_ident"] = "sec:9"
-        state["proven_pid"] = 0
-        state["proven_ident"] = ""
-        if owner == "weak":
-            state["phase"] = "weak"
-            state["owners"] = {hook.AGGREGATE: 50}
-            state["owner_ident"] = {hook.AGGREGATE: "sec:10"}
-            state["proven_pid"] = 77
-            state["proven_ident"] = "sec:77"
-        elif owner in ("proven", "outer_gone", "chat_gone"):
-            state["phase"] = "proven"
-            state["owners"] = {hook.AGGREGATE: 50}
-            state["owner_ident"] = {hook.AGGREGATE: "100.000000"}
-            state["proven_pid"] = 50
-            state["proven_ident"] = "100.000000"
-        if owner == "chat_gone":
-            state["chat_pid"] = 70
-            state["chat_ident"] = "70.000000"
+        self._put_owner(state, start, owner)
+        if event in ("reload", "settled"):
+            state["busy"] = {}
+            state["grace_until"] = 0.0
+        if event == "idle_clear":
+            state["owners_died"] = True
         return state
 
-    def _idle_clear_leaves_a_live_row(self, path, now):
-        state = self._fixture("proven", 1, now)
-        state["watcher"] = 0
+    def _put_owner(self, state, start, owner):
+        gone = start == "gone_outer"
+        pid = self.gone.pid if gone else self.live.pid
+        token = self.gone_token if gone else self.live_token
+        if owner == "no_owner":
+            return
+        if owner == "weak":
+            state["phase"] = "weak"
+            state["owners"] = {hook.AGGREGATE: pid}
+            state["owner_ident"] = {hook.AGGREGATE: "sec:10"}
+            return
+        state["phase"] = "proven"
+        state["owners"] = {hook.AGGREGATE: pid}
+        state["owner_ident"] = {hook.AGGREGATE: token}
+        state["proven_pid"] = pid
+        state["proven_ident"] = token
+        if owner == "chat_gone":
+            state["chat_pid"] = self.chat.pid
+            state["chat_ident"] = self.chat_token
+
+    def _initial_files(self, start, prepared, watching):
+        files = {}
+        if start == "missing":
+            pane = None
+        elif start == "unreadable":
+            pane = b"not-json"
+            files["t7.json.seq"] = str(self._FLOOR).encode()
+        else:
+            pane = self._dump(prepared)
+            files["t7.json.seq"] = str(self._FLOOR).encode()
+        if pane is not None:
+            files["t7.json"] = pane
+        if watching and prepared is not None and int(prepared.get("watcher") or 0) == os.getpid():
+            files[f"pids/{os.getpid()}"] = self._pidfile(os.getpid())
+        return files
+
+    def _expect(self, start, event, prepared, watching):
+        if watching:
+            return self._expect_watch(start, event, prepared)
+        return self._expect_hook(start, event, prepared)
+
+    def _expect_hook(self, start, event, prepared):
+        book = _Book(self._initial_book(start, prepared, False))
+        osc = []
+        held = {"chosen": "none", "ok": False, "release": False}
+
+        def fold(state, osc=osc, event=event, held=held):
+            chosen, ok, flag, painted, release = self._hook_fold(state, event)
+            held["chosen"] = chosen
+            held["ok"] = ok
+            held["release"] = release
+            osc.append(painted)
+            return flag
+
+        book.apply(fold, self._BASE)
+        self._report_after_hook(book, event, held["chosen"], held["ok"], held["release"])
+        if held["chosen"] != "none" and not self._watcher_current(book.state):
+            self._spawn_into(book)
+        return book.files, b"".join(osc)
+
+    def _expect_watch(self, start, event, prepared):
+        book = _Book(self._initial_book(start, prepared, True))
+        osc = []
+        limit = self._tick_limit(event, prepared)
+        clock = self._BASE
+        reported = None
+        quiet_since = None
+        for tick in range(1, limit + 1):
+            if event == "idle_clear" and tick == 2:
+                clock = self._BASE + hook.IDLE_CLEAR_SECS + 1
+            if tick == 1:
+                book.apply(lambda state, token=self.watcher_token: self._claim(state, token), clock)
+                if book.state is not None and int(book.state.get("watcher") or 0) == os.getpid():
+                    book.files[f"pids/{os.getpid()}"] = self._pidfile(os.getpid())
+            if book.state is None:
+                break
+            if hook._owner_exited(book.state, []):
+                self._watch_exit(book, osc)
+                break
+            if hook._owner_is_live_weak(book.state):
+                book.apply(lambda state: self._commit(state, "pid_reuse", 0.0)[0], clock)
+            stale = start == "stale_generation" and event in ("idle_clear", "settled")
+            if stale and book.files.get("t7.json"):
+                book.state["generation"] = int(book.state.get("generation") or 0) + 1
+                book.files["t7.json"] = self._dump(book.state)
+            painted, quiet_since, reported, stopped = self._watch_screen(
+                book, event, clock, quiet_since, reported, stale
+            )
+            osc.extend(painted)
+            if stopped:
+                break
+        return book.files, b"".join(osc)
+
+    def _watch_exit(self, book, osc):
+        mark = {"write": "none", "ok": True, "painted": b""}
+
+        def once(state, mark=mark):
+            write, ok, painted = self._commit(state, "process_exit", 0.0)
+            mark["write"] = write
+            mark["ok"] = ok
+            mark["painted"] = painted
+            return write
+
+        book.apply(once, self._BASE)
+        osc.append(mark["painted"])
+        if mark["write"] == "done" and not mark["ok"]:
+            for _retry in range(hook.EXIT_RETRY_CAP - 1):
+                book.apply(once, self._BASE)
+                osc.append(mark["painted"])
+        self._clear_watch_slot(book)
+
+    def _watch_screen(self, book, event, now, quiet_since, reported, stale):
+        screen = self._screen_for(event)
+        painted = []
+        if hook.approval_text(screen):
+            mark = {"write": "none", "ok": False}
+
+            def blocked(state, painted=painted, mark=mark):
+                write, ok, osc = self._commit(state, "blocked", 0.0)
+                mark["write"] = write
+                mark["ok"] = ok
+                painted.append(osc)
+                return write
+
+            book.apply(blocked, now)
+            if mark["write"] == "paint_blocked" and mark["ok"]:
+                book.apply(lambda state: self._bump_report(state, "blocked"), now)
+            return painted, None, reported, False
+        banner = hook.workflow_banner_from(screen)
+        if banner:
+            quiet_since = None
+        elif hook.prompt_visible(screen) and hook.screen_is_settled(screen):
+            if quiet_since is None:
+                quiet_since = now
+            elif now - quiet_since >= hook.IDLE_CLEAR_SECS and book.state.get("busy") and not stale:
+                mark = {"write": "none", "ok": False}
+
+                def clear(state, painted=painted, mark=mark):
+                    write, ok, osc = self._commit(state, hook.screen_event(state, "timer"), 0.0)
+                    mark["write"] = write
+                    mark["ok"] = ok
+                    painted.append(osc)
+                    return write
+
+                book.apply(clear, now)
+                if mark["write"] == "done" and mark["ok"] and book.state.get("phase") == "idle_clear":
+                    book.files["t7.json.seq"] = str(self._RAISED).encode()
+                    book.floor = self._RAISED
+                    book.apply(lambda _state: "", now)
+        else:
+            quiet_since = None
+        action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), banner, now)
+        owners_gone = False
+        if banner and not book.state.get("owners_died") and not owners_gone:
+            mark = {"write": "none"}
+
+            def start(state, painted=painted, mark=mark):
+                write, _ok, osc = self._commit(state, "start", 0.0)
+                mark["write"] = write
+                painted.append(osc)
+                return write
+
+            book.apply(start, now)
+            if mark["write"] == "working":
+                book.apply(lambda state: self._bump_report(state, "working"), now)
+            return painted, quiet_since, reported, False
+        if action == "idle" and hook.screen_is_quiet(screen):
+            if reported != "idle" and not stale:
+                mark = {"write": "none", "ok": False}
+
+                def settle(state, painted=painted, mark=mark):
+                    write, ok, osc = self._commit(state, hook.screen_event(state, "settled"), 0.0)
+                    mark["write"] = write
+                    mark["ok"] = ok
+                    painted.append(osc)
+                    return write
+
+                book.apply(settle, now)
+                if mark["write"] == "done" and mark["ok"]:
+                    book.apply(lambda state: self._bump_report(state, "idle"), now)
+                    reported = "idle"
+                else:
+                    reported = "idle"
+            held = quiet_since is not None and now - quiet_since >= hook.IDLE_DELAY
+            if reported == "idle" and not book.state.get("busy") and held:
+                self._clear_watch_slot(book)
+                return painted, quiet_since, reported, True
+            return painted, quiet_since, reported, False
+        if action != "working" or book.state.get("owners_died"):
+            return painted, quiet_since, reported, False
+
+        mark = {"write": "none"}
+
+        def prompt(state, painted=painted, mark=mark):
+            write, _ok, osc = self._commit(state, "prompt", 0.0)
+            mark["write"] = write
+            painted.append(osc)
+            return write
+
+        book.apply(prompt, now)
+        if mark["write"] == "working":
+            book.apply(lambda state: self._bump_report(state, "working"), now)
+        return painted, quiet_since, reported, False
+
+    def _clear_watch_slot(self, book):
+        def clear(state):
+            if int(state.get("watcher") or 0) == os.getpid():
+                state["watcher"] = 0
+                state["watcher_started"] = ""
+            return ""
+
+        book.apply(clear, self._BASE)
+        book.files.pop(f"pids/{os.getpid()}", None)
+
+    def _claim(self, state, token):
+        state["watcher"] = os.getpid()
+        state["watcher_started"] = token
+        return ""
+
+    def _bump_report(self, state, kind):
+        state["seq"] = int(state.get("seq") or 0) + 1
+        if kind == "idle":
+            state["grace_until"] = 0.0
+        return ""
+
+    def _report_after_hook(self, book, event, chosen, ok, release):
+        if book.state is None:
+            return
+        action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), False, self._BASE)
+        kind = hook.report_for("", action)
+        if chosen == "done" and ok and (event in hook.END_EVENTS or release):
+            book.apply(lambda state: self._bump_report(state, "idle"), self._BASE)
+        elif kind == "working" and chosen == "working":
+            book.apply(lambda state: self._bump_report(state, "working"), self._BASE)
+
+    def _spawn_into(self, book):
+        book.spawned = True
+        if book.state is None:
+            return
+        book.state["watcher_at"] = self._BASE
+        book.state["retiring"] = False
+        book.files["t7.json"] = self._dump(book.state)
+
+    def _check_spawn(self, expected, actual):
+        raw = actual.get("t7.json")
+        if not raw:
+            return "spawn left no pane file"
+        try:
+            state = json.loads(raw)
+        except ValueError:
+            return "spawn left a pane that is not json"
+        pid = int(state.get("watcher") or 0)
+        token = state.get("watcher_started") or ""
+        if pid <= 1 or not token:
+            return f"spawn did not record a watcher ({pid})"
+        pid_name = f"pids/{pid}"
+        pid_bytes = actual.get(pid_name, b"")
+        if not pid_bytes.startswith(f"{os.getuid()}\n{token}\n".encode()):
+            return "spawn pidfile does not name the recorded watcher"
+        expected_state = json.loads(expected["t7.json"])
+        expected_state["watcher"] = pid
+        expected_state["watcher_started"] = token
+        expected_state["watcher_at"] = self._BASE
+        expected["t7.json"] = self._dump(expected_state)
+        expected.pop("pids/" + str(os.getpid()), None)
+        for name in list(expected):
+            if name.startswith("pids/"):
+                expected.pop(name)
+        expected[pid_name] = pid_bytes
+        return ""
+
+    def _hook_fold(self, state, event):
+        owner_before = hook._pane_owner(state)
+        ev = hook.choose_pane_event(state, event, hook.AGGREGATE)
+        write, ok, osc = self._commit(state, ev, self._BASE, session=hook.AGGREGATE, hook_name=event)
+        chosen = write
+        chosen_ok = ok
+        release = bool(write == "done" and ok and owner_before is not None and not hook.alive(owner_before[0]))
+        if not (write == "none" or not ok or write == "refresh"):
+            hook.note_generation(state, state)
+        if event not in hook.END_EVENTS and ev != "aggregate_zero":
+            pane_ev = hook.hook_event(state, event)
+            owed = event == "SessionStart" and hook._proven_exit_owed(state)
+            if pane_ev != ev and not owed:
+                owner_now = hook._pane_owner(state)
+                dead = owner_now is not None and not hook.alive(owner_now[0])
+                write2, ok2, osc2 = self._commit(state, pane_ev, 0.0)
+                write = write2
+                if write2 != "none":
+                    chosen = write2
+                    chosen_ok = ok2
+                    osc = osc2
+                    if write2 == "done" and ok2 and dead:
+                        release = True
+        return chosen, chosen_ok, write, osc, release
+
+    def _commit(self, state, event, now, session="", hook_name="", rule_id=""):
+        count = int(state.get("aggregate") or 0)
+        prompt_at_zero = count == 0 and event in ("prompt", "start")
+        stop_at_zero = session == hook.AGGREGATE and count == 0 and event in ("stop", "piped_chat")
+        if prompt_at_zero or stop_at_zero:
+            event = "aggregate_zero"
+        elif event not in hook._DIRECT_EVENTS:
+            event = hook._chooser_event(state, event)
+        phase = hook._phase_for_event(state, event)
+        write = hook.pane_transition(phase, event)
+        if write == "none":
+            return write, True, b""
+        if write == "refresh":
+            if hook.AGGREGATE in state["busy"]:
+                state["busy"][hook.AGGREGATE] = now if now else self._BASE
+            return write, True, b""
+        if write == "paint_blocked":
+            ok = self._can_paint(state)
+            return write, ok, self._osc("blocked", rule_id) if ok else b""
+        if write == "record_aggregate":
+            state["aggregate"] = int(state.get("aggregate") or 0) + 1
+            state["busy"][hook.AGGREGATE] = now
+            state["grace_until"] = 0.0
+            return write, True, b""
+        if write == "touch_aggregate":
+            state["busy"][hook.AGGREGATE] = now
+            return write, True, b""
+        if write == "touch_partial":
+            if count > 1:
+                state["aggregate"] = count - 1
+            state["busy"][hook.AGGREGATE] = now
+            state["grace_until"] = 0.0
+            return write, True, b""
+        if write == "record_named":
+            return write, True, b""
+        if write == "done":
+            return self._commit_done(state, event, now, session, hook_name, phase)
+        if write == "working":
+            ok = self._can_paint(state)
+            state["phase"] = hook.pane_next(phase, event)
+            return write, ok, self._osc("working") if ok else b""
+        raise AssertionError(write)
+
+    def _commit_done(self, state, event, now, session, hook_name, phase):
+        drops = bool(session) and hook_name in hook.END_EVENTS and hook._chooser_drops_row(state, hook_name)
+        owner_now = hook._pane_owner(state)
+        if owner_now is not None and hook.alive(owner_now[0]):
+            drops = False
+        stamp = now if now else self._BASE
+        if owner_now is None:
+            if drops:
+                hook._finish_slot(state, session, stamp)
+            return "done", True, b""
+        hook._save_proven_owner(state)
+        if not self._can_paint(state):
+            return "done", False, b""
+        state["phase"] = hook.pane_next(phase, event)
+        owner_after = hook._pane_owner(state)
+        if owner_after is not None and not hook.alive(owner_after[0]):
+            hook._drop_done_owner(state, owner_after[0])
+        if drops:
+            hook._finish_slot(state, session, stamp)
+        return "done", True, self._osc("idle")
+
+    def _can_paint(self, state):
+        if hook.in_tui():
+            return False
+        owner = hook._pane_owner(state)
+        if owner is None:
+            return False
+        pid, token = owner
+        if not hook.fine_start(token) or hook._pid_gone(pid):
+            return False
+        return hook.identity_proven(pid, token)
+
+    def _exit_retries(self, state):
+        if not hook._owner_exited(state, []):
+            return False
+        trial = copy.deepcopy(state)
+        write, ok, _osc = self._commit(trial, "process_exit", 0.0)
+        return write == "done" and not ok
+
+    def _bump_generation(self, path):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                state = json.loads(handle.read())
+        except (OSError, ValueError):
+            return
+        if not isinstance(state, dict):
+            return
+        state["generation"] = int(state.get("generation") or 0) + 1
         raw = json.dumps(state)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(raw)
-        tty = []
-        released = []
 
-        def apply(current):
-            hook.clear_idle_if_current(current, 7)
+    def _screen_for(self, event):
+        if event == "banner":
+            return self._BANNER
+        if event == "blocked":
+            return self._BLOCKED
+        if event in ("idle_clear", "settled"):
+            return self._QUIET
+        return self._PLAIN
 
-        with self._patches("proven", tty, released, now):
-            hook.update(path, apply)
-        with open(path, encoding="utf-8") as handle:
-            saved = json.load(handle)
-        self.assertIn(("paint", "idle", 50), tty)
-        self.assertEqual(saved["owners"].get(hook.AGGREGATE), 50)
-        self.assertIn(hook.AGGREGATE, saved["busy"])
-        self.assertIn("old", saved["busy"])
+    def _osc(self, kind, rule_id=""):
+        return hook.herdr_kiro_osc.encode(hook.herdr_kiro_osc.fields_for(kind, rule_id))
 
-    def _finish_leaves_a_live_row(self, path, now):
-        state = self._fixture("proven", 1, now)
-        state["watcher"] = 0
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(state, handle)
-        snap = {"generation": 7, "busy": dict(state["busy"])}
-        with (
-            mock.patch.object(hook, "release_authority", lambda *_args: True),
-            mock.patch.object(hook, "herdr", lambda *_args: True),
-        ):
-            hook.finish_if_unchanged("t7", path, snap, "owner exit")
-        with open(path, encoding="utf-8") as handle:
-            saved = json.load(handle)
-        self.assertEqual(saved["owners"].get(hook.AGGREGATE), 50)
-        self.assertIn(hook.AGGREGATE, saved["busy"])
-        self.assertIn("old", saved["busy"])
+    def _watcher_current(self, state):
+        if state is None:
+            return False
+        try:
+            pid = int(state.get("watcher") or 0)
+        except (TypeError, ValueError):
+            return False
+        return hook._process_matches(pid, state.get("watcher_started") or "")
 
-    def _patches(self, owner, tty, released, now):
-        def paint(kind, pid, _token, _held_fd=-1, _rule_id="", tty=tty):
-            tty.append(("paint", kind, pid))
-            return True
+    def _initial_book(self, start, prepared, pidfile):
+        files = {}
+        if start == "unreadable":
+            files["t7.json"] = b"not-json"
+            files["t7.json.seq"] = str(self._FLOOR).encode()
+        elif prepared is not None:
+            files["t7.json"] = self._dump(prepared)
+            files["t7.json.seq"] = str(self._FLOOR).encode()
+            if pidfile and int(prepared.get("watcher") or 0) == os.getpid():
+                files[f"pids/{os.getpid()}"] = self._pidfile(os.getpid())
+        return files
 
-        def held(tty=tty):
-            tty.append(("held",))
-            return True
+    def _pidfile(self, pid):
+        token = hook.hires_start(pid)
+        snap = hook.process_snapshot(pid)
+        comm = ""
+        if snap and not snap.get("error"):
+            comm = snap.get("comm") or ""
+        return f"{os.getuid()}\n{token}\n{comm}\n".encode()
 
-        def write_pid(_payload, pid, tty=tty):
-            tty.append(("osc", pid))
-            return "/dev/pts/1"
+    def _dump(self, state):
+        return json.dumps(state).encode()
 
-        def release(*_args, released=released):
-            released.append("release")
-            return True
+    def _write_files(self, root, files):
+        for name, raw in files.items():
+            path = os.path.join(root, name)
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(raw)
 
-        def lineage(owner=owner):
-            chat = 70 if owner == "chat_gone" else 0
-            return (50, "sec:old", chat, "")
+    def _snapshot(self, root):
+        found = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, root)
+                with open(path, "rb") as handle:
+                    found[rel] = handle.read()
+        return found
 
-        return _Stack(owner, paint, held, write_pid, release, lineage, now)
+    def _drain(self, master):
+        chunks = []
+        while True:
+            ready, _, _ = select.select([master], [], [], 0)
+            if not ready:
+                break
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _kill_watchers(self, root):
+        needle = root.encode()
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                    command = handle.read()
+            except OSError:
+                continue
+            if b"--watch" in command and needle in command:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+
+    def _format_problem(self, start, event, owner, count, before, actual, expected, osc, expected_osc):
+        lines = [f"{start} {event} {owner} count={count}"]
+        names = sorted(set(before) | set(actual) | set(expected))
+        for name in names:
+            if actual.get(name) != expected.get(name):
+                lines.append(f"  {name}: actual {actual.get(name)!r:.180} expected {expected.get(name)!r:.180}")
+        if osc != expected_osc:
+            lines.append(f"  osc actual {osc!r} expected {expected_osc!r}")
+        return "\n".join(lines)
 
 
-class _Stack:
-    def __init__(self, owner, paint, held, write_pid, release, lineage, now):
-        self.owner = owner
-        self.paint = paint
-        self.held = held
-        self.write_pid = write_pid
-        self.release = release
-        self.lineage = lineage
-        self.now = now
-        self.stack = contextlib.ExitStack()
+class _Book:
+    """The post-fix directory a cell is allowed to leave behind."""
 
-    def __enter__(self):
-        owner = self.owner
+    def __init__(self, files):
+        self.files = dict(files)
+        self.state = None
+        self.floor = 0
+        self.spawned = False
+        self._load()
 
-        def snap(pid, owner=owner):
-            number = int(pid)
-            if owner == "outer_gone" and number == 50:
-                return None
-            if owner == "chat_gone" and number == 70:
-                return None
-            if number == 50:
-                return {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
-            return None
-
-        def hires(pid, owner=owner):
-            if owner != "weak" and int(pid) == 50:
-                return "100.000000"
-            return "sec:10"
-
-        def kill(pid, _sig, owner=owner):
-            number = int(pid)
-            if (owner == "outer_gone" and number == 50) or (owner == "chat_gone" and number == 70):
-                err = OSError(errno.ESRCH, "gone")
-                raise err
+    def _load(self):
+        raw = self.files.get("t7.json")
+        floor_raw = self.files.get("t7.json.seq")
+        try:
+            self.floor = int(floor_raw.decode()) if floor_raw else 0
+        except ValueError:
+            self.floor = 0
+        if raw is None:
+            self.state = None
             return
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        self.state = parsed if isinstance(parsed, dict) else None
 
-        self.stack.enter_context(mock.patch.object(hook, "process_snapshot", snap))
-        self.stack.enter_context(mock.patch.object(hook, "hires_start", hires))
-        self.stack.enter_context(mock.patch.object(hook.os, "kill", kill))
-        self.stack.enter_context(mock.patch.object(hook, "paint_status", self.paint))
-        self.stack.enter_context(mock.patch.object(hook, "_write_held_fd", self.held))
-        self.stack.enter_context(mock.patch.object(hook.herdr_kiro_osc, "write_pid", self.write_pid))
-        self.stack.enter_context(mock.patch.object(hook, "release_authority", self.release))
-        self.stack.enter_context(mock.patch.object(hook, "kiro_lineage", self.lineage))
-        self.stack.enter_context(mock.patch.object(hook, "ensure_watcher", lambda *_args: None))
-        self.stack.enter_context(mock.patch.object(hook, "pane_text", lambda *_args: ""))
-        self.stack.enter_context(mock.patch.object(hook, "process_chain", lambda: ""))
-        self.stack.enter_context(mock.patch.object(hook, "herdr", lambda *_args: True))
-        self.stack.enter_context(mock.patch.object(hook.time, "time", lambda: self.now))
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return self.stack.__exit__(exc_type, exc, tb)
+    def apply(self, fn, now):
+        existed = "t7.json" in self.files
+        readable = self.state is not None
+        loaded = json.loads(self.files["t7.json"]) if readable else hook.fresh_state()
+        before = copy.deepcopy(loaded)
+        flag = fn(loaded) or ""
+        changed = loaded != before
+        if not changed and flag in ("", "none"):
+            if not existed:
+                return
+            return
+        try:
+            seq = int(loaded.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq < self.floor:
+            loaded["seq"] = self.floor
+        elif self.floor == 0 and seq == 0:
+            loaded["seq"] = int(now)
+        self.files["t7.json"] = json.dumps(loaded).encode()
+        written = int(loaded.get("seq") or 0)
+        if written > self.floor:
+            self.floor = written
+            self.files["t7.json.seq"] = str(written).encode()
+        elif "t7.json.seq" not in self.files and written:
+            self.files["t7.json.seq"] = str(written).encode()
+            self.floor = written
+        self.state = loaded
 
 
 def _read_pty(master):
