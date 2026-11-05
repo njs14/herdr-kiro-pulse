@@ -5,6 +5,7 @@ the rest of a SessionStart grace. A named Stop does not start that grace.
 """
 
 import ast
+import contextlib
 import errno
 import inspect
 import io
@@ -430,6 +431,10 @@ class GraceTests(unittest.TestCase):
             "piped_chat",
             "blocked",
             "aggregate_zero",
+            "record_aggregate",
+            "touch_aggregate",
+            "touch_partial",
+            "record_named",
         )
         working = {("proven", "start"), ("proven", "prompt")}
         done = {
@@ -441,10 +446,13 @@ class GraceTests(unittest.TestCase):
             ("idle_clear", "idle_clear"),
             ("idle_clear", "process_exit"),
             ("idle_clear", "piped_chat"),
+            ("no_owner", "stop"),
+            ("no_owner", "piped_chat"),
         }
+        slots = {"record_aggregate", "touch_aggregate", "touch_partial", "record_named"}
         self.assertEqual(hook.OWNER_STATES, states)
         self.assertEqual(hook.OWNER_EVENTS, events)
-        self.assertEqual(len(states) * len(events), 45)
+        self.assertEqual(len(states) * len(events), 65)
         for state in states:
             for event in events:
                 got = hook.pane_transition(state, event)
@@ -457,6 +465,8 @@ class GraceTests(unittest.TestCase):
                     self.assertEqual(got, "paint_blocked", pair)
                 elif pair == ("proven", "aggregate_zero"):
                     self.assertEqual(got, "refresh", pair)
+                elif event in slots:
+                    self.assertEqual(got, event, pair)
                 else:
                     self.assertEqual(got, "none", pair)
 
@@ -902,15 +912,15 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
         ):
-            self.assertFalse(hook.owner_is_dead(50))
-            self.assertFalse(hook.owner_is_dead(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
         with (
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
-            self.assertFalse(hook.owner_is_dead(50))
-            self.assertFalse(hook.owner_is_dead(50))
-            self.assertFalse(hook.owner_is_dead(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
 
     def test_exit_prompt_text_does_not_release_a_live_owner(self):
         directory = tempfile.mkdtemp()
@@ -1924,7 +1934,7 @@ class PaneFindingTests(unittest.TestCase):
             self.assertTrue(hook.identity_proven(50, "100.000000"))
             self.assertFalse(hook.identity_proven(50, "sec:10"))
             self.assertFalse(hook.identity_proven(50, "10"))
-            self.assertFalse(hook.owner_is_dead(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
             self.assertEqual(hook.owner_phase(state), "proven")
             write, ok = hook.commit_pane(state, "start")
             self.assertEqual((write, ok, state["phase"]), ("working", True, "proven"))
@@ -2000,7 +2010,7 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.object(hook, "paint_status", return_value=True) as paint,
         ):
-            self.assertFalse(hook.owner_is_dead(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
             self.assertEqual(hook.owner_phase(state), "weak")
             write, _ok = hook.commit_pane(state, hook.screen_event(state, "reuse"))
             self.assertEqual(hook.owner_phase(state), "weak")
@@ -2101,7 +2111,7 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.object(hook.os, "kill", denied),
         ):
             self.assertTrue(hook.alive(50))
-            self.assertFalse(hook.owner_is_dead(50))
+            self.assertIsNotNone(hook.process_snapshot(50))
 
     def test_send_report_does_not_paint_working_or_done(self):
         directory = tempfile.mkdtemp(prefix="herdr-kiro-report-")
@@ -3234,13 +3244,13 @@ class PriorFindingTableTests(unittest.TestCase):
             write, ok = hook.commit_pane(state, "stop")
             self.assertEqual((write, ok), ("done", True))
             self.assertEqual(state["phase"], "exited")
-            self.assertEqual(state["owners"].get("sess"), 4242)
-            self.assertFalse(hook._chooser_drops_row(state, "Stop"))
-            self.assertFalse(hook._chooser_drops_row(state, "SessionEnd"))
-            hook._drop_done_owner(state, 4242)
-        self.assertNotIn("sess", state["owners"])
-        self.assertNotIn("sess", state["busy"])
-        self.assertEqual(state["proven_pid"], 4242)
+            self.assertNotIn("sess", state["owners"])
+            self.assertNotIn("sess", state["busy"])
+            self.assertEqual(state["proven_pid"], 4242)
+            again = hook.apply_event(state, "Stop", "sess", 2.0)
+            self.assertEqual(hook._PANE_OUTCOME["write"], "none")
+            self.assertIs(again, state)
+            self.assertEqual(state["proven_pid"], 4242)
         paint.assert_called()
         held.assert_not_called()
 
@@ -3288,7 +3298,7 @@ class PriorFindingTableTests(unittest.TestCase):
     def _row_no_owner_stop(self, _row):
         state = hook.fresh_state()
         state["busy"] = {"sess": 1.0}
-        self.assertEqual(hook.pane_transition("no_owner", "stop"), "none")
+        self.assertEqual(hook.pane_transition("no_owner", "stop"), "done")
         revised = hook.apply_event(state, "Stop", "sess", 2.0)
         self.assertNotIn("sess", revised["busy"])
         self.assertEqual(revised["owners"], {})
@@ -3317,7 +3327,19 @@ SETTLED_ROWS = (
 class SettledDecisionTests(unittest.TestCase):
     def test_settled_decisions(self):
         paints = set(hook._PANE_WRITES.values())
-        self.assertEqual(paints, {"working", "done", "paint_blocked", "refresh"})
+        self.assertEqual(
+            paints,
+            {
+                "working",
+                "done",
+                "paint_blocked",
+                "refresh",
+                "record_aggregate",
+                "touch_aggregate",
+                "touch_partial",
+                "record_named",
+            },
+        )
         for row in SETTLED_ROWS:
             with self.subTest(row["name"]):
                 getattr(self, "_row_" + row["case"])(row)
@@ -3478,10 +3500,10 @@ class SettledDecisionTests(unittest.TestCase):
             self._live()[1],
             mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc,
         ):
-            write, ok = hook.commit_blocked("t7", proven, "workflow_requires_approval")
+            write, ok = hook.commit_blocked(proven, "workflow_requires_approval")
             self.assertEqual((write, ok), ("paint_blocked", True))
-            weak_write, weak_ok = hook.commit_blocked("t7", weak, "workflow_requires_approval")
-            empty_write, empty_ok = hook.commit_blocked("t7", empty, "")
+            weak_write, weak_ok = hook.commit_blocked(weak, "workflow_requires_approval")
+            empty_write, empty_ok = hook.commit_blocked(empty, "")
         self.assertEqual((weak_write, weak_ok), ("none", True))
         self.assertEqual((empty_write, empty_ok), ("none", True))
         self.assertEqual(osc.call_count, 1)
@@ -3581,6 +3603,260 @@ class SettledDecisionTests(unittest.TestCase):
         Finder().visit(tree)
         self.assertEqual(found, ["commit_pane"])
         self.assertNotIn("emit_osc", inspect.getsource(hook.send_report))
+
+
+class PaneWriteMatrixTests(unittest.TestCase):
+    def test_every_event_against_every_owner_and_count(self):
+        hooks = (
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "blocked",
+            "watcher",
+        )
+        owners = ("no_owner", "weak", "proven", "outer_gone", "chat_gone")
+        counts = (0, 1, 2)
+        now = time.time()
+        tty = []
+        remembered = []
+        real_remember = hook.remember_owner
+
+        def paint(kind, pid, _token, _held_fd=-1, _rule_id=""):
+            tty.append(("paint", kind, pid))
+            return True
+
+        def held():
+            tty.append(("held",))
+            return True
+
+        def write_pid(_payload, pid):
+            tty.append(("osc", pid))
+            return "/dev/pts/1"
+
+        def remember(state, key, owner, started, remembered=remembered):
+            remembered.append(key)
+            return real_remember(state, key, owner, started)
+
+        env = {"HERDR_ENV": "", "HERDR_PANE_ID": "", "HC_TERMINAL_ID": "t7"}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "paint_status", paint),
+            mock.patch.object(hook, "_write_held_fd", held),
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", write_pid),
+            mock.patch.object(hook, "remember_owner", remember),
+        ):
+            for owner in owners:
+                for count in counts:
+                    for name in hooks:
+                        with self.subTest(owner=owner, count=count, event=name):
+                            tty.clear()
+                            remembered.clear()
+                            self._cell(owner, count, name, now, tty, remembered)
+
+    def _cell(self, owner, count, name, now, tty, remembered):
+        state = self._owner(owner, count, now)
+        before = self._fields(state)
+        slot = self._slot(name, count)
+        want = self._write(owner, slot)
+        with self._patches(owner):
+            if name == "watcher":
+                self._watcher(state, before, want, tty, remembered)
+                return
+            if name == "blocked":
+                revised = state
+                write, _ok = hook.commit_pane(state, "blocked")
+                got_slot = "blocked"
+            else:
+                revised, got_slot, write = self._drive(state, name, now)
+            self.assertEqual(got_slot, slot)
+            self.assertEqual(write, want)
+            self._effects(owner, count, name, slot, write, state, before, revised, now, tty, remembered)
+
+    def _drive(self, state, event, now):
+        revised = hook.apply_event(state, event, hook.AGGREGATE, now, 50, "sec:old", 0)
+        slot = str(hook._PANE_OUTCOME["event"])
+        write = str(hook._PANE_OUTCOME["write"])
+        if event not in hook.END_EVENTS:
+            target = state if revised is state else revised
+            pane_ev = hook.hook_event(target, event)
+            if pane_ev != slot:
+                write2, _ok2 = hook.commit_pane(target, pane_ev)
+                if write2 != "none":
+                    revised = target
+        return revised, slot, write
+
+    def _effects(self, owner, count, name, slot, write, state, before, revised, now, tty, remembered):
+        if write == "none":
+            self.assertIs(revised, state)
+            self.assertEqual(self._fields(revised), before)
+            self.assertEqual(tty, [])
+            self.assertEqual(remembered, [])
+            return
+        recording = {"record_aggregate", "touch_aggregate", "record_named"}
+        if slot in recording:
+            self.assertEqual(remembered, [hook.AGGREGATE])
+        else:
+            self.assertEqual(remembered, [])
+        if write == "refresh":
+            self.assertEqual(revised["phase"], before["phase"])
+            self.assertEqual(tty, [])
+            self.assertEqual(revised["busy"][hook.AGGREGATE], now)
+            self.assertEqual(revised["grace_until"], before["grace_until"])
+            self.assertEqual(revised["owners"], before["owners"])
+            self.assertEqual(revised["owner_ident"], before["owner_ident"])
+            self.assertEqual(revised["aggregate"], before["aggregate"])
+            return
+        if count == 0 and name in ("UserPromptSubmit", "PreToolUse", "PostToolUse") and owner != "outer_gone":
+            self.assertEqual(dict(revised["busy"]), before["busy"])
+            self.assertEqual(revised["grace_until"], before["grace_until"])
+            self.assertEqual(revised["owner_ident"], before["owner_ident"])
+            self.assertEqual(revised["owners"], before["owners"])
+        if slot == "touch_aggregate" and owner != "outer_gone":
+            self.assertEqual(revised["aggregate"], count)
+            self.assertEqual(revised["grace_until"], before["grace_until"])
+            self.assertEqual(revised["busy"][hook.AGGREGATE], now)
+        if slot == "touch_partial":
+            self.assertEqual(revised["aggregate"], count - 1)
+            self.assertEqual(revised["grace_until"], 0.0)
+            self.assertEqual(revised["phase"], before["phase"])
+            self.assertEqual(revised["owners"], before["owners"])
+            self.assertEqual(revised["owner_ident"], before["owner_ident"])
+            self.assertEqual(tty, [])
+        if name == "SessionStart":
+            self.assertEqual(revised["aggregate"], count + 1)
+            self.assertEqual(revised["grace_until"], 0.0)
+
+    def _watcher(self, state, before, want, tty, remembered):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-matrix-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        write, _ok = hook.commit_blocked(path, "workflow_requires_approval")
+        self.assertEqual(write, want)
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        expected = hook.normalize(json.loads(json.dumps(state)), time.time())
+        if want == "none":
+            self.assertEqual(self._fields(saved), self._fields(expected))
+            self.assertEqual(self._fields(saved), before)
+            self.assertEqual(tty, [])
+            self.assertEqual(remembered, [])
+            return
+        if want == "paint_blocked":
+            self.assertEqual(self._fields(saved), self._fields(expected))
+            self.assertEqual([item[0] for item in tty], ["osc"])
+            self.assertEqual(remembered, [])
+
+    def _slot(self, name, count):
+        if name in ("blocked", "watcher"):
+            return "blocked"
+        if name == "SessionStart":
+            return "record_aggregate"
+        if name in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            if count > 0:
+                return "touch_aggregate"
+            return "prompt" if name == "UserPromptSubmit" else "start"
+        if count == 0:
+            return "aggregate_zero"
+        if count > 1:
+            return "touch_partial"
+        return "stop"
+
+    def _write(self, owner, slot):
+        if slot in ("record_aggregate", "touch_aggregate", "touch_partial", "record_named"):
+            return slot
+        live = owner in ("proven", "chat_gone")
+        if slot == "aggregate_zero":
+            return "refresh" if live else "none"
+        if slot == "blocked":
+            if owner == "outer_gone":
+                return "done"
+            return "paint_blocked" if live else "none"
+        if slot in ("prompt", "start"):
+            if live:
+                return "working"
+            return "done" if owner == "outer_gone" else "none"
+        if slot == "stop":
+            return "none" if owner == "weak" else "done"
+        raise AssertionError(slot)
+
+    def _owner(self, owner, count, now):
+        state = hook.fresh_state()
+        state["seq"] = 4
+        state["aggregate"] = count
+        state["busy"] = {hook.AGGREGATE: now - 10}
+        state["grace_until"] = 3.5
+        if owner == "weak":
+            state["phase"] = "weak"
+            state["owners"] = {hook.AGGREGATE: 50}
+            state["owner_ident"] = {hook.AGGREGATE: "sec:10"}
+        elif owner in ("proven", "outer_gone", "chat_gone"):
+            state["phase"] = "proven"
+            state["owners"] = {hook.AGGREGATE: 50}
+            state["owner_ident"] = {hook.AGGREGATE: "100.000000"}
+        if owner == "chat_gone":
+            state["chat_pid"] = 70
+            state["chat_ident"] = "70.000000"
+        return state
+
+    def _fields(self, state):
+        busy = state.get("busy") or {}
+        owners = state.get("owners") or {}
+        return {
+            "phase": state.get("phase") or "",
+            "busy": {key: float(busy[key]) for key in busy},
+            "owners": {key: int(owners[key]) for key in owners},
+            "owner_ident": dict(state.get("owner_ident") or {}),
+            "grace_until": float(state.get("grace_until") or 0),
+            "aggregate": int(state.get("aggregate") or 0),
+            "chat_pid": int(state.get("chat_pid") or 0),
+            "chat_ident": state.get("chat_ident") or "",
+        }
+
+    def _patches(self, owner):
+        def snap(pid, owner=owner):
+            number = int(pid)
+            if owner == "outer_gone" and number == 50:
+                return None
+            if owner == "chat_gone" and number == 70:
+                return None
+            if number == 50:
+                return {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+            return None
+
+        def hires(pid, owner=owner):
+            if owner != "weak" and int(pid) == 50:
+                return "100.000000"
+            return "sec:10"
+
+        def kill(pid, _sig, owner=owner):
+            number = int(pid)
+            if (owner == "outer_gone" and number == 50) or (owner == "chat_gone" and number == 70):
+                err = OSError(errno.ESRCH, "gone")
+                raise err
+            return
+
+        return _Stack(snap, hires, kill)
+
+
+class _Stack:
+    def __init__(self, snap, hires, kill):
+        self.snap = snap
+        self.hires = hires
+        self.kill = kill
+        self.stack = contextlib.ExitStack()
+
+    def __enter__(self):
+        self.stack.enter_context(mock.patch.object(hook, "process_snapshot", self.snap))
+        self.stack.enter_context(mock.patch.object(hook, "hires_start", self.hires))
+        self.stack.enter_context(mock.patch.object(hook.os, "kill", self.kill))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self.stack.__exit__(exc_type, exc, tb)
 
 
 def _read_pty(master):

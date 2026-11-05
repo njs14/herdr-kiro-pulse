@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import copy
 import datetime
 import errno
 import fcntl
@@ -392,9 +393,9 @@ def _chooser_drops_row(state: dict, event: str) -> bool:
 
     A pane with no owner pid still ends the slot. A recorded owner is
     dropped only when pane_transition returns done. none leaves that row.
-    Phase exited, a matching proven token, and a held token do not drop
-    it. A weak exit stores exited through pane_next, and a later Stop
-    still leaves the row.
+    A gone fine token stored as proven, or a held token that _held_proves,
+    becomes process_exit and the table returns done, so the row is dropped.
+    A weak process_exit is none, so the phase stays weak.
     """
     if event not in END_EVENTS:
         return False
@@ -448,6 +449,74 @@ def finish_if_idle(state: dict, now: float) -> None:
     state["grace_until"] = now + SETTLE_SECS
 
 
+def choose_pane_event(state: dict, event: str, session: str) -> str:
+    """The one table event for this hook callback. No pane write happens here."""
+    if session == AGGREGATE:
+        count = int(state.get("aggregate") or 0)
+        if event == "SessionStart":
+            return "record_aggregate"
+        if event in BUSY_EVENTS:
+            if count > 0:
+                return "touch_aggregate"
+            return hook_event(state, event)
+        if event in END_EVENTS:
+            if count == 0:
+                return "aggregate_zero"
+            if count > 1:
+                return "touch_partial"
+            return hook_event(state, event)
+    if event in BUSY_EVENTS:
+        return "record_named"
+    if event in END_EVENTS:
+        return hook_event(state, event)
+    return hook_event(state, event)
+
+
+def _record_named(state: dict, event: str, session: str, now: float, owner: int, owner_started: str) -> None:
+    """Apply record_named: one busy key and that owner, whichever key it is."""
+    busy = state["busy"]
+    if event == "SessionStart" and session in busy:
+        index = 2
+        while f"{session}#{index}" in busy:
+            index += 1
+        slot = f"{session}#{index}"
+        state["busy"][slot] = now
+        remember_owner(state, slot, owner, owner_started)
+        return
+    if event == "SessionStart" or not members_of(busy, session):
+        state["busy"][session] = now
+        remember_owner(state, session, owner, owner_started)
+        return
+    for member in members_of(busy, session):
+        state["busy"][member] = now
+        remember_owner(state, member, owner, owner_started)
+
+
+def _finish_slot(state: dict, session: str, now: float) -> None:
+    """Drop the slot a done result ended. Named sessions do not arm grace."""
+    if session == AGGREGATE:
+        count = int(state.get("aggregate") or 0)
+        if count > 0:
+            count -= 1
+            state["aggregate"] = count
+        if count == 0 and AGGREGATE in state["busy"]:
+            _pop_session(state, AGGREGATE)
+        if count == 0:
+            finish_if_idle(state, now)
+        return
+    if session in state["busy"]:
+        _pop_session(state, session)
+        return
+    members = members_of(state["busy"], session)
+    if not members:
+        return
+    oldest = min(members, key=lambda item: (state["busy"][item], item))
+    _pop_session(state, oldest)
+
+
+_PANE_OUTCOME = {"write": "none", "ok": True, "event": "", "release": False}
+
+
 def apply_event(
     state: dict,
     event: str,
@@ -457,75 +526,38 @@ def apply_event(
     owner_started: str = "",
     chat_pid: int = 0,
 ) -> dict:
-    """Fold one hook event into pane state. Pure aside from the clock passed in."""
-    nxt = normalize(state, now)
-    if chat_pid:
+    """Apply the one table result for this hook callback.
+
+    none returns the same state. refresh changes only the aggregate timestamp.
+    A Stop already at aggregate zero is aggregate_zero, not stop.
+    """
+    nxt = normalize(copy.deepcopy(state), now)
+    ev = choose_pane_event(nxt, event, session)
+    write, ok = commit_pane(
+        nxt,
+        ev,
+        now=now,
+        owner=owner,
+        owner_started=owner_started,
+        session=session,
+        hook_name=event,
+    )
+    release = False
+    if write == "done" and ok:
+        owner_now = _pane_owner(state)
+        release = owner_now is not None and not alive(owner_now[0])
+    _PANE_OUTCOME["write"] = write
+    _PANE_OUTCOME["ok"] = ok
+    _PANE_OUTCOME["event"] = ev
+    _PANE_OUTCOME["release"] = release
+    if write == "none":
+        return state
+    if not ok:
+        return nxt
+    if write != "refresh" and chat_pid:
         nxt["chat_pid"] = int(chat_pid)
         token = hires_start(int(chat_pid))
         nxt["chat_ident"] = token if fine_start(token) else ""
-    if session == AGGREGATE:
-        count = int(nxt.get("aggregate") or 0)
-        if event == "SessionStart":
-            count += 1
-            nxt["aggregate"] = count
-            nxt["busy"][AGGREGATE] = now
-            remember_owner(nxt, AGGREGATE, owner, owner_started)
-            nxt["grace_until"] = 0.0
-        elif event in BUSY_EVENTS:
-            nxt["busy"][AGGREGATE] = now
-            remember_owner(nxt, AGGREGATE, owner, owner_started)
-            nxt["grace_until"] = 0.0
-        elif event in END_EVENTS:
-            previous = count
-            if count > 0:
-                count -= 1
-            nxt["aggregate"] = count
-            # The grace follows only this count returning to zero. A Stop
-            # whose count is already zero does not arm it. A recorded owner
-            # stays when pane_transition returns none. A slot with no owner
-            # pid still ends. At aggregate zero the table returns refresh
-            # for a proven owner, and that updates only the timestamp. A
-            # weak or unproven owner gets none and the timestamp stays.
-            if previous > 0 and count == 0 and _chooser_drops_row(nxt, event):
-                _pop_session(nxt, AGGREGATE)
-                finish_if_idle(nxt, now)
-            elif count == 0:
-                if pane_transition(owner_phase(nxt), "aggregate_zero") == "refresh" and AGGREGATE in nxt["busy"]:
-                    nxt["busy"][AGGREGATE] = now
-            else:
-                nxt["busy"][AGGREGATE] = now
-                nxt["grace_until"] = 0.0
-        return note_generation(state, nxt)
-    if event in BUSY_EVENTS:
-        if event == "SessionStart" and session in nxt["busy"]:
-            # Two live sessions collapsed onto one key. Keep both until both stop.
-            index = 2
-            while f"{session}#{index}" in nxt["busy"]:
-                index += 1
-            slot = f"{session}#{index}"
-            nxt["busy"][slot] = now
-            remember_owner(nxt, slot, owner, owner_started)
-        elif event == "SessionStart" or not members_of(nxt["busy"], session):
-            nxt["busy"][session] = now
-            remember_owner(nxt, session, owner, owner_started)
-        else:
-            # A later busy event records a fine token when none is stored yet.
-            for member in members_of(nxt["busy"], session):
-                nxt["busy"][member] = now
-                remember_owner(nxt, member, owner, owner_started)
-        nxt["grace_until"] = 0.0
-    elif event in END_EVENTS:
-        # A named Stop or SessionEnd does not arm the grace. A recorded
-        # owner stays when pane_transition returns none. A slot with no
-        # owner pid still ends.
-        if _chooser_drops_row(nxt, event):
-            if session in nxt["busy"]:
-                _pop_session(nxt, session)
-            else:
-                members = members_of(nxt["busy"], session)
-                if members:
-                    oldest = min(members, key=lambda item: (nxt["busy"][item], item))
-                    _pop_session(nxt, oldest)
     return note_generation(state, nxt)
 
 
@@ -1471,6 +1503,17 @@ OWNER_EVENTS = (
     "piped_chat",
     "blocked",
     "aggregate_zero",
+    "record_aggregate",
+    "touch_aggregate",
+    "touch_partial",
+    "record_named",
+)
+_DIRECT_EVENTS = (
+    "aggregate_zero",
+    "record_aggregate",
+    "touch_aggregate",
+    "touch_partial",
+    "record_named",
 )
 _PANE_WRITES = {
     ("proven", "start"): "working",
@@ -1485,6 +1528,28 @@ _PANE_WRITES = {
     ("idle_clear", "piped_chat"): "done",
     ("proven", "blocked"): "paint_blocked",
     ("proven", "aggregate_zero"): "refresh",
+    ("no_owner", "stop"): "done",
+    ("no_owner", "piped_chat"): "done",
+    ("no_owner", "record_aggregate"): "record_aggregate",
+    ("proven", "record_aggregate"): "record_aggregate",
+    ("weak", "record_aggregate"): "record_aggregate",
+    ("exited", "record_aggregate"): "record_aggregate",
+    ("idle_clear", "record_aggregate"): "record_aggregate",
+    ("no_owner", "touch_aggregate"): "touch_aggregate",
+    ("proven", "touch_aggregate"): "touch_aggregate",
+    ("weak", "touch_aggregate"): "touch_aggregate",
+    ("exited", "touch_aggregate"): "touch_aggregate",
+    ("idle_clear", "touch_aggregate"): "touch_aggregate",
+    ("no_owner", "touch_partial"): "touch_partial",
+    ("proven", "touch_partial"): "touch_partial",
+    ("weak", "touch_partial"): "touch_partial",
+    ("exited", "touch_partial"): "touch_partial",
+    ("idle_clear", "touch_partial"): "touch_partial",
+    ("no_owner", "record_named"): "record_named",
+    ("proven", "record_named"): "record_named",
+    ("weak", "record_named"): "record_named",
+    ("exited", "record_named"): "record_named",
+    ("idle_clear", "record_named"): "record_named",
 }
 
 
@@ -1759,35 +1824,77 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     return paint_status(kind, pid, token)
 
 
-def commit_pane(state: dict, event: str, rule_id: str = "") -> tuple[str, bool]:
-    """Apply one table result. none and refresh change nothing here.
+def commit_pane(
+    state: dict,
+    event: str,
+    rule_id: str = "",
+    *,
+    now: float = 0.0,
+    owner: int = 0,
+    owner_started: str = "",
+    session: str = "",
+    hook_name: str = "",
+) -> tuple[str, bool]:
+    """Apply one table result. none assigns nothing and writes no tty.
 
-    pane_transition chooses working, done, paint_blocked, refresh, or none.
-    none does not assign phase, busy, or an owner row, and it does not write
-    a tty. A weak process_exit stays unstored. A live idle_clear owner is
-    not rewritten to weak. refresh is applied by the caller as a timestamp
-    only. paint_blocked is the only result that calls emit_osc. A proven
-    outer that is already gone makes Stop, SessionEnd, and a prompt into
-    process_exit, so they still choose done. The held tty is written only
-    when its pid is that owner. A mismatched or unconfirmed held pid writes
-    nothing and does not open another tty. A failed done write does not
-    change the phase. The caller drops the row after a done write has
-    succeeded.
+    refresh updates only the aggregate busy timestamp. A Stop already at
+    aggregate zero is that result, not stop, so it does not paint done or
+    store idle_clear. record_aggregate, touch_aggregate, touch_partial, and
+    record_named are the only results that create a slot. paint_blocked is
+    the only result that calls emit_osc. remember_owner, including an
+    identity drop, runs only for a result that records an owner.
     """
-    event = _chooser_event(state, event)
+    if event not in _DIRECT_EVENTS:
+        event = _chooser_event(state, event)
     phase = _phase_for_event(state, event)
     write = pane_transition(phase, event)
-    if write == "none" or write == "refresh":
+    if write == "none":
+        return write, True
+    if write == "refresh":
+        if AGGREGATE in state["busy"]:
+            state["busy"][AGGREGATE] = now
         return write, True
     if write == "paint_blocked":
         return write, emit_osc(state, "blocked", rule_id)
+    if write == "record_aggregate":
+        state["aggregate"] = int(state.get("aggregate") or 0) + 1
+        state["busy"][AGGREGATE] = now
+        remember_owner(state, AGGREGATE, owner, owner_started)
+        state["grace_until"] = 0.0
+        return write, True
+    if write == "touch_aggregate":
+        state["busy"][AGGREGATE] = now
+        remember_owner(state, AGGREGATE, owner, owner_started)
+        return write, True
+    if write == "touch_partial":
+        count = int(state.get("aggregate") or 0)
+        if count > 1:
+            state["aggregate"] = count - 1
+        state["busy"][AGGREGATE] = now
+        state["grace_until"] = 0.0
+        return write, True
+    if write == "record_named":
+        _record_named(state, hook_name or event, session, now, owner, owner_started)
+        state["grace_until"] = 0.0
+        return write, True
     if write == "done":
+        hook_end = hook_name if hook_name in END_EVENTS else "Stop"
+        drops = bool(session) and _chooser_drops_row(state, hook_end)
+        if _pane_owner(state) is None:
+            if drops:
+                _finish_slot(state, session, now)
+            return write, True
         _save_proven_owner(state)
         ok = _paint_one_owner(state, "idle")
         if not ok:
-            return write, ok
+            return write, False
         state["phase"] = pane_next(phase, event)
-        return write, ok
+        owner_now = _pane_owner(state)
+        if owner_now is not None and not alive(owner_now[0]):
+            _drop_done_owner(state, owner_now[0])
+        if drops:
+            _finish_slot(state, session, now)
+        return write, True
     if write == "working":
         ok = _paint_one_owner(state, "working")
         state["phase"] = pane_next(phase, event)
@@ -1795,7 +1902,7 @@ def commit_pane(state: dict, event: str, rule_id: str = "") -> tuple[str, bool]:
     raise ValueError(write)
 
 
-def commit_blocked(_pane: str, path: str, rule_id: str = "") -> tuple[str, bool]:
+def commit_blocked(path: str, rule_id: str = "") -> tuple[str, bool]:
     """Run the blocked event through the table and paint only that result."""
     chosen = {"write": "none", "ok": False}
 
@@ -2031,22 +2138,6 @@ def ownership(dest: str) -> str:
     if digest == kind:
         return "match"
     return "differs"
-
-
-def owner_is_dead(owner: object) -> bool:
-    """True only when this pid is absent from the process table.
-
-    A live pid stays when its token is empty, ``sec:`` plus whole-second
-    lstart, a bare whole-second lstart, or a fine token that names a
-    different start. A ps error is not death.
-    """
-    if not isinstance(owner, (int, str)) or not owner:
-        return False
-    try:
-        pid = int(owner)
-    except ValueError:
-        return False
-    return process_snapshot(pid) is None
 
 
 def _process_matches(pid: int, started: str) -> bool:
@@ -2639,9 +2730,9 @@ def _watch_loop(pane: str, path: str) -> None:
             known_owners = live_wait
             pane_owner = _pane_owner(state)
             owner_alive = False
-            # pane_transition returns working, done, or none. commit_pane
-            # stores pane_next. This loop does not assign phase. Holding
-            # the tty does not write the phase.
+            # pane_transition returns working, done, paint_blocked, refresh,
+            # or none. commit_pane stores pane_next only for working and done.
+            # This loop does not assign phase. Holding the tty does not write the phase.
             if pane_owner is not None and not _pid_gone(pane_owner[0]) and alive(pane_owner[0]):
                 owner_alive = True
                 if identity_proven(pane_owner[0], pane_owner[1]):
@@ -2705,7 +2796,7 @@ def _watch_loop(pane: str, path: str) -> None:
                 quiet_since = None
                 if reported != "blocked":
                     rule_id = str(view.get("id") or "")
-                    write, ok = commit_blocked(pane, path, rule_id)
+                    write, ok = commit_blocked(path, rule_id)
                     if write == "paint_blocked" and ok:
                         reported, misses = note_report(pane, path, "blocked", reported, misses)
                         if reported is None and misses >= 30:
@@ -2888,35 +2979,32 @@ def main() -> int:
     chosen = {"write": "none", "ok": False, "release": False}
 
     def fold(state: dict) -> None:
-        ev = hook_event(state, event)
-        if event in END_EVENTS:
-            write, ok = commit_pane(state, ev)
-            chosen["write"] = write
-            chosen["ok"] = ok
-            if write == "done" and not ok:
-                return
-            owner_now = _pane_owner(state)
-            if write == "done" and ok and owner_now is not None and not alive(owner_now[0]):
-                chosen["release"] = True
-                # commit_pane already stored exited, so a later chooser
-                # pass sees none. The drop belongs to this done result.
-                _drop_done_owner(state, owner_now[0])
         revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
-        if event in END_EVENTS:
-            revised["phase"] = state.get("phase") or ""
-            if state.get("proven_pid"):
-                revised["proven_pid"] = state.get("proven_pid")
-                revised["proven_ident"] = state.get("proven_ident") or ""
-        else:
-            write, ok = commit_pane(revised, ev)
-            chosen["write"] = write
-            chosen["ok"] = ok
-            owner_now = _pane_owner(revised)
-            if write == "done" and ok and owner_now is not None and not alive(owner_now[0]):
-                chosen["release"] = True
-                _drop_done_owner(revised, owner_now[0])
-        state.clear()
-        state.update(revised)
+        write = str(_PANE_OUTCOME["write"])
+        ok = bool(_PANE_OUTCOME["ok"])
+        slot_ev = str(_PANE_OUTCOME["event"])
+        chosen["write"] = write
+        chosen["ok"] = ok
+        chosen["release"] = bool(_PANE_OUTCOME["release"])
+        # A busy hook can stamp the slot and then paint. A Stop already at
+        # aggregate zero is only refresh, so it is not also committed as stop.
+        if event not in END_EVENTS:
+            target = state if revised is state else revised
+            pane_ev = hook_event(target, event)
+            if pane_ev != slot_ev:
+                owner_now = _pane_owner(target)
+                dead = owner_now is not None and not alive(owner_now[0])
+                write2, ok2 = commit_pane(target, pane_ev)
+                if write2 != "none":
+                    chosen["write"] = write2
+                    chosen["ok"] = ok2
+                    revised = target
+                    if write2 == "done" and ok2 and dead:
+                        chosen["release"] = True
+        if revised is not state:
+            saved = dict(revised)
+            state.clear()
+            state.update(saved)
 
     state = update(path, fold)
     log(f"state event={event} busy={len(state['busy'])} grace_until={state['grace_until']:.3f}")
@@ -2935,7 +3023,7 @@ def main() -> int:
         send_report(pane, path, "working")
     elif kind == "blocked":
         rule_id = str(screen_view(screen).get("id") or "")
-        write, ok = commit_blocked(pane, path, rule_id)
+        write, ok = commit_blocked(path, rule_id)
         if write == "paint_blocked" and ok:
             send_report(pane, path, kind)
     if chosen["release"]:
