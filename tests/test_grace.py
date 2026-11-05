@@ -1,13 +1,14 @@
 """Grace rules for the Kiro hook.
 
-Herdr drops a working report when a foreground turn repaints onto the idle
-prompt, about 0.2s after Stop, and it keeps the old sequence. Re-sending
-working after that drop is what holds the pane for the grace period.
+The hook sends one working report. It does not send that report again for
+the rest of a SessionStart grace. A named Stop does not start that grace.
 """
 
 import errno
+import io
 import json
 import os
+import select
 import shlex
 import shutil
 import signal
@@ -85,23 +86,29 @@ def old_policy(state, moment):
     return None
 
 
-def new_policy(state, moment):
-    banner = False
-    return hook.next_action(len(state["busy"]), state["grace_until"], banner, moment)
-
-
 class GraceTests(unittest.TestCase):
     def test_old_policy_is_idle_during_the_grace(self):
         reports, drop_at = simulate(old_policy)
         self.assertEqual(effective(reports, drop_at, 2.0), "idle")
 
-    def test_reassert_holds_working_until_grace_ends(self):
-        reports, drop_at = simulate(new_policy)
-        grace_end = 1.0 + hook.SETTLE_SECS
-        self.assertEqual(effective(reports, drop_at, grace_end - 0.05), "working")
-        self.assertEqual(effective(reports, drop_at, grace_end + 0.25), "idle")
-        idle_at = next(stamped for stamped, kind in reports if kind == "idle")
-        self.assertGreaterEqual(idle_at, grace_end - 0.01)
+    def test_one_working_report_and_the_session_start_grace(self):
+        # A named Stop does not arm the grace. The SessionStart count
+        # returning to zero does, and a later Stop does not arm it again.
+        named = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "parent", 0.0)
+        named = hook.apply_event(named, "Stop", "parent", 1.0)
+        self.assertEqual(named["grace_until"], 0.0)
+        self.assertEqual(hook.next_action(0, named["grace_until"], False, 1.1), "idle")
+        state = hook.fresh_state()
+        state = hook.apply_event(state, "SessionStart", hook.AGGREGATE, 0.0)
+        state = hook.apply_event(state, "Stop", hook.AGGREGATE, 1.0)
+        self.assertEqual(state["grace_until"], 1.0 + hook.SETTLE_SECS)
+        self.assertEqual(hook.next_action(0, state["grace_until"], False, 1.2), "working")
+        again = hook.apply_event(state, "Stop", hook.AGGREGATE, 1.3)
+        self.assertEqual(again["grace_until"], 1.0 + hook.SETTLE_SECS)
+        self.assertEqual(
+            hook.next_action(0, again["grace_until"], False, again["grace_until"] + 0.05),
+            "idle",
+        )
 
     def test_parallel_sessions_stay_busy_until_both_stop(self):
         state = hook.fresh_state()
@@ -115,28 +122,21 @@ class GraceTests(unittest.TestCase):
         self.assertNotIn("a", state["busy"])
         self.assertIn("b", state["busy"])
         state = hook.apply_event(state, "Stop", "b", 4)
-        self.assertEqual(state["grace_until"], 4 + hook.SETTLE_SECS)
-        self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], False, state["grace_until"] - 0.05),
-            "working",
-        )
-        self.assertEqual(
-            hook.next_action(len(state["busy"]), state["grace_until"], False, state["grace_until"] + 0.05),
-            "idle",
-        )
+        self.assertEqual(state["grace_until"], 0.0)
+        self.assertEqual(hook.next_action(0, state["grace_until"], False, 4.05), "idle")
 
     def test_banner_does_not_start_the_settle_grace(self):
         state = hook.fresh_state()
         state = hook.apply_event(state, "Stop", "parent", 5)
-        self.assertEqual(state["grace_until"], 5 + hook.SETTLE_SECS)
-        state = hook.note_banner(state, True, 20)
-        self.assertEqual(state["grace_until"], 5 + hook.SETTLE_SECS)
+        self.assertEqual(state["grace_until"], 0.0)
+        state = hook.note_banner(state, 20)
+        self.assertEqual(state["grace_until"], 0.0)
         self.assertEqual(
             hook.next_action(len(state["busy"]), state["grace_until"], True, 20),
             "working",
         )
-        quiet = hook.note_banner(state, False, 21)
-        self.assertEqual(quiet["grace_until"], 5 + hook.SETTLE_SECS)
+        quiet = hook.note_banner(state, 21)
+        self.assertEqual(quiet["grace_until"], 0.0)
         self.assertEqual(
             hook.next_action(len(quiet["busy"]), quiet["grace_until"], False, 21),
             "idle",
@@ -239,9 +239,10 @@ class GraceTests(unittest.TestCase):
         state = hook.fresh_state()
         state = hook.apply_event(state, "UserPromptSubmit", "step-1", 0)
         state = hook.apply_event(state, "Stop", "step-1", 2)
+        self.assertEqual(state["grace_until"], 0.0)
         self.assertEqual(
             hook.next_action(len(state["busy"]), state["grace_until"], False, 2.1),
-            "working",
+            "idle",
         )
         state = hook.apply_event(state, "UserPromptSubmit", "step-2", 2.15)
         self.assertEqual(state["grace_until"], 0.0)
@@ -1258,7 +1259,7 @@ class GraceTests(unittest.TestCase):
         self.assertIn("sess", state["busy"])
         state = hook.apply_event(state, "SessionEnd", "sess", 2.0)
         self.assertNotIn("sess", state["busy"])
-        self.assertEqual(state["grace_until"], 2.0 + hook.SETTLE_SECS)
+        self.assertEqual(state["grace_until"], 0.0)
 
     def test_sigterm_removes_the_rules_dir_and_a_dead_pid_leftover(self):
         dead = None
@@ -1488,7 +1489,7 @@ class GraceTests(unittest.TestCase):
         def seed(state):
             state["seq"] = 4
 
-        def states_for(_reported, kind):
+        def states_for(kind):
             hook.update(path, seed)
             calls = []
 
@@ -1500,10 +1501,8 @@ class GraceTests(unittest.TestCase):
                 self.assertTrue(hook.send_report("w1:p1", path, kind))
             return [args[args.index("--state") + 1] for args in calls]
 
-        self.assertEqual(states_for("working", "idle"), ["idle"])
-        self.assertEqual(states_for("blocked", "idle"), ["idle"])
-        self.assertEqual(states_for("idle", "idle"), ["idle"])
-        self.assertEqual(states_for("working", "working"), ["working"])
+        self.assertEqual(states_for("idle"), ["idle"])
+        self.assertEqual(states_for("working"), ["working"])
 
     def test_finished_turn_stays_done_until_seen_and_does_not_release(self):
         # done is idle with seen false. Working|Blocked -> Idle on a
@@ -1560,7 +1559,8 @@ class GraceTests(unittest.TestCase):
     def test_app_hc_read_failure_does_not_emit_done_via_app_quiet(self):
         # A failed App read is not an empty screen. app_quiet must not report
         # idle for that tick, and a held working banner still counts. A later
-        # successful empty read may report idle. That hook word is not a release.
+        # empty read owes state=done. When that write fails, it is not a
+        # finished idle and it does not release.
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1631,9 +1631,8 @@ class GraceTests(unittest.TestCase):
                 ),
             )
             hook.watch_loop("t7", path)
-        self.assertEqual(reports[0], "working")
-        self.assertEqual(reports[-1], "idle")
-        self.assertEqual(reports.count("idle"), 1)
+        self.assertEqual(reports, ["working", "working"])
+        self.assertNotIn("idle", reports)
         self.assertEqual(pane_reads["n"], 0)
         self.assertEqual(releases, [])
 
@@ -1680,16 +1679,12 @@ class GraceTests(unittest.TestCase):
             calls.append((reads["n"], tuple(args)))
             return True
 
-        def capture(payload, _pids):
-            osc.append(payload)
-            return "/dev/pts/0"
-
         def view(_text):
             return {"state": "idle", "id": None, "ok": True}
 
         def refuse_run(argv, *_args, **_kwargs):
-            # A host without /proc names the owner tty with lsof and ps.
-            # That lookup is not a herdr command. An empty result holds no fd.
+            # A host without /proc asks lsof for stdout. An empty result
+            # holds no fd. ps is not a fallback, and neither is a herdr command.
             command = argv[0] if isinstance(argv, (list, tuple)) and argv else ""
             if os.path.basename(str(command)) in ("lsof", "ps"):
                 return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -1707,7 +1702,6 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
             mock.patch.object(hook, "screen_view", view),
-            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
             mock.patch.object(hook.time, "time", lambda: clock["now"]),
             mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
         ):
@@ -1763,7 +1757,6 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
             mock.patch.object(hook, "screen_view", view),
-            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
             mock.patch.object(hook.time, "time", lambda: clock["now"]),
             mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
             self.assertRaises(SystemExit),
@@ -2105,14 +2098,278 @@ class PaneFindingTests(unittest.TestCase):
             mock.patch.dict(os.environ, env, clear=False),
             mock.patch.object(hook, "herdr", lambda *_args: True),
             mock.patch.object(hook, "paint_status", return_value=True) as paint,
-            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", return_value="/dev/pts/1") as walked,
             mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as direct,
         ):
             self.assertTrue(hook.send_report("t7", path, "working"))
             self.assertTrue(hook.send_report("t7", path, "idle"))
         paint.assert_not_called()
-        walked.assert_not_called()
         direct.assert_not_called()
+
+    def test_live_owner_older_than_the_stale_window_stays(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        state = hook.fresh_state()
+        state["busy"] = {"sess": time.time() - (hook.STALE_SECS + 5)}
+        state["owners"] = {"sess": proc.pid}
+        state["owner_ident"] = {"sess": "sec:old"}
+        state["phase"] = "weak"
+        hook.begin_tick()
+        kept = hook.normalize(state, time.time())
+        self.assertEqual(kept["owners"].get("sess"), proc.pid)
+        self.assertIn("sess", kept["busy"])
+        self.assertEqual(kept["phase"], "weak")
+
+    def test_stop_on_a_live_weak_owner_keeps_the_row(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        hook.begin_tick()
+        state = hook.apply_event(hook.fresh_state(), "UserPromptSubmit", "sess", 1.0, proc.pid, "")
+        state["owner_ident"] = {"sess": "sec:old"}
+        state["phase"] = "weak"
+        with mock.patch.object(hook, "hires_start", lambda _pid: "sec:old"):
+            nxt = hook.apply_event(state, "Stop", "sess", 2.0)
+            write, _ok = hook.commit_pane(nxt, "stop")
+        self.assertEqual(write, "none")
+        self.assertEqual(nxt["owners"].get("sess"), proc.pid)
+        self.assertIn("sess", nxt["busy"])
+        self.assertEqual(nxt["phase"], "weak")
+        self.assertEqual(nxt["grace_until"], 0.0)
+
+    def test_unresolved_tty_leaves_the_proven_row(self):
+        state = hook.fresh_state()
+        state["owners"] = {"sess": 4242}
+        state["owner_ident"] = {"sess": "100.000000"}
+        state["phase"] = "proven"
+        state["busy"] = {"sess": time.time()}
+        hook._close_held_fd()
+        with (
+            mock.patch.object(hook, "alive", lambda _pid: False),
+            mock.patch.object(hook.herdr_kiro_osc, "_tty_opens", lambda _pid: iter(())),
+        ):
+            write, ok = hook.commit_pane(state, "stop")
+        self.assertEqual(write, "done")
+        self.assertFalse(ok)
+        self.assertEqual(state["phase"], "proven")
+        self.assertEqual(state["owners"].get("sess"), 4242)
+
+    def test_settled_stop_does_not_paint_a_newer_generation(self):
+        state = hook.fresh_state()
+        state["generation"] = 4
+        state["phase"] = "proven"
+        state["owners"] = {"sess": 50}
+        state["owner_ident"] = {"sess": "100.000000"}
+        state["busy"] = {"sess": 1.0}
+        write, ok = hook.commit_if_current(state, "stop", 3)
+        self.assertEqual((write, ok), ("none", False))
+        self.assertEqual(state["phase"], "proven")
+
+    def test_gone_proven_outer_still_writes_done_and_releases(self):
+        events = ("Stop", "SessionEnd", "UserPromptSubmit")
+        for event in events:
+            with self.subTest(event=event):
+                self._gone_outer_event(event, phase="proven")
+                self._gone_outer_event(event, phase="")
+
+    def _gone_outer_event(self, event, phase):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        hook.begin_tick()
+        token = hook.hires_start(proc.pid)
+        self.assertTrue(hook.fine_start(token), token)
+        hook._close_held_fd()
+        hook._hold_live_owner(proc.pid, token)
+        self.assertGreaterEqual(hook._pane_fd, 0)
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        hook.begin_tick()
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-gone-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "XDG_STATE_HOME": directory,
+            "HERDR_KIRO_LOG": os.path.join(directory, "hook.log"),
+        }
+        calls = []
+        payload = json.dumps({"session_id": "sess"})
+        with mock.patch.dict(os.environ, env, clear=False):
+            path = hook.state_path("t7")
+
+            def seed(state):
+                state["busy"] = {"sess": time.time()}
+                state["owners"] = {"sess": proc.pid}
+                state["owner_ident"] = {"sess": token}
+                state["phase"] = phase
+                state["seq"] = 4
+
+            hook.update(path, seed)
+            with (
+                mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+                mock.patch.object(sys, "stdin", io.StringIO(payload)),
+                mock.patch.object(hook, "herdr", lambda *args: calls.append(tuple(args)) or True),
+                mock.patch.object(hook, "ensure_watcher", lambda *_args: None),
+                mock.patch.object(hook, "pane_text", lambda *_args: ""),
+                mock.patch.object(hook, "kiro_lineage", lambda: (0, "", 0, "")),
+            ):
+                self.assertEqual(hook.main(), 0)
+        done = b"\x1b]7501;state=done:app=kiro-cli\x1b\\"
+        self.assertIn(done, _read_pty(master))
+        self.assertIn(("release-agent", "t7"), [args[:2] for args in calls])
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertNotIn("sess", saved.get("owners") or {})
+        hook._close_held_fd()
+
+    def test_gone_chat_leaves_the_wait_set(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-chat-wait-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        seen = []
+
+        def wait(_self, pids, _timeout):
+            seen.append(list(pids))
+            if len(seen) >= 2:
+                raise SystemExit("stop")
+            return False
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["busy"] = {"sess": time.time()}
+            state["owners"] = {"sess": proc.pid}
+            state["owner_ident"] = {"sess": "sec:old"}
+            state["phase"] = "weak"
+            state["chat_pid"] = 424242
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook.OwnerExitWatch, "wait", wait),
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "pane_text", lambda _pane: "› ask a question or describe a task\n"),
+            mock.patch.object(hook, "hires_start", lambda _pid: "sec:old"),
+            self.assertRaises(SystemExit),
+        ):
+            hook._watch_loop("t7", path)
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertNotIn(424242, seen[-1])
+        self.assertIn(proc.pid, seen[-1])
+        self.assertTrue(hook.alive(proc.pid))
+
+    def test_eperm_is_not_an_immediate_wake(self):
+        watch = hook.OwnerExitWatch()
+        slept = []
+
+        def kill(_pid, _sig):
+            raise OSError(errno.EPERM, "denied")
+
+        def sleep(delay):
+            slept.append(delay)
+
+        with (
+            mock.patch.object(hook.os, "kill", kill),
+            mock.patch.object(hook.time, "sleep", sleep),
+            mock.patch.object(hook.time, "time", side_effect=[0.0, 0.0, 1.0]),
+        ):
+            self.assertFalse(watch._wait_kill([50], 0.2))
+        self.assertEqual(slept, [0.05])
+
+        slept.clear()
+
+        def open_fd(_pid):
+            raise OSError(errno.EPERM, "denied")
+
+        with (
+            mock.patch.object(hook.os, "pidfd_open", open_fd, create=True),
+            mock.patch.object(hook.time, "sleep", sleep),
+        ):
+            self.assertFalse(watch._wait_pidfd([50], 0.2))
+        self.assertEqual(slept, [0.2])
+
+    def test_failed_settled_done_retries_with_a_sleep(self):
+        # idle_clear plus stop still owes state=done. With no stdout tty the
+        # write fails. That is not a finished idle, and the retry sleeps.
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-retry-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        calls = []
+        slept = []
+
+        def seed(state):
+            state["watcher"] = os.getpid()
+            state["generation"] = 1
+            state["busy"] = {}
+            state["owners"] = {}
+            state["phase"] = "idle_clear"
+            state["grace_until"] = 0.0
+            state["proven_pid"] = 4242
+            state["proven_ident"] = "100.000000"
+            state["seq"] = 4
+
+        hook.update(path, seed)
+        hook._close_held_fd()
+
+        def sleep(delay):
+            slept.append(delay)
+
+        env = {
+            "HC_TERMINAL_ID": "t7",
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HERDR_KIRO_LOG": path + ".log",
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "EXIT_RETRY_CAP", 2),
+            mock.patch.object(hook, "process_snapshot", lambda _pid: None),
+            mock.patch.object(hook, "_hold_live_owner", lambda *_args: None),
+            mock.patch.object(hook.OwnerExitWatch, "wait", lambda *_args: False),
+            mock.patch.object(hook.time, "sleep", sleep),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(tuple(args)) or True),
+            mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
+            mock.patch.object(hook, "pane_text", lambda _pane: "› ask a question or describe a task\n"),
+        ):
+            hook._watch_loop("t7", path)
+        self.assertEqual(slept, [hook.TICK_SECS])
+        self.assertFalse(any(args[0] == "release-agent" for args in calls))
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        self.assertEqual(saved["phase"], "idle_clear")
+        self.assertEqual(saved["watcher"], 0)
+
+
+def _read_pty(master):
+    chunks = []
+    while True:
+        ready, _, _ = select.select([master], [], [], 0.3)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 if __name__ == "__main__":

@@ -56,12 +56,6 @@ def _stop(proc):
     proc.wait(timeout=5)
 
 
-def _scratch(prefix):
-    fd, path = tempfile.mkstemp(prefix=prefix)
-    os.close(fd)
-    return path
-
-
 def _live_start(pid):
     deadline = time.time() + 2
     while time.time() < deadline:
@@ -184,58 +178,6 @@ class OscDeliveryTests(unittest.TestCase):
         self.assertIn(payload, got)
         _stop(holder)
 
-    def test_setsid_hook_writes_the_ancestor_pty_not_its_pipe(self):
-        master, slave = os.openpty()
-        self.addCleanup(os.close, master)
-        self.addCleanup(os.close, slave)
-        proto = os.path.join(os.path.dirname(__file__), "..", "prototype")
-        hook_code = (
-            "import os, sys\n"
-            "sys.path.insert(0, sys.argv[1])\n"
-            "import herdr_kiro_osc as osc\n"
-            "payload = osc.encode(osc.fields_for('working'))\n"
-            "path = osc.write_to_pane(payload, [os.getppid()])\n"
-            "sys.stderr.write(path + '\\n')\n"
-            "raise SystemExit(0 if path else 3)\n"
-        )
-        parent_code = (
-            "import subprocess, sys\n"
-            "proc = subprocess.Popen(\n"
-            "    [sys.executable, '-c', sys.argv[1], sys.argv[2]],\n"
-            "    stdin=subprocess.DEVNULL,\n"
-            "    stdout=subprocess.PIPE,\n"
-            "    stderr=subprocess.PIPE,\n"
-            "    start_new_session=True,\n"
-            ")\n"
-            "out, err = proc.communicate(timeout=15)\n"
-            "open(sys.argv[3], 'wb').write(out)\n"
-            "open(sys.argv[4], 'wb').write(err)\n"
-            "open(sys.argv[5], 'w').write(str(proc.returncode))\n"
-        )
-        stdout_path = _scratch("herdr-kiro-hook-out-")
-        stderr_path = _scratch("herdr-kiro-hook-err-")
-        code_path = _scratch("herdr-kiro-hook-code-")
-        for path in (stdout_path, stderr_path, code_path):
-            self.addCleanup(lambda kept=path: os.path.exists(kept) and os.remove(kept))
-        parent = subprocess.Popen(
-            [sys.executable, "-c", parent_code, hook_code, proto, stdout_path, stderr_path, code_path],
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-        )
-        self.addCleanup(_stop, parent)
-        self.assertEqual(parent.wait(timeout=20), 0)
-        with open(code_path, encoding="utf-8") as handle:
-            self.assertEqual(handle.read().strip(), "0")
-        with open(stdout_path, "rb") as handle:
-            captured = handle.read()
-        self.assertNotIn(b"7501", captured)
-        with open(stderr_path, "rb") as handle:
-            reported = handle.read().decode("utf-8", "replace").strip()
-        self.assertEqual(reported, os.ttyname(slave))
-        got = _read_ready(master, 1.0)
-        self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got)
-
     def test_lsof_text_names_stdout_before_the_controlling_tty(self):
         text = "p42\nf1u\nn/dev/ttys000\nf2w\nn/dev/ttys000\nf0r\nn/dev/ttys001\nfcwd\nn/\n"
         self.assertEqual(
@@ -338,13 +280,9 @@ class OscHookTests(unittest.TestCase):
             calls.append(args)
             return True
 
-        def refuse(*_args, **_kwargs):
-            raise AssertionError("tty write")
-
         env = {"HC_TERMINAL_ID": "", "HERDR_ENV": ""}
         with (
             mock.patch.object(hook, "herdr", fake_herdr),
-            mock.patch.object(osc, "write_to_pane", refuse),
             mock.patch.dict(os.environ, env, clear=False),
         ):
             self.assertTrue(hook.send_report("w1:p1", path, "idle"))
@@ -391,10 +329,6 @@ class OscHookTests(unittest.TestCase):
             calls.append(tuple(args))
             return herdr_ok["value"]
 
-        def capture(payload, _pids, **_kwargs):
-            osc_writes.append(payload)
-            return "/dev/pts/0"
-
         def view(text):
             views.append(text)
             return {"state": "blocked", "id": "question_panel", "ok": True}
@@ -416,7 +350,6 @@ class OscHookTests(unittest.TestCase):
             mock.patch.object(hook, "_hc_screen", hc_screen),
             mock.patch.object(hook.subprocess, "check_output", pane_read),
             mock.patch.object(hook, "screen_view", view),
-            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
         ):
             self.assertFalse(hook.send_report("w1:p1", path, "idle"))
             self.assertFalse(hook.send_report("w1:p1", path, "blocked"))
@@ -468,7 +401,6 @@ class OscHookTests(unittest.TestCase):
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.object(hook, "_hc_screen", hc_fail),
             mock.patch.object(hook.subprocess, "check_output", refuse_pane),
-            mock.patch.object(hook.herdr_kiro_osc, "write_to_pane", capture),
         ):
             # No recorded owner. working and done are not painted here.
             # The herdr report still succeeds.
@@ -541,8 +473,7 @@ class AppExitOscTests(unittest.TestCase):
         with mock.patch.object(hook, "process_snapshot", lambda _pid: snap):
             hook.update(path, seed)
 
-    def _finish(self, path, pane, reason, env, busy=None):
-        del reason, busy
+    def _finish(self, path, pane, env):
         order = []
         payloads = []
         pid_lists = []
@@ -570,11 +501,6 @@ class AppExitOscTests(unittest.TestCase):
             order.append(("held",))
             return real_held()
 
-        def capture(payload, pids, **_kwargs):
-            payloads.append(payload)
-            pid_lists.append(list(pids))
-            return "/dev/pts/7"
-
         def refuse(*_args, **_kwargs):
             raise AssertionError("side-effecting command")
 
@@ -586,7 +512,6 @@ class AppExitOscTests(unittest.TestCase):
             mock.patch.object(hook, "emit_osc", spy_emit),
             mock.patch.object(hook, "_write_held_fd", spy_held),
             mock.patch.object(hook, "process_snapshot", lambda _pid: None),
-            mock.patch.object(osc, "write_to_pane", capture),
             mock.patch.object(hook.subprocess, "run", refuse),
             mock.patch.object(hook.subprocess, "check_output", refuse),
             mock.patch.object(hook.subprocess, "Popen", refuse),
@@ -597,7 +522,7 @@ class AppExitOscTests(unittest.TestCase):
 
     def test_non_idle_app_exit_writes_done_before_the_watcher_clears(self):
         # The exit write is the fd opened while the owner was alive.
-        # write_to_pane is not that write, and its success does not clear.
+        # Another tty is not that write, and its success does not clear.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-exit-")
         self.addCleanup(shutil.rmtree, directory, True)
         master, slave = os.openpty()
@@ -620,7 +545,7 @@ class AppExitOscTests(unittest.TestCase):
         owners = {"sess": 4242}
         path = os.path.join(directory, "owner-exit.json")
         self._seed(path, busy=busy, owners=owners)
-        ok, order, payloads, _pid_lists = self._finish(path, "t7", "owner exit", env, busy=busy)
+        ok, order, payloads, _pid_lists = self._finish(path, "t7", env)
         self.assertTrue(ok)
         self.assertEqual(payloads, [])
         self.assertNotIn(("emit", path, "idle", ""), order)
@@ -923,7 +848,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
             mock.patch.object(hook.os, "kill", fake_kill),
-            mock.patch.object(osc, "write_to_pane", lambda *_args, **_kwargs: ""),
             mock.patch.object(osc, "_tty_opens", lambda _pid: iter(())),
             mock.patch.object(osc, "_write_path", write_path),
             mock.patch.object(hook.subprocess, "run", refuse),
@@ -984,11 +908,6 @@ class ReapedExitTests(unittest.TestCase):
             if int(pid) == 4242 and not phase["dead"]:
                 yield proc_link, slave_name
 
-        def write_to_pane(_payload, _pids, **_kwargs):
-            if phase["watch"] or phase["dead"]:
-                return ""
-            return slave_name
-
         def refuse(*_args, **_kwargs):
             raise AssertionError("side-effecting command")
 
@@ -1008,7 +927,6 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
             mock.patch.object(hook.os, "kill", fake_kill),
             mock.patch.object(osc, "_tty_opens", tty_opens),
-            mock.patch.object(osc, "write_to_pane", write_to_pane),
             mock.patch.object(os, "open", open_path),
             mock.patch.object(hook, "hires_start", lambda _pid: "" if phase["dead"] else "100.000000"),
             mock.patch.object(hook.subprocess, "run", refuse),
@@ -1040,8 +958,8 @@ class ReapedExitTests(unittest.TestCase):
             json.dump(state, handle)
 
     def test_failed_held_write_does_not_count_another_tty(self):
-        # A miss on the held fd stays a miss. write_to_pane succeeding
-        # must not release the owner or clear the watcher.
+        # A miss on the held fd stays a miss. Another tty must not
+        # release the owner or clear the watcher.
         directory = tempfile.mkdtemp(prefix="herdr-kiro-held-miss-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1057,7 +975,7 @@ class ReapedExitTests(unittest.TestCase):
         def boom(_fd, _payload):
             raise OSError(errno.EIO, "closed")
 
-        def paint(_payload, _pids, **_kwargs):
+        def paint(_payload, _pid):
             painted.append(True)
             return "/dev/pts/7"
 
@@ -1077,7 +995,7 @@ class ReapedExitTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", reaped),
             mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
             mock.patch.object(osc, "_write_all", boom),
-            mock.patch.object(osc, "write_to_pane", paint),
+            mock.patch.object(osc, "write_pid", paint),
             mock.patch.object(hook.subprocess, "run", refuse),
             mock.patch.object(hook.subprocess, "check_output", refuse),
             mock.patch.object(hook.subprocess, "Popen", refuse),
@@ -1904,10 +1822,9 @@ class AncestorReportTests(unittest.TestCase):
             if os.path.exists(log_path):
                 with open(log_path, encoding="utf-8") as handle:
                     logged = handle.read()
-            # "watcher exit osc missed" also contains " osc ". Wait for a
-            # status line from emit_osc, which names the state. An empty
-            # token never becomes that attempt: the watcher has started and
-            # the pty stays empty.
+            # paint_status logs "osc working via", "osc done via", or
+            # "osc missed done". An empty token never becomes that attempt:
+            # the watcher has started and the pty stays empty.
             if "osc missed " in logged or "osc working via" in logged or "osc done" in logged:
                 break
             # A sec: token is not an identity. The watcher starts and the pty
@@ -1960,7 +1877,7 @@ class AncestorReportTests(unittest.TestCase):
 
     def test_matching_ancestor_token_receives_working(self):
         # commit_pane paints state=working through paint_status, which calls
-        # write_pid. sec: plus lstart is not that token, so the pty stays empty.
+        # write_pid. A fine token is that proof, so the pty receives working.
         got, logged, device, ident = self._status("match")
         if hook.fine_start(ident):
             self.assertIn(b"\x1b]7501;state=working:app=kiro-cli\x1b\\", got, logged)
@@ -2274,6 +2191,219 @@ class AgentsSectionTests(unittest.TestCase):
             hold.show([{"address": "t1", "status": "blocked", "focused": True}]),
             {"t1": "Needs you"},
         )
+
+
+class StdoutTtyTests(unittest.TestCase):
+    def test_stdout_resolution_table(self):
+        owner_master, owner_slave = os.openpty()
+        other_master, other_slave = os.openpty()
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        self.addCleanup(os.close, other_master)
+        self.addCleanup(os.close, other_slave)
+        owner = os.ttyname(owner_slave)
+        other = os.ttyname(other_slave)
+        payload = osc.encode(osc.fields_for("working"))
+        done = osc.encode(osc.fields_for("idle"))
+        rows = (
+            ("missing-fd", "", {}, ""),
+            ("ambiguous-tty", "f1\nn" + owner + "\nf1\nn" + other + "\n", {"1": owner}, ""),
+            ("recorded-stdout", "f1\nn" + owner + "\n", {"1": owner}, owner),
+        )
+        real_isdir = os.path.isdir
+
+        def hide_proc(path):
+            text = str(path)
+            if text.startswith("/proc/") and text.endswith("/fd"):
+                return False
+            return real_isdir(path)
+
+        for name, text, devices, expected in rows:
+            with self.subTest(name=name):
+                _drain(owner_master)
+                _drain(other_master)
+                with (
+                    mock.patch.object(osc.os.path, "isdir", hide_proc),
+                    mock.patch.object(osc, "_lsof_text", lambda _pid, text=text: text),
+                    mock.patch.object(osc, "_fd_devices", lambda _pid, devices=devices: dict(devices)),
+                ):
+                    written = osc.write_pid(payload, 4242)
+                self.assertEqual(written, expected)
+                if expected:
+                    self.assertIn(payload, _drain(owner_master))
+                else:
+                    self.assertEqual(_drain(owner_master), b"")
+                self.assertEqual(_drain(other_master), b"")
+
+        # The exit write uses the fd recorded for that stdout, not a new open.
+        hook._close_held_fd()
+        hook._pane_fd = os.dup(owner_slave)
+        hook._held_ident = "100.000000"
+        self.addCleanup(hook._close_held_fd)
+        state = hook.fresh_state()
+        state["owners"] = {"sess": 4242}
+        state["owner_ident"] = {"sess": "100.000000"}
+        state["phase"] = "proven"
+        state["busy"] = {"sess": 1.0}
+        _drain(owner_master)
+        _drain(other_master)
+        env = {"HERDR_ENV": "", "HERDR_PANE_ID": "", "HC_TERMINAL_ID": "t7"}
+        with (
+            mock.patch.object(hook, "alive", lambda _pid: False),
+            mock.patch.dict(os.environ, env, clear=False),
+        ):
+            write, ok = hook.commit_pane(state, "process_exit")
+        self.assertEqual((write, ok), ("done", True))
+        self.assertIn(done, _drain(owner_master))
+        self.assertEqual(_drain(other_master), b"")
+
+    def test_no_write_reaches_any_tty_but_the_owners(self):
+        owner_master, owner_slave = os.openpty()
+        other_master, other_slave = os.openpty()
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        self.addCleanup(os.close, other_master)
+        self.addCleanup(os.close, other_slave)
+        owner = os.ttyname(owner_slave)
+        other = os.ttyname(other_slave)
+        payload = osc.encode(osc.fields_for("working"))
+        opened = []
+        real_open = osc.os.open
+
+        def spy(path, flags, *args, **kwargs):
+            text = os.fsdecode(path) if isinstance(path, bytes) else path
+            opened.append(text)
+            if text in ("/dev/tty", other):
+                raise AssertionError(text)
+            return real_open(path, flags, *args, **kwargs)
+
+        real_isdir = os.path.isdir
+
+        def hide_proc(path):
+            text = str(path)
+            if text.startswith("/proc/") and text.endswith("/fd"):
+                return False
+            return real_isdir(path)
+
+        cases = (
+            ("missing-fd", "", {}),
+            ("ambiguous-tty", "f1\nn" + owner + "\nf1\nn" + other + "\n", {"1": owner, "0": other}),
+            ("recorded-stdout", "f1\nn" + owner + "\n", {"1": owner, "0": other}),
+        )
+        with (
+            mock.patch.object(osc.os, "open", spy),
+            mock.patch.object(osc.os.path, "isdir", hide_proc),
+        ):
+            for name, text, devices in cases:
+                with self.subTest(name=name):
+                    opened.clear()
+                    with (
+                        mock.patch.object(osc, "_lsof_text", lambda _pid, text=text: text),
+                        mock.patch.object(osc, "_fd_devices", lambda _pid, devices=devices: dict(devices)),
+                    ):
+                        osc.write_pid(payload, 4242)
+                    self.assertNotIn("/dev/tty", opened)
+                    self.assertNotIn(other, opened)
+                    if name == "recorded-stdout":
+                        self.assertIn(owner, opened)
+                    else:
+                        self.assertNotIn(owner, opened)
+        self.assertEqual(_drain(other_master), b"")
+        self.assertNotIn("/dev/tty", opened)
+
+    def test_hidden_proc_holds_stdout_and_a_failed_open_does_not_spill(self):
+        owner_master, owner_slave = os.openpty()
+        other_master, other_slave = os.openpty()
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        self.addCleanup(os.close, other_master)
+        self.addCleanup(os.close, other_slave)
+        owner = os.ttyname(owner_slave)
+        other = os.ttyname(other_slave)
+        proc = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=owner_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        hook.begin_tick()
+        token = hook.hires_start(proc.pid)
+        self.assertTrue(hook.fine_start(token), token)
+        real_isdir = os.path.isdir
+
+        def hide_proc(path):
+            text = str(path)
+            if text.startswith("/proc/") and text.endswith("/fd"):
+                return False
+            return real_isdir(path)
+
+        lsof_text = "f1\nn" + owner + "\n"
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        with (
+            mock.patch.object(osc.os.path, "isdir", hide_proc),
+            mock.patch.object(osc, "_lsof_text", lambda _pid: lsof_text),
+            mock.patch.object(osc, "_fd_devices", lambda _pid: {"1": owner}),
+        ):
+            hook._hold_live_owner(proc.pid, token)
+        self.assertGreaterEqual(hook._pane_fd, 0)
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        hook.begin_tick()
+        state = hook.fresh_state()
+        state["owners"] = {"sess": proc.pid}
+        state["owner_ident"] = {"sess": token}
+        state["phase"] = "proven"
+        state["busy"] = {"sess": 1.0}
+        env = {"HERDR_ENV": "", "HERDR_PANE_ID": "", "HC_TERMINAL_ID": "t7"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            write, ok = hook.commit_pane(state, "process_exit")
+        done = osc.encode(osc.fields_for("idle"))
+        self.assertEqual((write, ok), ("done", True))
+        self.assertIn(done, _drain(owner_master))
+        self.assertEqual(_drain(other_master), b"")
+
+        payload = osc.encode(osc.fields_for("blocked"))
+        opened = []
+        real_open = osc.os.open
+
+        def deny_stdout(path, flags, *args, **kwargs):
+            text = os.fsdecode(path) if isinstance(path, bytes) else path
+            opened.append(text)
+            if text == owner:
+                raise OSError(errno.EACCES, "denied")
+            if text in (other, "/dev/tty"):
+                raise AssertionError(text)
+            return real_open(path, flags, *args, **kwargs)
+
+        with (
+            mock.patch.object(osc.os, "open", deny_stdout),
+            mock.patch.object(osc.os.path, "isdir", hide_proc),
+            mock.patch.object(osc, "_lsof_text", lambda _pid: lsof_text),
+            mock.patch.object(osc, "_fd_devices", lambda _pid: {"1": owner, "0": other}),
+        ):
+            self.assertEqual(osc.write_pid(payload, proc.pid), "")
+        self.assertIn(owner, opened)
+        self.assertNotIn(other, opened)
+        self.assertNotIn("/dev/tty", opened)
+        self.assertEqual(_drain(other_master), b"")
+
+
+def _drain(master):
+    chunks = []
+    while True:
+        ready, _, _ = select.select([master], [], [], 0.05)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 if __name__ == "__main__":
