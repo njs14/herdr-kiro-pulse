@@ -2393,6 +2393,56 @@ class StdoutTtyTests(unittest.TestCase):
         self.assertNotIn("/dev/tty", opened)
         self.assertEqual(_drain(other_master), b"")
 
+    def test_a_missing_or_different_lsof_snapshot_writes_nothing(self):
+        owner_master, owner_slave = os.openpty()
+        other_master, other_slave = os.openpty()
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        self.addCleanup(os.close, other_master)
+        self.addCleanup(os.close, other_slave)
+        owner = os.ttyname(owner_slave)
+        other = os.ttyname(other_slave)
+        payload = osc.encode(osc.fields_for("working"))
+        real_isdir = os.path.isdir
+
+        def hide_proc(path):
+            text = str(path)
+            if text.startswith("/proc/") and text.endswith("/fd"):
+                return False
+            return real_isdir(path)
+
+        rows = (
+            ("empty-then-a-path", ["", "f1\nn" + owner + "\n"]),
+            ("ambiguous-second", ["f1\nn" + owner + "\n", "f1\nn" + owner + "\nf1\nn" + other + "\n"]),
+            ("different-second", ["f1\nn" + owner + "\n", "f1\nn" + other + "\n"]),
+            ("dev-tty", ["f1\nn/dev/tty\n", "f1\nn/dev/tty\n"]),
+            ("same-path", ["f1\nn" + owner + "\n", "f1\nn" + owner + "\n"]),
+        )
+        for name, snapshots in rows:
+            with self.subTest(name=name):
+                _drain(owner_master)
+                _drain(other_master)
+                pending = list(snapshots)
+
+                def text(_pid, pending=pending):
+                    if not pending:
+                        return ""
+                    return pending.pop(0)
+
+                with (
+                    mock.patch.object(osc.os.path, "isdir", hide_proc),
+                    mock.patch.object(osc, "_lsof_text", side_effect=text),
+                ):
+                    written = osc.write_pid(payload, 4242)
+                if name == "same-path":
+                    self.assertEqual(written, owner)
+                    self.assertIn(payload, _drain(owner_master))
+                else:
+                    self.assertEqual(written, "")
+                    self.assertEqual(_drain(owner_master), b"")
+                self.assertEqual(_drain(other_master), b"")
+                self.assertNotIn("/dev/tty", written)
+
 
 def _drain(master):
     chunks = []

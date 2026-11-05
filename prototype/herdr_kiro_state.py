@@ -57,6 +57,10 @@ AGENT = "kiro"
 SETTLE_SECS = 0.5
 STALE_SECS = 1800.0
 TICK_SECS = 0.2
+# A pidfd or kqueue exit that is already visible must not spin the watcher.
+# The sleep grows with consecutive wakes and never exceeds this cap.
+POLL_BACKOFF_CAP = 2.0
+POLL_SPIN_CAP = 30
 # A failed done is retried after a sleep. The cap stops the watcher without
 # release-agent and without writing another tty.
 EXIT_RETRY_CAP = 30
@@ -343,12 +347,62 @@ def _pop_session(state: dict, key: str) -> None:
 
 
 def _owner_is_live_weak(state: dict) -> bool:
-    """The pane owner is alive and not identity_proven."""
+    """The pane owner is alive and not identity_proven.
+
+    kill is the exit check. A process table can still name a reaped pid,
+    and that pid is not a live weak owner.
+    """
     owner = _pane_owner(state)
     if owner is None:
         return False
     pid, token = owner
+    if _pid_gone(pid):
+        return False
     return alive(pid) and not identity_proven(pid, token)
+
+
+def _chooser_event(state: dict, event: str) -> str:
+    """The event pane_transition sees. A proven exit is process_exit."""
+    if event != "process_exit" and _proven_exit_owed(state):
+        return "process_exit"
+    return event
+
+
+def _chooser_drops_row(state: dict, event: str) -> bool:
+    """True when Stop or SessionEnd may drop a busy slot.
+
+    A pane with no owner pid still ends the slot. A recorded owner is dropped
+    only when pane_transition returns done. none leaves the row, including a
+    dead sec: owner and a live weak owner. commit_pane stores exited after
+    that done write, and the row still drops from the proven token it saved.
+    """
+    if event not in END_EVENTS:
+        return False
+    if _pane_owner(state) is None:
+        return True
+    if _owner_is_live_weak(state):
+        return False
+    ev = _chooser_event(state, hook_event(state, event))
+    if pane_transition(_phase_for_event(state, ev), ev) == "done":
+        return True
+    # commit_pane moves a proven process_exit to exited before this runs.
+    # That done result still drops the row. A sec: token and a weak exit do not.
+    if (state.get("phase") or "") != "exited":
+        return False
+    owner = _pane_owner(state)
+    if owner is None:
+        return False
+    pid, token = owner
+    if not fine_start(token):
+        return False
+    try:
+        proven_pid = int(state.get("proven_pid") or 0)
+    except (TypeError, ValueError):
+        proven_pid = 0
+    proven_ident = state.get("proven_ident") if isinstance(state.get("proven_ident"), str) else ""
+    if proven_pid == pid and proven_ident == token:
+        return True
+    return _held_proves(token)
 
 
 def _held_proves(token: str) -> bool:
@@ -417,9 +471,10 @@ def apply_event(
                 count -= 1
             nxt["aggregate"] = count
             # The grace follows only this count returning to zero. A Stop
-            # whose count is already zero does not arm it. A live weak owner
-            # keeps the row until that pid is gone.
-            if previous > 0 and count == 0 and not _owner_is_live_weak(nxt):
+            # whose count is already zero does not arm it. The row stays when
+            # pane_transition returns none, including a dead sec: owner and a
+            # live weak owner.
+            if previous > 0 and count == 0 and _chooser_drops_row(nxt, event):
                 _pop_session(nxt, AGGREGATE)
                 finish_if_idle(nxt, now)
             elif count == 0:
@@ -448,9 +503,9 @@ def apply_event(
                 remember_owner(nxt, member, owner, owner_started)
         nxt["grace_until"] = 0.0
     elif event in END_EVENTS:
-        # A named Stop or SessionEnd does not arm the grace. A live weak
-        # owner keeps its row until that pid is gone.
-        if not _owner_is_live_weak(nxt):
+        # A named Stop or SessionEnd does not arm the grace. The owner row
+        # stays when pane_transition returns none.
+        if _chooser_drops_row(nxt, event):
             if session in nxt["busy"]:
                 _pop_session(nxt, session)
             else:
@@ -585,6 +640,7 @@ def herdr(*args: str) -> bool:
 # The token is the identity that proved the owner when the fd was opened.
 _pane_fd = -1
 _held_ident = ""
+_held_pid = 0
 _HELD_FLAGS = (
     os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
     os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
@@ -609,7 +665,7 @@ def _hold_live_owner(pid: int, ident: str = "") -> None:
     identity_proven, not the pid file. The fd has to be the named tty. Any
     other character device, including a replaced fd 1, is closed.
     """
-    global _pane_fd, _held_ident
+    global _pane_fd, _held_ident, _held_pid
     # An empty token is not proof. fine_start rejects sec: and a bare
     # whole-second lstart, so identity_proven does not hold that tty.
     if _pane_fd >= 0 or not identity_proven(pid, ident):
@@ -640,13 +696,15 @@ def _hold_live_owner(pid: int, ident: str = "") -> None:
         return
     _pane_fd = fd
     _held_ident = ident
+    _held_pid = pid
 
 
 def _close_held_fd() -> None:
-    global _pane_fd, _held_ident
+    global _pane_fd, _held_ident, _held_pid
     fd = _pane_fd
     _pane_fd = -1
     _held_ident = ""
+    _held_pid = 0
     if fd >= 0:
         with contextlib.suppress(OSError):
             os.close(fd)
@@ -685,10 +743,17 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
     fields = herdr_kiro_osc.fields_for(kind, rule_id)
     if fields is None or fields.get("state") not in ("working", "done"):
         return False
-    # A held fd was opened only after identity_proven succeeded. The process
-    # may already be gone, so the stored token is the proof.
-    proven = fine_start(token) if held_fd >= 0 else identity_proven(pid, token)
-    if not proven:
+    # The held fd is the tty opened for this fine token. While the pid is
+    # alive, the token still has to match the live start. A gone pid has no
+    # live start; the held token is the one captured when it matched.
+    if held_fd >= 0:
+        if held_fd != _pane_fd or not fine_start(token) or token != _held_ident:
+            return False
+        # A live pid has to match the start captured when the fd was opened.
+        # A reaped pid has no live start; kill is that check.
+        if pid > 1 and not _pid_gone(pid) and hires_start(pid) != token:
+            return False
+    elif not identity_proven(pid, token):
         return False
     try:
         payload = herdr_kiro_osc.encode(fields)
@@ -713,9 +778,9 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
 def _write_held_fd() -> bool:
     """Write idle's wire state=done through the fd opened while the owner lived."""
     fd = _pane_fd
-    if fd < 0:
+    if fd < 0 or not fine_start(_held_ident):
         return False
-    return paint_status("idle", 0, _held_ident, held_fd=fd)
+    return paint_status("idle", _held_pid, _held_ident, held_fd=fd)
 
 
 def _watcher_still_us(path: str) -> bool:
@@ -882,9 +947,10 @@ def _hc_screen() -> str | None:
 def pane_text(pane: str) -> str | None:
     """Visible text. None when an App read fails, which is not an empty screen.
 
-    A successful empty `hc read` is "" and can still end the turn. TUI reads
-    stay strings, including "" when the pane read fails. A TUI pane does not
-    call hc read, even when HC_TERMINAL_ID is set.
+    A successful empty `hc read` is "". That is not the Kiro CLI 3.0 chevron
+    prompt, so it does not end the turn. TUI reads stay strings, including
+    "" when the pane read fails. A TUI pane does not call hc read, even when
+    HC_TERMINAL_ID is set.
     """
     if in_app() and not in_tui():
         return _hc_screen()
@@ -1408,6 +1474,7 @@ _PANE_NEXT = {
     ("proven", "pid_reuse"): "weak",
     ("weak", "process_exit"): "exited",
     ("idle_clear", "process_exit"): "exited",
+    ("idle_clear", "pid_reuse"): "weak",
 }
 
 
@@ -1429,9 +1496,11 @@ def _chat_pid_of(state: dict) -> int:
 
 
 def _outer_pairs(state: dict) -> list[tuple[int, str]]:
-    """One record for the pane: the outer pid, plus a saved proven pid.
+    """The pane's one outer pid.
 
-    The chat child is not an owner and is not a second pane.
+    The chat child is not an owner. A second distinct pid is not a second
+    record. A live pid is that record, so a dead earlier pid does not exit
+    the pane while a later outer pid is still alive.
     """
     found: list[tuple[int, str]] = []
     idents = _ident_map(state)
@@ -1456,11 +1525,16 @@ def _outer_pairs(state: dict) -> list[tuple[int, str]]:
         pane_pid = 0
     if pane_pid > 1 and pane_pid != chat and not any(known == pane_pid for known, _token in found):
         found.append((pane_pid, pane_token))
-    return found
+    if not found:
+        return []
+    for pair in found:
+        if not _pid_gone(pair[0]):
+            return [pair]
+    return [found[0]]
 
 
 def _pane_owner(state: dict) -> tuple[int, str] | None:
-    """The pane's one outer pid. A later recorded pid is not the owner."""
+    """The pane's one outer pid."""
     pairs = _outer_pairs(state)
     if not pairs:
         return None
@@ -1487,22 +1561,26 @@ def _pid_gone(pid: int) -> bool:
 
 
 def _owner_exited(state: dict, remembered: list) -> bool:
-    """The pane's outer process is gone.
+    """The pane's one outer process is gone.
 
-    A second recorded pid does not answer this. A live pid, including one
-    whose token changed, does not. A dropped row still counts when the last
-    outer pid is gone.
+    A later recorded pid that is still alive is that owner, so the pane has
+    not exited. A dropped row still counts when every remembered outer pid
+    is gone.
     """
     owner = _pane_owner(state)
     if owner is not None:
         return _pid_gone(owner[0])
-    if not remembered:
+    pids = []
+    for item in remembered or []:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number > 1:
+            pids.append(number)
+    if not pids:
         return False
-    try:
-        pid = int(remembered[0])
-    except (TypeError, ValueError, IndexError):
-        return False
-    return _pid_gone(pid)
+    return all(_pid_gone(pid) for pid in pids)
 
 
 def chat_is_piped(state: dict) -> bool:
@@ -1550,16 +1628,27 @@ def screen_event(state: dict, which: str) -> str:
 def owner_phase(state: dict) -> str:
     """The stored ending, or the outer pid's live class.
 
-    idle_clear stays until process_exit. A chat child does not change it.
-    A live outer that is not identity_proven is weak, including a fine token
-    that no longer matches. A gone outer is exited.
+    idle_clear stays until process_exit only for a proven owner. A live
+    owner whose token is empty, sec: plus whole-second lstart, or any other
+    unproven token is weak, including when the stored phase is idle_clear.
+    A gone owner with that unproven token is weak, so process_exit does not
+    write done. A chat child does not change this. A gone proven outer is
+    exited.
     """
     stored = state.get("phase") or ""
+    owner = _pane_owner(state)
     if stored == "idle_clear":
+        if owner is None:
+            return "idle_clear"
+        pid, token = owner
+        # A reaped pid can still be in the process table. kill decides.
+        if not _pid_gone(pid) and not identity_proven(pid, token):
+            return "weak"
+        if _pid_gone(pid) and not fine_start(token):
+            return "weak"
         return "idle_clear"
     if stored == "exited":
         return "exited"
-    owner = _pane_owner(state)
     if owner is None:
         return "no_owner"
     pid, token = owner
@@ -1606,17 +1695,26 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     """Write working or done on the pane's one outer stdout tty.
 
     A TUI pane, including one inside the App, gets no OSC. A chat pty and a
-    second recorded pid are not targets. An exit that already holds the
-    stdout fd writes that fd only. A failed hold is a failed write.
+    second recorded pid are not targets. The current token is checked before
+    any held fd is written. An empty token or sec: plus whole-second lstart
+    writes nothing, including when a held fd is open. A failed hold is a
+    failed write.
     """
     if in_tui():
         return True
-    if kind == "idle" and _pane_fd >= 0:
-        return _write_held_fd()
     owner = _pane_owner(state)
     if owner is None:
         return False
     pid, token = owner
+    if not fine_start(token):
+        return False
+    # A live pid whose token does not match is not painted, including when
+    # a held fd is open. kill is the exit check, so a reaped pid can still
+    # write the fd opened while that token proved it.
+    if not _pid_gone(pid) and not identity_proven(pid, token):
+        return False
+    if kind == "idle" and _held_proves(token):
+        return _write_held_fd()
     return paint_status(kind, pid, token)
 
 
@@ -1629,8 +1727,7 @@ def commit_pane(state: dict, event: str) -> tuple[str, bool]:
     tty it held. A failed done write does not change the phase. The caller
     drops the row after a done write has succeeded.
     """
-    if event != "process_exit" and _proven_exit_owed(state):
-        event = "process_exit"
+    event = _chooser_event(state, event)
     phase = _phase_for_event(state, event)
     write = pane_transition(phase, event)
     ok = True
@@ -1764,9 +1861,11 @@ def _linux_boot_time():
 def hires_start(pid: int) -> str:
     """Start time from /proc ticks, or sec: plus whole-second lstart.
 
-    Where /proc start ticks are present, the token is fractional seconds.
-    Where those ticks are absent, including on Linux, the token is sec: plus
-    the ps lstart. That form matches a pid reused in the same second.
+    When start ticks and boot time are readable, the token is fractional
+    seconds: boot plus ticks/clk, six digits. That is the Linux /proc token.
+    Where those ticks or the boot time are absent, the token is sec: plus
+    the whole-second ps lstart. That form matches a pid reused in the same
+    second.
     """
     try:
         pid = int(pid)
@@ -2008,10 +2107,11 @@ def write_pidfile(state_file: str, pid: int) -> None:
     os.makedirs(directory, mode=DIR_MODE, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(directory, DIR_MODE)
-    # The pid file stores hires_start. A finer token does not match a pid reused
-    # in that same second. Where /proc start ticks are absent, including on
-    # Linux, the token is sec: plus whole-second lstart, and a same-second
-    # reuse matches it. That unproven form is not a signal to send.
+    # The pid file stores whatever hires_start returns. When /proc start
+    # ticks and boot time are readable, that token is fractional seconds
+    # and uninstall signals it. Where those ticks or the boot time are
+    # absent, the token is sec: plus whole-second lstart. A same-second
+    # reuse matches that form, so it is not a signal to send.
     token = hires_start(pid)
     snap = process_snapshot(pid)
     comm = ""
@@ -2207,6 +2307,8 @@ class OwnerExitWatch:
     def __init__(self):
         self._fds = {}
         self._kq = None
+        self._spins = 0
+        self.early = False
 
     def close(self) -> None:
         for fd in self._fds.values():
@@ -2228,8 +2330,11 @@ class OwnerExitWatch:
             if number > 1:
                 wanted.append(number)
         if not wanted:
+            self.early = False
+            self._spins = 0
             time.sleep(timeout)
             return False
+        self.early = False
         if hasattr(select, "kqueue") and hasattr(select, "KQ_FILTER_PROC") and hasattr(select, "KQ_NOTE_EXIT"):
             return self._wait_kqueue(wanted, timeout)
         if hasattr(os, "pidfd_open"):
@@ -2240,20 +2345,69 @@ class OwnerExitWatch:
                 return False
         return self._wait_kill(wanted, timeout)
 
+    def _forget_fd(self, pid: int) -> None:
+        fd = self._fds.pop(pid, None)
+        if fd is None:
+            return
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+    def _fd_ready(self, fd: int) -> bool:
+        poller = select.poll()
+        try:
+            poller.register(fd, select.POLLIN)
+        except (OSError, ValueError):
+            return True
+        return bool(poller.poll(0))
+
+    def _drop_ready_pidfds(self) -> None:
+        """Close pidfds that already show an exit so a reused pid is opened again."""
+        ready = [pid for pid, fd in self._fds.items() if self._fd_ready(fd)]
+        for pid in ready:
+            self._forget_fd(pid)
+
+    def _drop_watches(self) -> None:
+        for pid in list(self._fds):
+            self._forget_fd(pid)
+        self._reset_kqueue()
+
+    def _reset_kqueue(self) -> None:
+        if self._kq is None:
+            return
+        with contextlib.suppress(OSError):
+            self._kq.close()
+        self._kq = None
+
+    def _pause_for_ready_exit(self) -> None:
+        """Sleep after an exit that was already visible. The delay is capped."""
+        self.early = True
+        self._spins += 1
+        if self._spins >= POLL_SPIN_CAP:
+            self._spins = POLL_SPIN_CAP
+            self._drop_watches()
+        delay = min(TICK_SECS * self._spins, POLL_BACKOFF_CAP)
+        time.sleep(delay)
+
+    def _already_visible(self, started: float) -> bool:
+        return time.monotonic() - started < 0.05
+
     def _wait_pidfd(self, pids, timeout: float) -> bool:
         for pid in list(self._fds):
             if pid not in pids:
-                try:
-                    os.close(self._fds.pop(pid))
-                except OSError:
-                    self._fds.pop(pid, None)
+                self._forget_fd(pid)
         for pid in pids:
-            if pid in self._fds:
+            existing = self._fds.get(pid)
+            # A pidfd that is already readable belongs to the exited pid.
+            # Reopening watches the pid number that is listed now.
+            if existing is not None and not self._fd_ready(existing):
                 continue
+            if existing is not None:
+                self._forget_fd(pid)
             try:
                 self._fds[pid] = os.pidfd_open(pid)
             except OSError as exc:
                 if exc.errno == errno.ESRCH:
+                    self._pause_for_ready_exit()
                     return True
                 # EPERM is not a wake. Sleep the timeout instead of polling.
                 time.sleep(max(0.0, timeout))
@@ -2261,7 +2415,15 @@ class OwnerExitWatch:
         poller = select.poll()
         for fd in self._fds.values():
             poller.register(fd, select.POLLIN)
-        return bool(poller.poll(max(0, int(timeout * 1000))))
+        started = time.monotonic()
+        ready = bool(poller.poll(max(0, int(timeout * 1000))))
+        if ready and self._already_visible(started):
+            self._drop_ready_pidfds()
+            self._pause_for_ready_exit()
+            return True
+        if not ready:
+            self._spins = 0
+        return ready
 
     def _wait_kqueue(self, pids, timeout: float) -> bool:
         # kqueue is macOS and BSD. Linux stdlib select does not define it.
@@ -2288,17 +2450,28 @@ class OwnerExitWatch:
                 changes.append(kevent(pid, kq_filter, kq_add | kq_enable, kq_note))
             except OSError as exc:
                 if exc.errno == errno.ESRCH:
+                    self._pause_for_ready_exit()
                     return True
                 time.sleep(max(0.0, timeout))
                 return False
+        started = time.monotonic()
         try:
             events = self._kq.control(changes, 1, timeout)
         except OSError as exc:
             if exc.errno == errno.ESRCH:
+                self._pause_for_ready_exit()
                 return True
             time.sleep(max(0.0, timeout))
             return False
-        return bool(events)
+        ready = bool(events)
+        if ready and self._already_visible(started):
+            # Drop the queued note so a reused pid is not an instant wake.
+            self._reset_kqueue()
+            self._pause_for_ready_exit()
+            return True
+        if not ready:
+            self._spins = 0
+        return ready
 
     def _wait_kill(self, pids, timeout: float) -> bool:
         deadline = time.time() + timeout
@@ -2347,9 +2520,23 @@ def _watch_loop(pane: str, path: str) -> None:
     gone_since = None
     gone_hits = 0
     exit_misses = 0
+    ready_spins = 0
     try:
         while True:
+            tick_started = time.monotonic()
             owner_watch.wait(known_owners, TICK_SECS)
+            # wait() sleeps when a pidfd or kqueue exit is already visible.
+            # A tick that still returned early sleeps here, up to the cap,
+            # so this loop cannot busy-poll the process list or herdr.
+            if owner_watch.early:
+                ready_spins += 1
+                if time.monotonic() - tick_started < TICK_SECS * 0.5:
+                    time.sleep(min(TICK_SECS * ready_spins, POLL_BACKOFF_CAP))
+                if ready_spins >= POLL_SPIN_CAP:
+                    owner_watch._drop_watches()
+                    ready_spins = POLL_SPIN_CAP
+            else:
+                ready_spins = 0
             begin_tick()
             state = update(path, lambda _state: None)
             if slot_holder_gone(state):
@@ -2382,23 +2569,12 @@ def _watch_loop(pane: str, path: str) -> None:
                 known_owners = []
             pane_owner = _pane_owner(state)
             owner_alive = False
-            # kill is the exit check. A process table can still name a reaped
-            # pid, and that must not replace a stored proven phase with weak.
+            # Phase changes only through pane_transition. Holding the tty
+            # does not write the phase.
             if pane_owner is not None and not _pid_gone(pane_owner[0]) and alive(pane_owner[0]):
                 owner_alive = True
                 if identity_proven(pane_owner[0], pane_owner[1]):
                     _hold_live_owner(pane_owner[0], pane_owner[1])
-                if state.get("phase") not in ("idle_clear", "exited"):
-                    pid, token = pane_owner
-
-                    def remember_phase(current: dict, pid: int = pid, token: str = token) -> None:
-                        if current.get("phase") in ("idle_clear", "exited"):
-                            return
-                        if not alive(pid):
-                            return
-                        current["phase"] = "proven" if identity_proven(pid, token) else "weak"
-
-                    state = update(path, remember_phase)
             elif chat_pid and alive(chat_pid):
                 owner_alive = True
             if not known_owners and looked == "gone":
@@ -2432,7 +2608,9 @@ def _watch_loop(pane: str, path: str) -> None:
                     return
                 time.sleep(min(TICK_SECS * exit_misses, 2.0))
                 continue
-            if owner_phase(state) == "weak":
+            # A live weak owner, including one stored as idle_clear, reaches
+            # the chooser as pid_reuse. That event writes none.
+            if _owner_is_live_weak(state):
                 state = update(path, lambda current: commit_pane(current, screen_event(current, "reuse")))
             screen = pane_text(pane)
             # None is a failed App read. Explain would call that an idle screen.
@@ -2511,13 +2689,11 @@ def _watch_loop(pane: str, path: str) -> None:
                     if reported is None and misses >= 30:
                         return
                 continue
-            # The App has no herdr pane to explain. An empty read still ends the
-            # turn once the grace has passed. A failed read is not that screen:
-            # skip app_quiet and the idle report so a held working banner counts.
-            # A TUI pane keeps the TUI quiet rule, even when HC_TERMINAL_ID is set.
-            # A failed pane read is "" and must not count as that empty App screen.
-            app_quiet = in_app() and not in_tui() and not app_read_failed and not screen.strip() and not banner
-            if not app_read_failed and action == "idle" and (screen_is_quiet(screen) or app_quiet):
+            # Idle is only the Kiro CLI 3.0 chevron prompt. An empty App
+            # screen is not that prompt and does not end the turn. A failed
+            # read is not the prompt either. A TUI pane keeps the TUI rule,
+            # even when HC_TERMINAL_ID is set.
+            if not app_read_failed and action == "idle" and screen_is_quiet(screen):
                 if reported != "idle":
                     chosen = {"write": "none", "ok": False}
                     generation = int(state.get("generation") or 0)

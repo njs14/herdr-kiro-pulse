@@ -95,11 +95,28 @@ def write_pid(payload: bytes, pid: int) -> str:
     return ""
 
 
+def _one_stdout(text: str) -> str:
+    """The one fd 1 path in an lsof snapshot, or '' when it cannot be used.
+
+    A missing snapshot, /dev/tty, and fd 1 named as more than one path are
+    not a stdout. The first of several names is not kept.
+    """
+    if not text or _ambiguous_stdout(text):
+        return ""
+    path = _devices_from_lsof(text).get("1") or ""
+    if not path or path == "/dev/tty" or not _TTY.fullmatch(path):
+        return ""
+    return path
+
+
 def _tty_opens(pid: int):
     """Yield the stdout tty once, or nothing.
 
-    `/proc/<pid>/fd/1` when that directory exists. Elsewhere one lsof path
-    for fd 1. stderr, stdin, `ps -o tty=`, and /dev/tty are not yields.
+    `/proc/<pid>/fd/1` when that directory exists. Elsewhere one lsof
+    snapshot has to name one stdout, and the path that would be opened has
+    to be that same path. A missing, ambiguous, or different snapshot writes
+    nothing. stderr, stdin, `ps -o tty=`, the controlling terminal, and
+    /dev/tty are not yields.
     """
     proc = f"/proc/{pid}/fd"
     if os.path.isdir(proc):
@@ -108,14 +125,18 @@ def _tty_opens(pid: int):
             target = os.readlink(link)
         except OSError:
             return
-        if _TTY.fullmatch(target):
+        if target != "/dev/tty" and _TTY.fullmatch(target):
             yield link, target
         return
-    if _ambiguous_stdout(_lsof_text(pid)):
+    named = _one_stdout(_lsof_text(pid))
+    if not named:
         return
-    stdout = _fd_devices(pid).get("1") or ""
-    if _TTY.fullmatch(stdout):
-        yield stdout, stdout
+    # The path that would be opened. A second snapshot that is missing,
+    # ambiguous, or a different path writes nothing.
+    opened = _fd_devices(pid).get("1") or ""
+    if opened != named or opened == "/dev/tty":
+        return
+    yield named, named
 
 
 def _devices_from_lsof(text: str) -> dict[str, str]:
@@ -188,11 +209,18 @@ def _lsof_text(pid: int) -> str:
 
 
 def _fd_devices(pid: int) -> dict[str, str]:
-    return _devices_from_lsof(_lsof_text(pid))
+    text = _lsof_text(pid)
+    if not text or _ambiguous_stdout(text):
+        return {}
+    found = _devices_from_lsof(text)
+    stdout = found.get("1") or ""
+    if stdout == "/dev/tty":
+        found.pop("1", None)
+    return found
 
 
 def _write_path(open_path: str, device: str, payload: bytes) -> bool:
-    if not _TTY.fullmatch(device):
+    if open_path == "/dev/tty" or device == "/dev/tty" or not _TTY.fullmatch(device):
         return False
     try:
         expected = os.stat(device)
