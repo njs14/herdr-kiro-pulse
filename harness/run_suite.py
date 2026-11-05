@@ -178,7 +178,6 @@ def release_stale_authority():
         state["busy"] = {}
         state["seq"] = max(seq, int(state.get("seq") or 0))
         state["grace_until"] = 0
-        state["grace_started"] = 0
         state["reported"] = None
         state["watcher"] = 0
         state["watcher_at"] = 0

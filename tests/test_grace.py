@@ -390,7 +390,7 @@ class GraceTests(unittest.TestCase):
             later = hook.normalize(state, 10)
         self.assertEqual(later["busy"], {})
 
-    def test_alive_rejects_a_reused_pid(self):
+    def test_a_live_unproven_pid_is_alive_and_not_painted(self):
         def snap(_pid):
             return {"ppid": 1, "lstart": "NOW", "comm": "python"}
 
@@ -398,16 +398,50 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", snap),
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
-            self.assertFalse(hook.alive(50, started="sec:THEN"))
-            self.assertFalse(hook.alive(50, started="sec:NOW"))
-            self.assertFalse(hook.alive(50, started="NOW"))
-            self.assertFalse(hook.alive(50, started=""))
+            self.assertTrue(hook.alive(50, started="sec:THEN"))
+            self.assertTrue(hook.alive(50, started="sec:NOW"))
+            self.assertTrue(hook.alive(50, started="NOW"))
+            self.assertTrue(hook.alive(50, started=""))
+            self.assertFalse(hook.identity_proven(50, "sec:NOW"))
+            self.assertFalse(hook.identity_proven(50, "NOW"))
+            self.assertFalse(hook.fine_start("NOW"))
+            self.assertFalse(hook.fine_start("sec:NOW"))
         with (
             mock.patch.object(hook, "process_snapshot", snap),
             mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
         ):
             self.assertTrue(hook.alive(50, started="100.000000"))
-            self.assertFalse(hook.alive(50, started="200.000000"))
+            self.assertTrue(hook.alive(50, started="200.000000"))
+            self.assertTrue(hook.identity_proven(50, "100.000000"))
+            self.assertFalse(hook.identity_proven(50, "200.000000"))
+
+    def test_pane_transition_covers_every_pair(self):
+        states = ("no_owner", "proven", "weak", "exited", "idle_clear")
+        events = ("start", "prompt", "stop", "idle_clear", "process_exit", "pid_reuse", "piped_chat")
+        working = {("proven", "start"), ("proven", "prompt")}
+        done = {
+            ("proven", "stop"),
+            ("proven", "idle_clear"),
+            ("proven", "process_exit"),
+            ("proven", "piped_chat"),
+            ("idle_clear", "stop"),
+            ("idle_clear", "idle_clear"),
+            ("idle_clear", "process_exit"),
+            ("idle_clear", "piped_chat"),
+        }
+        self.assertEqual(hook.OWNER_STATES, states)
+        self.assertEqual(hook.OWNER_EVENTS, events)
+        self.assertEqual(len(states) * len(events), 35)
+        for state in states:
+            for event in events:
+                got = hook.pane_transition(state, event)
+                pair = (state, event)
+                if pair in working:
+                    self.assertEqual(got, "working", pair)
+                elif pair in done:
+                    self.assertEqual(got, "done", pair)
+                else:
+                    self.assertEqual(got, "none", pair)
 
     def test_release_authority_reports_success(self):
         directory = tempfile.mkdtemp()
@@ -425,9 +459,9 @@ class GraceTests(unittest.TestCase):
         self.assertIn("w1:p9", calls[0])
 
     def test_one_missing_agent_does_not_count_as_confirmed(self):
-        self.assertFalse(hook.gone_confirmed(10.0, 10.2, 1, False))
-        self.assertTrue(hook.gone_confirmed(10.0, 12.0, 3, False))
-        self.assertTrue(hook.gone_confirmed(None, 0.0, 0, True))
+        self.assertFalse(hook.gone_confirmed(10.0, 10.2, 1))
+        self.assertTrue(hook.gone_confirmed(10.0, 12.0, 3))
+        self.assertFalse(hook.gone_confirmed(None, 0.0, 0))
 
     def test_missing_agent_is_a_blip_while_the_owner_lives(self):
         directory = tempfile.mkdtemp()
@@ -849,7 +883,7 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "_linux_start_ticks", return_value=None),
         ):
             self.assertFalse(hook.owner_is_dead(50, "sec:then"))
-            self.assertTrue(hook.owner_is_dead(50, "then"))
+            self.assertFalse(hook.owner_is_dead(50, "then"))
             self.assertFalse(hook.owner_is_dead(50, ""))
 
     def test_exit_prompt_text_does_not_release_a_live_owner(self):
@@ -955,7 +989,7 @@ class GraceTests(unittest.TestCase):
 
     def test_later_prompt_drops_a_sec_owner_ident(self):
         # A stored sec: token is not the owner. The next prompt must not
-        # leave it in place, and alive stays false for that token.
+        # leave it in place. The live pid is not an exit.
         state = hook.fresh_state()
         state["busy"] = {"sess": 1.0}
         state["owners"] = {"sess": 50}
@@ -968,7 +1002,8 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
         ):
             state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
-            self.assertFalse(hook.alive(50, "sec:10"))
+            self.assertTrue(hook.alive(50, "sec:10"))
+            self.assertIsNone(hook.tracked_exit(state, 0)[0])
         self.assertIn("sess", state["busy"])
         self.assertNotIn("sess", state["owner_ident"])
 
@@ -978,7 +1013,6 @@ class GraceTests(unittest.TestCase):
         state["owner_started"] = {"sess": "outer"}
         state["owner_ident"] = {"sess": "100.000000"}
         state["chat_pid"] = 60
-        state["chat_started"] = "chat"
         state["chat_ident"] = "200.000000"
 
         def snap(pid):
@@ -1380,14 +1414,14 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(view["id"], "live_prompt_idle")
         self.assertFalse(os.path.exists(seen["path"]))
 
-    def test_watcher_identity_start_is_hires_or_tagged_seconds(self):
+    def test_watcher_identity_start_follows_proc_ticks(self):
         hook.begin_tick()
         ident = hook.watcher_identity(os.getpid())
         self.assertIsNotNone(ident)
-        if sys.platform == "darwin":
-            self.assertRegex(ident["start"], r"^sec:\d+$")
-        else:
+        if hook._linux_start_ticks(os.getpid()):
             self.assertRegex(ident["start"], r"^\d+\.\d{6}$")
+        else:
+            self.assertRegex(ident["start"], r"^sec:\d+$")
         self.assertTrue(ident["comm"])
 
     def test_macos_start_token_comes_from_ps(self):
@@ -1532,7 +1566,8 @@ class GraceTests(unittest.TestCase):
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
-        hook.update(path, lambda state: state.update({"busy": {}, "grace_until": 0, "reported": "working"}))
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
         banner = "▶ two-step running 0/2 · ctrl+x expand · ctrl+g monitor\n"
         pending = [None, banner, None, ""]
         reports = []
@@ -1573,7 +1608,10 @@ class GraceTests(unittest.TestCase):
             mock.patch.dict(os.environ, env, clear=False),
             mock.patch.object(hook, "_hc_screen", hc_screen),
             mock.patch.object(hook.subprocess, "check_output", pane_read),
-            mock.patch.object(hook, "process_table", lambda: {}),
+            mock.patch.object(
+                hook, "process_table", lambda: {owner.pid: {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}}
+            ),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.object(hook, "herdr", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
             mock.patch.object(hook, "screen_view", view),
@@ -1583,6 +1621,18 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
             self.assertRaises(SystemExit),
         ):
+            hook.update(
+                path,
+                lambda state: state.update(
+                    {
+                        "busy": {},
+                        "grace_until": 0,
+                        "reported": "working",
+                        "proven_pid": owner.pid,
+                        "proven_ident": "100.000000",
+                    }
+                ),
+            )
             hook.watch_loop("t7", path)
         self.assertEqual(reports[0], "working")
         self.assertEqual(reports[-1], "idle")
@@ -1598,7 +1648,8 @@ class GraceTests(unittest.TestCase):
         directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-quiet-")
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
-        hook.update(path, lambda state: state.update({"busy": {}, "grace_until": 0, "reported": "working"}))
+        owner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
         prompt = "ask a question or describe a task\n"
         both = {
             "HC_TERMINAL_ID": "t7",
@@ -1647,7 +1698,10 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook, "_hc_screen", hc_screen),
             mock.patch.object(hook.subprocess, "check_output", pane_read),
             mock.patch.object(hook.subprocess, "run", refuse_run),
-            mock.patch.object(hook, "process_table", lambda: {}),
+            mock.patch.object(
+                hook, "process_table", lambda: {owner.pid: {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}}
+            ),
+            mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
             mock.patch.object(hook, "screen_view", view),
@@ -1655,6 +1709,18 @@ class GraceTests(unittest.TestCase):
             mock.patch.object(hook.time, "time", lambda: clock["now"]),
             mock.patch.object(hook.OwnerExitWatch, "wait", lambda _self, _pids, _timeout: False),
         ):
+            hook.update(
+                path,
+                lambda state: state.update(
+                    {
+                        "busy": {},
+                        "grace_until": 0,
+                        "reported": "working",
+                        "proven_pid": owner.pid,
+                        "proven_ident": "100.000000",
+                    }
+                ),
+            )
             hook.watch_loop("w1:p1", path)
         idle = [(tick, args[args.index("--state") + 1]) for tick, args in calls if args[0] == "report-agent"]
         self.assertEqual(idle, [(2, "idle")])

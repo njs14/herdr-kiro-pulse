@@ -28,5 +28,5 @@ Preconditions:
 
 - `release-agent` while the process is still running drops `done`. The 12 second read has to stay `done`, with the same `completion_seq`, before any focus command.
 - `herdr agent focus` and `herdr workspace focus` on that workspace turn `done` into `idle` without a new completion. Run them after the 12 second read.
-- Owner exit still calls `release-agent`. That line belongs to a dead Kiro process, not to a quiet prompt.
+- Owner exit still calls `release-agent`. That line belongs to a dead Kiro process, not to a quiet prompt and not to a live pid whose token is empty, `sec:` plus a whole-second start, or a bare whole-second start.
 - Cleanup kills the watcher. Copy or read `hook.log` before cleanup. Cleanup leaves the evidence directory in place.

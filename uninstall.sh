@@ -15,7 +15,7 @@ import sys
 
 root = os.environ.get("HERDR_KIRO_ROOT") or ""
 sys.path.insert(0, os.path.join(root, "prototype"))
-from herdr_kiro_state import begin_tick, ownership, sweep_owned_temp, watcher_identity
+from herdr_kiro_state import begin_tick, fine_start, ownership, sweep_owned_temp, watcher_identity
 
 MARKER = ".herdr-kiro-owned"
 home = os.environ.get("HERDR_KIRO_HOME") or os.path.expanduser("~")
@@ -75,7 +75,12 @@ def remove_ours(dest):
 
 
 def stop_tracked_watchers(directory):
-    """Stop a watcher only when uid, high-resolution start, and comm all match."""
+    """Stop a watcher only when uid, hires_start, and comm all match.
+
+    An unproven recorded start is sec: plus whole-second lstart, or a bare
+    whole-second lstart. That form matches a same-second reuse, so it is
+    not signaled.
+    """
     pid_dir = os.path.join(directory, "pids")
     if not os.path.isdir(pid_dir):
         return
@@ -104,6 +109,8 @@ def stop_tracked_watchers(directory):
         if ident.get("error"):
             continue
         if not recorded_start or not recorded_comm:
+            continue
+        if not fine_start(recorded_start):
             continue
         if ident["start"] != recorded_start or ident["comm"] != recorded_comm:
             continue

@@ -25,7 +25,7 @@ The painter is the screen stand-in. It is not Kiro. A live Mac run does not comp
 python3 .cursor/skills/verify-herdr-kiro/drive.py doctor
 ```
 
-Doctor is read-only. It requires the server pid from this launch to be alive, `herdr --version` to contain `0.9.5`, workspace list to succeed, and `agent get` on the recorded pane to report agent `kiro` or `kiro-cli` with a cwd under `VERIFY_RUN`. Run it before the first drive and again after a failed drive.
+Doctor is read-only. It requires the server pid from this launch to be alive, `herdr --version` to contain `0.9.5`, and workspace list to succeed. `agent get` on the recorded pane must report agent `kiro` or `kiro-cli`. A cwd is rejected only when one is set and it lies outside `VERIFY_RUN`. A missing cwd still prints doctor ok. Run it before the first drive and again after a failed drive.
 
 ## Drive
 
@@ -44,7 +44,7 @@ python3 .cursor/skills/verify-herdr-kiro/drive.py seen
 
 ## Evidence
 
-`wait` and `status --save` write JSON under `$VERIFY_EVIDENCE/<run-id>/` (default `/tmp/herdr-kiro-verify-evidence/<run-id>/`). Each file has `agent_status`, `state_change_seq`, `completion_seq`, `explain_state`, and `explain_rule`. The herdr server log and `hook.log` are in that same directory. Proof is the command plus the saved JSON, not the final number alone. A finished turn on a background workspace is proved on the turn after the agent has already been working once. The first idle after process start can stay `idle` with `completion_seq` null. The next unseen Stop is proved when get is `done`, explain is `idle` with rule `live_prompt_idle`, and `completion_seq` equals `state_change_seq`. A second read at least 12 seconds later, before the pane is seen, is still `done`. `herdr agent focus <pane>` then makes get `idle` on the same `state_change_seq`, and `completion_seq` stays. The hook log for that turn has no `release-agent` line while `kiro-cli` is still running. On herdr 0.9.5 that release drops `done`. Do not copy these files into the repo.
+`wait` and `status --save` write JSON under `$VERIFY_EVIDENCE/<run-id>/` (default `/tmp/herdr-kiro-verify-evidence/<run-id>/`). Each file has `agent_status`, `state_change_seq`, `completion_seq`, `explain_state`, and `explain_rule`. The herdr server log and `hook.log` are in that same directory. Proof is the command plus the saved JSON, not the final number alone. A finished turn on a background workspace is proved on the turn after the agent has already been working once. The first idle after process start can stay `idle` with `completion_seq` null. The next unseen Stop is proved when get is `done`, explain is `idle` with rule `live_prompt_idle`, and `completion_seq` equals `state_change_seq`. A second read at least 12 seconds later, before the pane is seen, is still `done`. `herdr agent focus <pane>` then makes get `idle` on the same `state_change_seq`, and `completion_seq` stays. The hook log for that turn has no `release-agent` line while `kiro-cli` is still running. A live pid with an empty token, `sec:` plus a whole-second start, or a bare whole-second start is not an exit and is not painted. On herdr 0.9.5 that release drops `done`. Do not copy these files into the repo.
 
 ## Cleanup
 

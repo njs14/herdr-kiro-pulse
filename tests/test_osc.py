@@ -771,7 +771,7 @@ try:
     mark("ancestor")
 
     def stop(current):
-        revised = hook.apply_event(current, "Stop", "sess", time.time(), owner, lstart, 0, "")
+        revised = hook.apply_event(current, "Stop", "sess", time.time(), owner, lstart, 0)
         current.clear()
         current.update(revised)
 
@@ -1596,7 +1596,6 @@ class ReapedExitTests(unittest.TestCase):
                     outer.pid,
                     _live_start(outer.pid),
                     0,
-                    "",
                 )
                 current.clear()
                 current.update(revised)
