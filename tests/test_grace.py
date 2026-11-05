@@ -3774,8 +3774,10 @@ class PaneWriteMatrixTests(unittest.TestCase):
         hook.begin_tick()
         master, slave = os.openpty()
         cls.live_master = master
+        # pause() until tearDown. A timed sleep exits during a slow matrix
+        # run, and the cell that straddles that exit no longer matches.
         cls.live = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(300)"],
+            [sys.executable, "-c", "import signal; signal.pause()"],
             stdin=subprocess.DEVNULL,
             stdout=slave,
             stderr=subprocess.DEVNULL,
