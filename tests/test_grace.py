@@ -29,6 +29,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "prototype"))
 import herdr_kiro_state as hook
 
 
+def pinned_start(real, pins, asked):
+    """Fractional token for a still-running pinned pid.
+
+    A dead pid keeps no pin. A reused pid number gets the real start,
+    including sec: plus a whole-second lstart, and that stays unproven.
+    """
+    try:
+        number = int(asked)
+    except (TypeError, ValueError):
+        return real(asked)
+    pinned = pins.get(number)
+    if pinned is None:
+        return real(asked)
+    token, proc = pinned
+    if proc.poll() is not None:
+        return real(asked)
+    return token
+
+
 def pin_owner(pid, start="100.000000"):
     """Report a fine start token for this pid while the patch is active."""
     real = hook.hires_start
@@ -1736,6 +1755,28 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(osc, [])
         self.assertGreaterEqual(hc["n"], 1)
 
+    def test_dead_pid_pin_does_not_make_a_sec_process_proven(self):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        start = "1700000000.222222"
+        pins = {proc.pid: (start, proc)}
+
+        def real(_pid):
+            return "sec:10"
+
+        self.assertEqual(pinned_start(real, pins, proc.pid), start)
+        self.assertTrue(hook.fine_start(pinned_start(real, pins, proc.pid)))
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+        reported = pinned_start(real, pins, proc.pid)
+        self.assertEqual(reported, "sec:10")
+        self.assertFalse(hook.fine_start(reported))
+
 
 class _ScreenCompletion:
     """Background pane. Hook overrides fallback until release exposes it."""
@@ -2448,6 +2489,8 @@ class PaneFindingTests(unittest.TestCase):
                 self.assertEqual((write, ok), ("done", False))
                 self.assertEqual(state["phase"], "proven")
                 self.assertEqual(state["owners"].get("sess"), owner.pid)
+                self.assertEqual(state.get("proven_pid") or 0, 0)
+                self.assertEqual(state.get("proven_ident") or "", "")
                 self.assertEqual(hook._pane_fd, held_fd)
                 self.assertEqual(hook._held_pid, held_pid)
                 self.assertEqual(_read_pty(held_master), b"")
@@ -2978,6 +3021,8 @@ class PriorFindingTableTests(unittest.TestCase):
             self.assertEqual(state["phase"], "proven")
             self.assertEqual(state["owners"].get("sess"), owner.pid)
             self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
+            self.assertEqual(state.get("proven_pid") or 0, 0)
+            self.assertEqual(state.get("proven_ident") or "", "")
             self.assertIn("sess", state["busy"])
             self.assertEqual(hook._pane_fd, held_fd)
             self.assertEqual(_read_pty(held_master), b"")
@@ -3549,7 +3594,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
     main(). The watcher cells call watch_loop(). Nothing that writes is
     stubbed. A none result keeps every file byte, including which files
     exist, and it writes no tty. A read, a reload, and a generation mismatch
-    are none results: they do not store the seq floor.
+    are none results: they do not store the seq floor. A refresh changes
+    exactly one value in that directory, the busy timestamp. Seq stays,
+    generation stays, and no watcher pid or pid file appears.
     """
 
     _FLOOR = 50
@@ -3618,8 +3665,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
         cls.gone_token = hook.hires_start(cls.gone.pid)
         cls.chat_token = hook.hires_start(cls.chat.pid)
         # No /proc start ticks means sec: plus a whole-second lstart.
-        # fine_start rejects that, so these pids report a fractional token
-        # and identity_proven still has to match it. Other pids stay real.
+        # fine_start rejects that, so a live pid reports a fractional token
+        # and identity_proven still has to match it. A dead pid's pin does
+        # not apply, so a reused pid stays sec: and unproven.
         if not hook.fine_start(cls.live_token) or not hook.fine_start(cls.gone_token):
             cls._pin_owners_without_proc_ticks()
         if not hook.fine_start(cls.live_token) or not hook.fine_start(cls.gone_token):
@@ -3628,6 +3676,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
         cls.gone.wait(timeout=5)
         os.kill(cls.chat.pid, signal.SIGKILL)
         cls.chat.wait(timeout=5)
+        if cls._owner_pins is not None and hook.fine_start(hook.hires_start(cls.gone.pid)):
+            raise AssertionError("dead pid pin still applies")
         hook.begin_tick()
         cls.watcher_token = hook.hires_start(os.getpid())
         if not cls.watcher_token:
@@ -3638,27 +3688,20 @@ class PaneWriteMatrixTests(unittest.TestCase):
     @classmethod
     def _pin_owners_without_proc_ticks(cls):
         pins = {
-            cls.live.pid: cls._PINNED_LIVE,
-            cls.gone.pid: cls._PINNED_GONE,
-            cls.chat.pid: cls._PINNED_CHAT,
+            cls.live.pid: (cls._PINNED_LIVE, cls.live),
+            cls.gone.pid: (cls._PINNED_GONE, cls.gone),
+            cls.chat.pid: (cls._PINNED_CHAT, cls.chat),
         }
         real = hook.hires_start
 
         def hires(asked, real=real, pins=pins):
-            try:
-                number = int(asked)
-            except (TypeError, ValueError):
-                return real(asked)
-            pinned = pins.get(number)
-            if pinned is not None:
-                return pinned
-            return real(asked)
+            return pinned_start(real, pins, asked)
 
         cls._owner_pins = mock.patch.object(hook, "hires_start", side_effect=hires)
         cls._owner_pins.start()
-        cls.live_token = pins[cls.live.pid]
-        cls.gone_token = pins[cls.gone.pid]
-        cls.chat_token = pins[cls.chat.pid]
+        cls.live_token = cls._PINNED_LIVE
+        cls.gone_token = cls._PINNED_GONE
+        cls.chat_token = cls._PINNED_CHAT
 
     @classmethod
     def _stop_owner_pins(cls):
@@ -3811,7 +3854,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return True
         trial = copy.deepcopy(state)
         chosen, _ok, _flag, _osc, _release = self._hook_fold(trial, event)
-        return chosen != "none"
+        # refresh must not be given a watcher ahead of the call. The run
+        # has to leave watcher 0 and create no pid file.
+        return chosen not in ("none", "refresh")
 
     def _prepared_state(self, start, event, owner, count):
         if start in ("missing", "unreadable"):
@@ -3826,8 +3871,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
         if event in ("reload", "settled"):
             state["busy"] = {}
             state["grace_until"] = 0.0
-        if event == "idle_clear":
-            state["owners_died"] = True
         return state
 
     def _put_owner(self, state, start, owner):
@@ -3886,7 +3929,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
 
         book.apply(fold, self._BASE)
         self._report_after_hook(book, event, held["chosen"], held["ok"], held["release"])
-        if held["chosen"] != "none" and not self._watcher_current(book.state):
+        if held["chosen"] not in ("none", "refresh") and not self._watcher_current(book.state):
             self._spawn_into(book)
         return book.files, b"".join(osc)
 
@@ -3983,7 +4026,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             quiet_since = None
         action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), banner, now)
         owners_gone = False
-        if banner and not book.state.get("owners_died") and not owners_gone:
+        if banner and not owners_gone:
             mark = {"write": "none"}
 
             def start(state, painted=painted, mark=mark):
@@ -4018,13 +4061,13 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 self._clear_watch_slot(book)
                 return painted, quiet_since, reported, True
             return painted, quiet_since, reported, False
-        if action != "working" or book.state.get("owners_died"):
+        if action != "working":
             return painted, quiet_since, reported, False
 
         mark = {"write": "none"}
 
-        def prompt(state, painted=painted, mark=mark):
-            write, _ok, osc = self._commit(state, "prompt", 0.0)
+        def prompt(state, painted=painted, mark=mark, now=now):
+            write, _ok, osc = self._commit(state, "prompt", now)
             mark["write"] = write
             painted.append(osc)
             return write
@@ -4383,9 +4426,15 @@ class _Book:
         before = copy.deepcopy(loaded)
         flag = fn(loaded) or ""
         changed = loaded != before
-        if not changed and flag in ("", "none"):
+        if not changed and flag in ("", "none", "refresh"):
             if not existed:
                 return
+            return
+        # refresh may replace the busy timestamp and nothing else. Seq stays,
+        # and the floor file is not created.
+        if flag == "refresh":
+            self.files["t7.json"] = json.dumps(loaded).encode()
+            self.state = loaded
             return
         try:
             seq = int(loaded.get("seq") or 0)

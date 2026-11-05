@@ -185,7 +185,6 @@ def fresh_state() -> dict:
         "aggregate": 0,
         "generation": 0,
         "retiring": False,
-        "owners_died": False,
         "chat_pid": 0,
         "chat_ident": "",
         "proven_pid": 0,
@@ -448,7 +447,8 @@ def apply_event(
 
     none returns the same state. refresh changes only the aggregate timestamp.
     A Stop at aggregate zero is aggregate_zero only for the aggregate session.
-    A named Stop stays stop.
+    A named Stop stays stop except when the chat child's stdout is a pipe,
+    where the event is piped_chat.
     """
     owner_before = _pane_owner(state)
     ev = choose_pane_event(state, event, session)
@@ -545,9 +545,20 @@ def update(path: str, fn):
         changed = loaded != before
         write = _PANE_OUTCOME.get("write") or ""
         # none, and a read that did not change the pane, leave the file and
-        # the seq floor untouched. A missing file is removed afterwards.
-        # Unreadable bytes stay. A real mutation still raises seq to the floor.
-        if not changed and write in ("", "none"):
+        # the seq floor untouched. refresh may change the busy timestamp and
+        # does not raise seq or create the floor file. A missing file is
+        # removed afterwards. Unreadable bytes stay. A real mutation still
+        # raises seq to the floor.
+        if write == "refresh":
+            if not changed:
+                silent = True
+            else:
+                handle.seek(0)
+                handle.truncate()
+                handle.write(json.dumps(loaded))
+                handle.flush()
+                os.chmod(path, FILE_MODE)
+        elif not changed and write in ("", "none"):
             silent = True
         else:
             if seq < floor:
@@ -701,7 +712,7 @@ def identity_proven(pid: int, token: object) -> bool:
     return hires_start(number) == token
 
 
-def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id: str = "") -> bool:
+def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1) -> bool:
     """Write state=working or state=done for one proven owner.
 
     commit_pane is the path that decides to paint. This writes the bytes on
@@ -714,7 +725,7 @@ def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1, rule_id:
     """
     if in_tui():
         return False
-    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    fields = herdr_kiro_osc.fields_for(kind)
     if fields is None or fields.get("state") not in ("working", "done"):
         return False
     # The held fd is the tty opened for this fine token. While the pid is
@@ -1283,7 +1294,6 @@ def screen_view(text: str) -> dict:
     if cached is not None:
         return cached
     path = None
-    view = _unknown_screen()
     try:
         fd, path = tempfile.mkstemp(prefix="herdr-kiro-screen-", suffix=".txt", dir=state_dir())
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1332,10 +1342,11 @@ def blocker_visible(text: str) -> bool:
 def screen_is_settled(text: str) -> bool:
     """No workflow banner, no blocked explain result, and no working footer.
 
-    A question panel is a blocked explain result with no approval text, so
-    it is not settled. Approval text is already a blocked result.
-    The kiro idle prompt qualifies. So does the shell prompt left behind after
-    the outer kiro-cli exits, which does not contain that prompt.
+    Settled is also false when approval_text matches and explain is not
+    blocked. A question panel is a blocked explain result with no approval
+    text, so it is not settled. The kiro idle prompt qualifies. So does the
+    shell prompt left behind after the outer kiro-cli exits, which does not
+    contain that prompt.
     """
     if workflow_banner_from(text) or blocker_visible(text):
         return False
@@ -1703,6 +1714,17 @@ def _save_proven_owner(state: dict) -> None:
         state["proven_ident"] = token
 
 
+def _held_pid_unconfirmed(pid: int, token: str) -> bool:
+    """True when a held fd names this token but not this owner pid.
+
+    Zero and any other pid are unconfirmed. The tty stays empty and the
+    saved owner stays as it was.
+    """
+    if _pane_fd < 0 or _held_ident != token:
+        return False
+    return _held_pid <= 1 or _held_pid != pid
+
+
 def _paint_one_owner(state: dict, kind: str) -> bool:
     """Write working or done on the pane's one outer stdout tty.
 
@@ -1727,12 +1749,12 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     # write that fd when _held_pid is this owner.
     if not _pid_gone(pid) and not identity_proven(pid, token):
         return False
-    if kind == "idle" and _pane_fd >= 0 and _held_ident == token:
+    if kind == "idle" and _held_pid_unconfirmed(pid, token):
         # A matching start token is not enough. The fd was opened for
         # _held_pid. Zero, or any other pid, is a different terminal.
         # Do not open another tty.
-        if _held_pid <= 1 or _held_pid != pid:
-            return False
+        return False
+    if kind == "idle" and _pane_fd >= 0 and _held_ident == token:
         return _write_held_fd()
     return paint_status(kind, pid, token)
 
@@ -1815,6 +1837,9 @@ def commit_pane(
             if drops:
                 _finish_slot(state, session, now)
             return _pane_result(write, True)
+        # An unconfirmed held pid writes nothing. Do not store proven_pid.
+        if _held_pid_unconfirmed(owner_now[0], owner_now[1]):
+            return _pane_result(write, False)
         _save_proven_owner(state)
         ok = _paint_one_owner(state, "idle")
         if not ok:
@@ -2767,7 +2792,7 @@ def _watch_loop(pane: str, path: str) -> None:
                 time.time(),
             )
             owners_gone = bool(known_owners) and not owner_alive
-            if banner and not state.get("owners_died") and not owners_gone:
+            if banner and not owners_gone:
                 chosen = {"write": "none"}
 
                 def apply_banner(current: dict, chosen: dict = chosen) -> None:
@@ -2826,7 +2851,7 @@ def _watch_loop(pane: str, path: str) -> None:
                 continue
             if action == reported:
                 continue
-            if action != "working" or state.get("owners_died") or owners_gone:
+            if action != "working" or owners_gone:
                 continue
             chosen = {"write": "none"}
 
@@ -2938,8 +2963,8 @@ def main() -> int:
 
     state = update(path, fold)
     log(f"state event={event} busy={len(state['busy'])} grace_until={state['grace_until']:.3f}")
-    # none does not store the floor, claim the watcher, or spawn one.
-    if chosen["write"] != "none":
+    # none and refresh do not store the floor, claim the watcher, or spawn one.
+    if chosen["write"] not in ("none", "refresh"):
         ensure_watcher(pane, path)
     screen = pane_text(pane) or ""
     action = next_action(
