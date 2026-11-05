@@ -911,11 +911,18 @@ class GraceTests(unittest.TestCase):
                 raise SystemExit("stop")
             return False
 
+        released = []
+
+        def release(*_args, **_kwargs):
+            released.append("release")
+            return True
+
         with (
             mock.patch.object(hook, "pane_text", lambda _pane: screen),
             mock.patch.object(hook, "agent_lookup", lambda _pane: "working"),
             mock.patch.object(hook, "send_report", lambda *_args, **_kwargs: True),
             mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "release_authority", release),
             mock.patch.object(
                 hook, "screen_view", lambda _text: {"state": "working", "id": "workflow_banner_working", "ok": True}
             ),
@@ -925,14 +932,22 @@ class GraceTests(unittest.TestCase):
             hook.watch_loop("w1:p9", path)
         with open(path, encoding="utf-8") as handle:
             saved = json.load(handle)
+        # Count is zero, so the banner is refresh. Refresh leaves the watcher
+        # unset and does not release the live owner.
         self.assertIn("sess", saved["busy"])
-        self.assertNotEqual(saved["watcher"], 0)
+        self.assertEqual(saved["owners"]["sess"], owner.pid)
+        self.assertEqual(saved["watcher"], 0)
+        self.assertEqual(released, [])
         owner.kill()
 
     def test_no_owner_and_sustained_not_found_exits(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "pane.json")
-        hook.update(path, lambda _state: None)
+
+        def seed(state):
+            state["seq"] = 1
+
+        hook.update(path, seed)
         hits = {"n": 0}
 
         def fake_wait(_self, _pids, _timeout):
@@ -2619,7 +2634,7 @@ class PaneFindingTests(unittest.TestCase):
                 paint.assert_not_called()
 
     def test_watcher_does_not_write_phase_outside_the_chooser(self):
-        source = inspect.getsource(hook._watch_loop)
+        source = inspect.getsource(hook._run_watch)
         self.assertNotIn('["phase"] =', source)
         proc = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: proc.poll() is not None or proc.kill())
@@ -2629,9 +2644,10 @@ class PaneFindingTests(unittest.TestCase):
         events = []
         real_commit = hook.commit_pane
 
-        def spy(state, event):
-            events.append(event)
-            return real_commit(state, event)
+        def spy(state, event, rule_id="", **kwargs):
+            if not kwargs.get("watch"):
+                events.append(event)
+            return real_commit(state, event, rule_id, **kwargs)
 
         def wait(_self, _pids, _timeout):
             if events:
@@ -3285,7 +3301,7 @@ class PriorFindingTableTests(unittest.TestCase):
         self.assertEqual(revised["owners"], {})
 
     def _row_watcher_phase(self, _row):
-        source = inspect.getsource(hook._watch_loop)
+        source = inspect.getsource(hook._run_watch)
         self.assertNotIn('["phase"] =', source)
         self.assertNotIn("['phase'] =", source)
 
@@ -3469,7 +3485,12 @@ class SettledDecisionTests(unittest.TestCase):
         return path
 
     def _row_watcher_blocked(self, _row):
-        source = inspect.getsource(hook._watch_loop)
+        door = inspect.getsource(hook._watch_loop)
+        self.assertIn("commit_pane", door)
+        self.assertNotIn("commit_blocked", door)
+        self.assertNotIn("emit_osc", door)
+        self.assertNotIn("send_report", door)
+        source = inspect.getsource(hook._run_watch)
         self.assertIn("commit_blocked", source)
         self.assertNotIn("emit_osc", source)
         self.assertNotIn("send_report", source)
@@ -3592,11 +3613,13 @@ class PaneWriteMatrixTests(unittest.TestCase):
 
     Every start, event, owner, and count is one cell. The hook cells call
     main(). The watcher cells call watch_loop(). Nothing that writes is
-    stubbed. A none result keeps every file byte, including which files
-    exist, and it writes no tty. A read, a reload, and a generation mismatch
-    are none results: they do not store the seq floor. A refresh changes
-    exactly one value in that directory, the busy timestamp. Seq stays,
-    generation stays, and no watcher pid or pid file appears.
+    stubbed, including log. The log lives in the state directory, so its
+    bytes and its existence are part of the snapshot. A none result keeps
+    every file byte, including which files exist, and it writes no tty and
+    no log. A read, a reload, and a generation mismatch are none results:
+    they do not store the seq floor. A refresh changes exactly one value in
+    that directory, the busy timestamp. Seq stays, generation stays, no
+    floor file is written, and no watcher pid or pid file appears.
     """
 
     _FLOOR = 50
@@ -3729,24 +3752,106 @@ class PaneWriteMatrixTests(unittest.TestCase):
                         key = (start, event, owner, count)
                         ran.append(key)
                         try:
-                            problem = self._cell(start, event, owner, count)
+                            problem = self._cell(start, event, owner, count, "")
                         except Exception as exc:
                             problem = f"{key} raised {type(exc).__name__}: {exc}"
                         if problem:
                             problems.append(problem)
+        for key in self._extra_keys():
+            ran.append(key)
+            start, event, owner, count, mode = key
+            try:
+                problem = self._cell(start, event, owner, count, mode)
+            except Exception as exc:
+                problem = f"{key} raised {type(exc).__name__}: {exc}"
+            if problem:
+                problems.append(problem)
         product = len(self._STARTS) * len(events) * len(self._OWNERS) * len(self._COUNTS)
+        product += len(self._extra_keys())
         self.assertEqual(len(ran), product)
         self.assertEqual(len(set(ran)), product)
         if problems:
             preview = "\n".join(problems[:12])
             self.fail(f"{len(problems)} cells differed\n{preview}")
 
-    def _cell(self, start, event, owner, count):
+    def test_writers_reach_state_only_through_commit_pane(self):
+        # main and watch_loop are the entries. A function that writes the
+        # pane, the seq floor, the log in the state directory, a watcher pid
+        # file, the tty, or OSC has to sit behind commit_pane.
+        path = os.path.join(os.path.dirname(hook.__file__), "herdr_kiro_state.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        defined = []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                defined.append(node.name)
+        names = set(defined)
+        graph = {}
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            calls = set()
+            for child in ast.walk(node):
+                called = isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                if called and child.func.id in names:
+                    calls.add(child.func.id)
+            graph[node.name] = calls
+        writers = {
+            "update",
+            "write_seq_floor",
+            "log",
+            "write_pidfile",
+            "remove_pidfile",
+            "sweep_stale_pidfiles",
+            "clear_watcher",
+            "ensure_watcher",
+            "screen_view",
+            "explain_env",
+            "emit_osc",
+            "paint_status",
+            "send_report",
+            "emit_report",
+            "release_authority",
+            "herdr",
+            "commit_blocked",
+            "note_report",
+            "apply_owner_exit",
+            "finish_if_unchanged",
+            "_write_refresh",
+            "_write_held_fd",
+        }
+        seen = set()
+        stack = ["main", "watch_loop"]
+        while stack:
+            name = stack.pop()
+            if name in seen or name == "commit_pane":
+                continue
+            seen.add(name)
+            stack.extend(sorted(graph.get(name, ())))
+        reached = sorted(name for name in seen if name in writers)
+        self.assertEqual(reached, [])
+
+    def _extra_keys(self):
+        keys = []
+        for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            for owner in self._OWNERS:
+                for count in self._COUNTS:
+                    keys.append(("chooser", event, owner, count, "chooser"))
+        for event in self._WATCH:
+            for count in self._COUNTS:
+                keys.append(("weak_pidfile", event, "weak", count, "weak_pidfile"))
+        for event in ("Stop", "SessionEnd", "idle_clear", "settled"):
+            for owner in ("proven", "chat_gone"):
+                for count in self._COUNTS:
+                    keys.append(("held_unconfirmed", event, owner, count, "held"))
+        return keys
+
+    def _cell(self, start, event, owner, count, mode):
         root = tempfile.mkdtemp(prefix="herdr-kiro-matrix-")
         previous_hup = signal.getsignal(signal.SIGHUP)
         previous_term = signal.getsignal(signal.SIGTERM)
         try:
-            return self._run_cell(root, start, event, owner, count)
+            return self._run_cell(root, start, event, owner, count, mode)
         finally:
             signal.signal(signal.SIGHUP, previous_hup)
             signal.signal(signal.SIGTERM, previous_term)
@@ -3754,7 +3859,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             hook._close_held_fd()
             shutil.rmtree(root, ignore_errors=True)
 
-    def _run_cell(self, root, start, event, owner, count):
+    def _run_cell(self, root, start, event, owner, count, mode):
         state_root = os.path.join(root, "herdr-kiro")
         os.makedirs(state_root, mode=0o700)
         env = {
@@ -3762,25 +3867,45 @@ class PaneWriteMatrixTests(unittest.TestCase):
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
             "XDG_STATE_HOME": root,
-            "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
             "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
         }
+        os.environ.pop("HERDR_KIRO_LOG", None)
         hook.begin_tick()
         self._drain(self.live_master)
-        prepared = self._prepared_state(start, event, owner, count)
+        file_start = self._file_start(start)
+        prepared = self._prepared_state(file_start, event, owner, count)
         watching = event in self._WATCH
-        spawned = start in ("missing", "unreadable") and event == "SessionStart"
-        if prepared is not None and (watching or self._seeds_watcher(prepared, event) or start == "watcher_flag"):
+        spawned = file_start in ("missing", "unreadable") and event == "SessionStart"
+        if prepared is not None and (watching or self._seeds_watcher(prepared, event) or file_start == "watcher_flag"):
             prepared["watcher"] = os.getpid()
             prepared["watcher_started"] = self.watcher_token
-        initial = self._initial_files(start, prepared, watching)
+        self._pane_mode = mode
+        if mode == "held":
+            self._arm_unconfirmed_hold()
+        initial = self._initial_files(file_start, prepared, watching)
+        if mode == "chooser":
+            initial[f"pids/{self.gone.pid}"] = f"{os.getuid()}\nnot-the-start\nstale\n".encode()
         self._write_files(state_root, initial)
         before = self._snapshot(state_root)
-        expected_files, expected_osc = self._expect(start, event, prepared, watching)
+        expected_files, expected_osc = self._expect(file_start, event, prepared, watching)
+        if mode == "chooser":
+            trial = copy.deepcopy(prepared) if prepared is not None else None
+            keep_pid = trial is None
+            if trial is not None:
+                chosen, _ok, _flag, _osc, _release = self._hook_fold(trial, event)
+                keep_pid = chosen in ("none", "refresh")
+            if keep_pid:
+                name = f"pids/{self.gone.pid}"
+                expected_files[name] = initial[name]
         clock = [self._BASE]
+        if mode == "chooser":
+            hook._EXPLAIN_ENV = None
+            hook._SCREEN_CACHE.clear()
+            hook._RULES_DIR = None
         with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("HERDR_KIRO_LOG", None)
             path = hook.state_path("t7")
-            self._drive(path, start, event, watching, clock, prepared)
+            self._drive(path, file_start, event, watching, clock, prepared, mode)
             self._kill_watchers(root)
             actual = self._snapshot(state_root)
             osc = self._drain(self.live_master)
@@ -3792,12 +3917,37 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return self._format_problem(start, event, owner, count, before, actual, expected_files, osc, expected_osc)
         return ""
 
-    def _drive(self, path, start, event, watching, clock, prepared):
+    def _file_start(self, start):
+        if start == "chooser":
+            return "live_outer"
+        if start == "weak_pidfile":
+            return "gone_outer"
+        if start == "held_unconfirmed":
+            return "floor_ahead"
+        return start
+
+    def _arm_unconfirmed_hold(self):
+        hook._close_held_fd()
+        _master, slave = os.openpty()
+        hook._pane_fd = os.dup(slave)
+        os.close(slave)
+        os.close(_master)
+        hook._held_ident = self.live_token
+        hook._held_pid = 0
+
+    def _drive(self, path, start, event, watching, clock, prepared, mode):
         def now():
             return clock[0]
 
         def sleep(_delay):
             return None
+
+        def screen(_pane, path=path, event=event, start=start, mode=mode):
+            if mode == "chooser":
+                return self._BLOCKED
+            if start == "stale_generation" and event in ("idle_clear", "settled"):
+                self._bump_generation(path)
+            return self._screen_for(event)
 
         if not watching:
             with (
@@ -3805,6 +3955,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 mock.patch.object(hook.time, "sleep", sleep),
                 mock.patch.object(sys, "argv", ["herdr-kiro", event]),
                 mock.patch.object(sys, "stdin", io.StringIO("{}")),
+                mock.patch.object(hook, "pane_text", screen),
             ):
                 self.assertEqual(hook.main(), 0)
             return
@@ -3819,23 +3970,11 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 raise SystemExit
             return False
 
-        def screen(_pane, path=path, event=event, start=start):
-            if start == "stale_generation" and event in ("idle_clear", "settled"):
-                self._bump_generation(path)
-            return self._screen_for(event)
-
-        def logged(message, path=path):
-            hook_log(message)
-            if message == "screen idle clear":
-                hook.write_seq_floor(path, self._RAISED)
-
-        hook_log = hook.log
         with (
             mock.patch.object(hook.time, "time", now),
             mock.patch.object(hook.time, "sleep", sleep),
             mock.patch.object(hook.OwnerExitWatch, "wait", wait),
             mock.patch.object(hook, "pane_text", screen),
-            mock.patch.object(hook, "log", logged),
         ):
             try:
                 hook.watch_loop("t7", path)
@@ -3928,10 +4067,21 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return flag
 
         book.apply(fold, self._BASE)
-        self._report_after_hook(book, event, held["chosen"], held["ok"], held["release"])
+        painted = b"".join(osc)
+        busy = len((book.state or {}).get("busy") or {})
+        grace = float((book.state or {}).get("grace_until") or 0.0)
+        reported = self._report_after_hook(book, event, held["chosen"], held["ok"], held["release"])
         if held["chosen"] not in ("none", "refresh") and not self._watcher_current(book.state):
             self._spawn_into(book)
-        return book.files, b"".join(osc)
+        blocked_osc = b""
+        if self._chooser_follow_up(book.state, held["chosen"]):
+            blocked_osc = self._osc("blocked")
+            if reported == "":
+                book.apply(lambda state: self._bump_report(state, "blocked"), self._BASE)
+            reported = "blocked"
+        if held["chosen"] not in ("none", "refresh"):
+            self._record_hook_log(book, event, painted, busy, grace, reported, blocked_osc)
+        return book.files, painted + blocked_osc
 
     def _expect_watch(self, start, event, prepared):
         book = _Book(self._initial_book(start, prepared, True))
@@ -3943,16 +4093,13 @@ class PaneWriteMatrixTests(unittest.TestCase):
         for tick in range(1, limit + 1):
             if event == "idle_clear" and tick == 2:
                 clock = self._BASE + hook.IDLE_CLEAR_SECS + 1
-            if tick == 1:
-                book.apply(lambda state, token=self.watcher_token: self._claim(state, token), clock)
-                if book.state is not None and int(book.state.get("watcher") or 0) == os.getpid():
-                    book.files[f"pids/{os.getpid()}"] = self._pidfile(os.getpid())
             if book.state is None:
-                break
+                book.state = hook.fresh_state()
             if hook._owner_exited(book.state, []):
-                self._watch_exit(book, osc)
+                self._watch_exit(book, osc, event)
                 break
             if hook._owner_is_live_weak(book.state):
+                self._arm_before(book, clock, "pid_reuse")
                 book.apply(lambda state: self._commit(state, "pid_reuse", 0.0)[0], clock)
             stale = start == "stale_generation" and event in ("idle_clear", "settled")
             if stale and book.files.get("t7.json"):
@@ -3964,9 +4111,11 @@ class PaneWriteMatrixTests(unittest.TestCase):
             osc.extend(painted)
             if stopped:
                 break
-        return book.files, b"".join(osc)
+        painted = b"".join(osc)
+        self._flush_watch_log(book)
+        return book.files, painted
 
-    def _watch_exit(self, book, osc):
+    def _watch_exit(self, book, osc, event):
         mark = {"write": "none", "ok": True, "painted": b""}
 
         def once(state, mark=mark):
@@ -3976,12 +4125,24 @@ class PaneWriteMatrixTests(unittest.TestCase):
             mark["painted"] = painted
             return write
 
+        held_done = self._done_via_held(book.state)
+        self._arm_before(book, self._BASE, "process_exit")
         book.apply(once, self._BASE)
         osc.append(mark["painted"])
+        if mark["write"] == "none":
+            return
+        self._arm_log(book, self._BASE)
+        self._note_watch_osc(book, self._BASE, mark["painted"], held_done)
         if mark["write"] == "done" and not mark["ok"]:
             for _retry in range(hook.EXIT_RETRY_CAP - 1):
                 book.apply(once, self._BASE)
                 osc.append(mark["painted"])
+            missed_at = self._BASE
+            if event == "idle_clear":
+                missed_at = self._BASE + hook.IDLE_CLEAR_SECS + 1
+            self._note(book, missed_at, "watcher exit done missed")
+        else:
+            self._note(book, self._BASE, "watcher exit owner exit")
         self._clear_watch_slot(book)
 
     def _watch_screen(self, book, event, now, quiet_since, reported, stale):
@@ -3997,9 +4158,14 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 painted.append(osc)
                 return write
 
+            held_done = self._done_via_held(book.state)
+            self._arm_before(book, now, "blocked")
             book.apply(blocked, now)
             if mark["write"] == "paint_blocked" and mark["ok"]:
+                self._arm_log(book, now)
+                self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
                 book.apply(lambda state: self._bump_report(state, "blocked"), now)
+                self._note_report(book, now, "blocked")
             return painted, None, reported, False
         banner = hook.workflow_banner_from(screen)
         if banner:
@@ -4017,11 +4183,13 @@ class PaneWriteMatrixTests(unittest.TestCase):
                     painted.append(osc)
                     return write
 
+                held_done = self._done_via_held(book.state)
+                self._arm_before(book, now, hook.screen_event(book.state, "timer"))
                 book.apply(clear, now)
-                if mark["write"] == "done" and mark["ok"] and book.state.get("phase") == "idle_clear":
-                    book.files["t7.json.seq"] = str(self._RAISED).encode()
-                    book.floor = self._RAISED
-                    book.apply(lambda _state: "", now)
+                if mark["write"] == "done" and mark["ok"]:
+                    self._arm_log(book, now)
+                    self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
+                    self._note(book, now, "screen idle clear")
         else:
             quiet_since = None
         action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), banner, now)
@@ -4035,9 +4203,14 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 painted.append(osc)
                 return write
 
+            held_done = self._done_via_held(book.state)
+            self._arm_before(book, now, "start")
             book.apply(start, now)
             if mark["write"] == "working":
+                self._arm_log(book, now)
+                self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
                 book.apply(lambda state: self._bump_report(state, "working"), now)
+                self._note_report(book, now, "working")
             return painted, quiet_since, reported, False
         if action == "idle" and hook.screen_is_quiet(screen):
             if reported != "idle" and not stale:
@@ -4050,9 +4223,15 @@ class PaneWriteMatrixTests(unittest.TestCase):
                     painted.append(osc)
                     return write
 
+                held_done = self._done_via_held(book.state)
+                self._arm_before(book, now, hook.screen_event(book.state, "settled"))
                 book.apply(settle, now)
                 if mark["write"] == "done" and mark["ok"]:
+                    self._arm_log(book, now)
+                    self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
                     book.apply(lambda state: self._bump_report(state, "idle"), now)
+                    self._note_report(book, now, "idle")
+                    self._note(book, now, "watcher idle")
                     reported = "idle"
                 else:
                     reported = "idle"
@@ -4072,9 +4251,14 @@ class PaneWriteMatrixTests(unittest.TestCase):
             painted.append(osc)
             return write
 
+        held_done = self._done_via_held(book.state)
+        self._arm_before(book, now, "prompt", now)
         book.apply(prompt, now)
         if mark["write"] == "working":
+            self._arm_log(book, now)
+            self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
             book.apply(lambda state: self._bump_report(state, "working"), now)
+            self._note_report(book, now, "working")
         return painted, quiet_since, reported, False
 
     def _clear_watch_slot(self, book):
@@ -4100,13 +4284,131 @@ class PaneWriteMatrixTests(unittest.TestCase):
 
     def _report_after_hook(self, book, event, chosen, ok, release):
         if book.state is None:
-            return
+            return ""
         action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), False, self._BASE)
         kind = hook.report_for("", action)
         if chosen == "done" and ok and (event in hook.END_EVENTS or release):
             book.apply(lambda state: self._bump_report(state, "idle"), self._BASE)
-        elif kind == "working" and chosen == "working":
+            return "idle"
+        if kind == "working" and chosen == "working":
             book.apply(lambda state: self._bump_report(state, "working"), self._BASE)
+            return "working"
+        return ""
+
+    def _chooser_follow_up(self, state, chosen):
+        if self._pane_mode != "chooser" or chosen in ("none", "refresh") or state is None:
+            return False
+        if not self._can_paint(state):
+            return False
+        return hook.pane_transition(hook.owner_phase(state), "blocked") == "paint_blocked"
+
+    def _record_hook_log(self, book, event, osc, busy, grace, reported, blocked_osc):
+        lines = [f"event={event} session={hook.AGGREGATE} pane=t7 chain={hook.process_chain()}"]
+        device = self._owner_device(self.live.pid)
+        if osc and device:
+            if b"state=done" in osc:
+                kind = "done"
+            elif b"state=blocked" in osc:
+                kind = "blocked"
+            else:
+                kind = "working"
+            lines.append(f"osc {kind} via {device}")
+        lines.append(f"state event={event} busy={busy} grace_until={grace:.3f}")
+        if book.spawned:
+            lines.append("watcher spawned pid=__SPAWN__")
+        if blocked_osc and device:
+            lines.append(f"osc blocked via {device}")
+        if reported and book.state is not None:
+            seq = int(book.state.get("seq") or 0)
+            lines.append(
+                "herdr report-agent t7 --source "
+                + hook.SOURCE
+                + " --agent "
+                + hook.AGENT
+                + " --state "
+                + reported
+                + " --seq "
+                + str(seq)
+            )
+        self._append_log(book, lines)
+
+    def _note(self, book, clock, line):
+        book.logs.append((float(clock), line))
+
+    def _arm_before(self, book, clock, event, now=None):
+        stamp = clock if now is None else now
+        base = book.state if book.state is not None else hook.fresh_state()
+        trial = copy.deepcopy(base)
+        write, _ok, _osc = self._commit(trial, event, stamp)
+        if write in ("none", "refresh"):
+            return
+        self._arm_log(book, clock)
+
+    def _arm_log(self, book, clock):
+        if book.armed:
+            return
+        book.armed = True
+        self._note(book, clock, "watcher loop pane=t7")
+        book.apply(lambda state, token=self.watcher_token: self._claim(state, token), clock)
+        if book.state is not None and int(book.state.get("watcher") or 0) == os.getpid():
+            book.files[f"pids/{os.getpid()}"] = self._pidfile(os.getpid())
+
+    def _note_watch_osc(self, book, clock, osc, held_done):
+        if not osc:
+            return
+        if b"state=done" in osc:
+            kind = "done"
+            where = "held" if held_done else self._owner_device(self.live.pid)
+        elif b"state=blocked" in osc:
+            kind = "blocked"
+            where = self._owner_device(self.live.pid)
+        else:
+            kind = "working"
+            where = self._owner_device(self.live.pid)
+        if where:
+            self._note(book, clock, f"osc {kind} via {where}")
+
+    def _note_report(self, book, clock, kind):
+        if book.state is None:
+            return
+        seq = int(book.state.get("seq") or 0)
+        self._note(
+            book,
+            clock,
+            "herdr report-agent t7 --source "
+            + hook.SOURCE
+            + " --agent "
+            + hook.AGENT
+            + " --state "
+            + kind
+            + " --seq "
+            + str(seq),
+        )
+
+    def _done_via_held(self, state):
+        if state is None:
+            return False
+        owner = hook._pane_owner(state)
+        if owner is None:
+            return False
+        pid, token = owner
+        return hook.alive(pid) and hook.identity_proven(pid, token)
+
+    def _flush_watch_log(self, book):
+        if not book.logs:
+            return
+        text = "".join(f"{clock:.3f} pid={os.getpid()} {line}\n" for clock, line in book.logs)
+        book.files["hook.log"] = text.encode()
+
+    def _append_log(self, book, lines):
+        text = "".join(f"{self._BASE:.3f} pid={os.getpid()} {line}\n" for line in lines)
+        book.files["hook.log"] = book.files.get("hook.log", b"") + text.encode()
+
+    def _owner_device(self, pid):
+        found = list(hook.herdr_kiro_osc._tty_opens(pid))
+        if len(found) != 1:
+            return ""
+        return found[0][1]
 
     def _spawn_into(self, book):
         book.spawned = True
@@ -4142,6 +4444,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if name.startswith("pids/"):
                 expected.pop(name)
         expected[pid_name] = pid_bytes
+        raw_log = expected.get("hook.log")
+        if raw_log and b"__SPAWN__" in raw_log:
+            expected["hook.log"] = raw_log.replace(b"__SPAWN__", str(pid).encode())
         return ""
 
     def _hook_fold(self, state, event):
@@ -4205,6 +4510,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
         if write == "record_named":
             return write, True, b""
         if write == "done":
+            owner_now = hook._pane_owner(state)
+            if owner_now is not None and hook._held_pid_unconfirmed(owner_now[0], owner_now[1]):
+                return "none", False, b""
             return self._commit_done(state, event, now, session, hook_name, phase)
         if write == "working":
             ok = self._can_paint(state)
@@ -4401,6 +4709,8 @@ class _Book:
         self.state = None
         self.floor = 0
         self.spawned = False
+        self.logs = []
+        self.armed = False
         self._load()
 
     def _load(self):
@@ -4420,9 +4730,15 @@ class _Book:
         self.state = parsed if isinstance(parsed, dict) else None
 
     def apply(self, fn, now):
-        existed = "t7.json" in self.files
-        readable = self.state is not None
-        loaded = json.loads(self.files["t7.json"]) if readable else hook.fresh_state()
+        raw = self.files.get("t7.json")
+        parsed = None
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+        existed = raw is not None
+        loaded = parsed if isinstance(parsed, dict) else hook.fresh_state()
         before = copy.deepcopy(loaded)
         flag = fn(loaded) or ""
         changed = loaded != before

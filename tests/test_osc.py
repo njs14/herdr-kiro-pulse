@@ -1874,7 +1874,8 @@ class AncestorReportTests(unittest.TestCase):
                 break
             # A sec: token is not an identity. The watcher starts and the pty
             # stays empty, the same as an empty token.
-            if not fine and "watcher loop" in logged:
+            # A weak or empty token is none. That tick does not log or paint.
+            if not fine and os.path.exists(result + ".watch"):
                 break
             time.sleep(0.05)
         else:
@@ -1884,7 +1885,7 @@ class AncestorReportTests(unittest.TestCase):
                     detail = detail + handle.read()
             self.fail("no osc attempt\n" + detail)
         if not fine:
-            time.sleep(0.3)
+            time.sleep(0.8)
         got = _read_ready(master, 0.3)
 
         def steal(state):
@@ -2100,7 +2101,7 @@ class AboveSkippedPidTests(unittest.TestCase):
                     logged = handle.read()
             if "osc missed " in logged or "osc working via" in logged or "osc done" in logged:
                 break
-            if not fine and "watcher loop" in logged:
+            if not fine and os.path.exists(result + ".watch"):
                 break
             time.sleep(0.05)
         else:
@@ -2110,7 +2111,7 @@ class AboveSkippedPidTests(unittest.TestCase):
                     detail = detail + handle.read()
             self.fail("no osc attempt\n" + detail)
         if not fine:
-            time.sleep(0.3)
+            time.sleep(0.8)
         parent_got = _read_ready(parent_master, 0.3)
         grand_got = _read_ready(grand_master, 0.3)
         mid_got = _read_ready(mid_master, 0.3)

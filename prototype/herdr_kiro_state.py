@@ -432,6 +432,8 @@ def _finish_slot(state: dict, session: str, now: float) -> None:
 
 
 _PANE_OUTCOME = {"write": "none", "ok": True, "event": "", "release": False}
+# Preview folds classify a tick without painting, logging, or touching the pane.
+_COMMIT_DRY = False
 
 
 def apply_event(
@@ -583,6 +585,36 @@ def update(path: str, fn):
         with contextlib.suppress(OSError):
             os.unlink(path)
     return loaded
+
+
+def _load_for_commit(path: str):
+    """Read a pane without creating it or copying the seq floor into it."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = handle.read()
+    except OSError:
+        return fresh_state(), False, False
+    if not raw.strip():
+        return fresh_state(), True, False
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return fresh_state(), True, False
+    if not isinstance(parsed, dict):
+        return fresh_state(), True, False
+    return parsed, True, True
+
+
+def _write_refresh(path: str, state: dict) -> None:
+    """Replace the pane json. Seq, the floor, and every other file stay."""
+    fd = os.open(path, os.O_RDWR, FILE_MODE)
+    with os.fdopen(fd, "r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps(state))
+        handle.flush()
+        os.chmod(path, FILE_MODE)
 
 
 def in_tui() -> bool:
@@ -829,8 +861,11 @@ def emit_osc(state: dict | str, kind: str, rule_id: str = "") -> bool:
     try:
         payload = herdr_kiro_osc.encode(fields)
     except ValueError:
-        log("refusing osc")
+        if not _COMMIT_DRY:
+            log("refusing osc")
         return False
+    if _COMMIT_DRY:
+        return True
     written = herdr_kiro_osc.write_pid(payload, pid)
     if written:
         log(f"osc {fields['state']} via {written}")
@@ -1754,6 +1789,8 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
         # _held_pid. Zero, or any other pid, is a different terminal.
         # Do not open another tty.
         return False
+    if _COMMIT_DRY:
+        return True
     if kind == "idle" and _pane_fd >= 0 and _held_ident == token:
         return _write_held_fd()
     return paint_status(kind, pid, token)
@@ -1762,7 +1799,230 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
 def _pane_result(write: str, ok: bool) -> tuple[str, bool]:
     """Remember the table result so update can leave a none file untouched."""
     _PANE_OUTCOME["write"] = write
+    _PANE_OUTCOME["ok"] = ok
     return write, ok
+
+
+def _owner_held_unconfirmed(state: dict) -> bool:
+    owner = _pane_owner(state)
+    if owner is None:
+        return False
+    return _held_pid_unconfirmed(owner[0], owner[1])
+
+
+def _leaves_directory_untouched(write: str, ok: bool, trial: dict, state: dict) -> bool:
+    """True when this result must not open the pane, the floor, or the log."""
+    if write == "none" and trial == state:
+        return True
+    return write == "done" and not ok and trial == state and _owner_held_unconfirmed(state)
+
+
+def _file_generation_matches(path: str, generation: int) -> bool:
+    loaded, existed, readable = _load_for_commit(path)
+    if not existed or not readable:
+        return True
+    try:
+        found = int(loaded.get("generation") or 0)
+    except (TypeError, ValueError):
+        found = 0
+    return found == int(generation)
+
+
+def _preview_pane(state: dict, event: str, now: float):
+    """Classify one event. The trial is not the file, and paint is not written."""
+    trial = copy.deepcopy(state)
+    global _COMMIT_DRY
+    previous = _COMMIT_DRY
+    _COMMIT_DRY = True
+    try:
+        write, ok = commit_pane(trial, event, now=now)
+    finally:
+        _COMMIT_DRY = previous
+    return write, bool(ok), trial
+
+
+def _arm_watch(path: str, pane: str, claim, armed: dict) -> None:
+    """Claim the slot on the first real write. none and refresh never arm."""
+    if armed["on"]:
+        return
+    update(path, claim)
+    write_pidfile(path, os.getpid())
+    log(f"watcher loop pane={pane}")
+    armed["on"] = True
+
+
+def _persist_watch(path: str, state: dict, event: str, now: float, arm, generation: int | None = None):
+    """Write one watcher event, or return the same state when the result is quiet."""
+    if generation is not None and not _file_generation_matches(path, generation):
+        return "none", False, state, True
+    write, ok, trial = _preview_pane(state, event, now)
+    if write == "refresh":
+        # pane_text may have moved the file generation after this state was loaded.
+        # Refresh rewrites that file, so the new timestamp has to land on it.
+        loaded, existed, readable = _load_for_commit(path)
+        if not existed or not readable:
+            return write, ok, state, True
+        file_write, file_ok, file_trial = _preview_pane(loaded, event, now)
+        if file_write == "refresh" and file_trial != loaded:
+            _write_refresh(path, file_trial)
+            return file_write, file_ok, file_trial, False
+        return file_write, file_ok, state, True
+    if _leaves_directory_untouched(write, ok, trial, state):
+        return write, ok, state, True
+    arm()
+
+    def apply(current: dict, event: str = event, generation: int | None = generation, now: float = now) -> None:
+        if generation is None:
+            commit_pane(current, event, now=now)
+            return
+        commit_if_current(current, event, generation)
+
+    saved = update(path, apply)
+    recorded = str(_PANE_OUTCOME.get("write") or write)
+    return recorded, bool(_PANE_OUTCOME.get("ok")), saved, False
+
+
+def _fold_hook(
+    state: dict,
+    event: str,
+    session: str,
+    now: float,
+    owner: int,
+    owner_started: str,
+    chat_pid: int,
+    chosen: dict,
+) -> None:
+    """The hook fold. A later none keeps an earlier mutation for update()."""
+    revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
+    chosen["write"] = str(_PANE_OUTCOME["write"])
+    chosen["ok"] = bool(_PANE_OUTCOME["ok"])
+    chosen["release"] = bool(_PANE_OUTCOME["release"])
+    slot_ev = str(_PANE_OUTCOME["event"])
+    # A busy hook can stamp the slot and then paint. A Stop at aggregate
+    # zero is refresh for a proven owner and none for every other phase.
+    # The follow-up commit is skipped because Stop is an end event.
+    # SessionStart is record_aggregate, not an exit. Do not follow it
+    # with start when that owner already owes process_exit.
+    if event not in END_EVENTS and slot_ev != "aggregate_zero":
+        target = state if revised is state else revised
+        pane_ev = hook_event(target, event)
+        owed = event == "SessionStart" and _proven_exit_owed(target)
+        if pane_ev != slot_ev and not owed:
+            owner_now = _pane_owner(target)
+            dead = owner_now is not None and not alive(owner_now[0])
+            write2, ok2 = commit_pane(target, pane_ev)
+            if write2 != "none":
+                chosen["write"] = write2
+                chosen["ok"] = ok2
+                revised = target
+                if write2 == "done" and ok2 and dead:
+                    chosen["release"] = True
+    if revised is not state:
+        saved = dict(revised)
+        state.clear()
+        state.update(saved)
+
+
+def _hook_effects(pane: str, path: str, event: str, chosen: dict, state: dict) -> None:
+    """Reports and the watcher follow a persisted result. none and refresh do not."""
+    if chosen["write"] in ("none", "refresh"):
+        return
+    ensure_watcher(pane, path)
+    screen = pane_text(pane) or ""
+    action = next_action(
+        len(state["busy"]),
+        float(state["grace_until"]),
+        workflow_banner_from(screen),
+        time.time(),
+    )
+    kind = report_for(screen, action)
+    if chosen["write"] == "done" and chosen["ok"] and (event in END_EVENTS or chosen["release"]):
+        send_report(pane, path, "idle")
+    elif kind == "working" and chosen["write"] == "working":
+        send_report(pane, path, "working")
+    elif kind == "blocked":
+        rule_id = str(screen_view(screen).get("id") or "")
+        write, ok = commit_blocked(path, rule_id)
+        if write == "paint_blocked" and ok:
+            send_report(pane, path, kind)
+    if chosen["release"]:
+        release_authority(pane, path)
+
+
+def _commit_persisted(
+    event: str,
+    session: str,
+    now: float,
+    owner: int,
+    owner_started: str,
+    chat_pid: int,
+    path: str,
+    pane: str,
+) -> tuple[str, bool]:
+    """Persist one hook. none returns before update, the floor, and the log."""
+    loaded, existed, readable = _load_for_commit(path)
+    trial = copy.deepcopy(loaded) if readable else fresh_state()
+    before = copy.deepcopy(trial)
+    chosen = {"write": "none", "ok": True, "release": False}
+    global _COMMIT_DRY
+    previous = _COMMIT_DRY
+    _COMMIT_DRY = True
+    try:
+        _fold_hook(trial, event, session, now, owner, owner_started, chat_pid, chosen)
+    finally:
+        _COMMIT_DRY = previous
+    write = str(chosen["write"])
+    ok = bool(chosen["ok"])
+    if write == "none" and trial == before:
+        return _pane_result("none", True)
+    if write == "refresh":
+        if existed and readable and trial != before:
+            _write_refresh(path, trial)
+        return _pane_result("refresh", True)
+    if _leaves_directory_untouched(write, ok, trial, before):
+        return _pane_result(write, ok)
+    log(f"event={event} session={session} pane={pane} chain={process_chain()}")
+
+    def apply(current: dict, chosen: dict = chosen) -> None:
+        _fold_hook(current, event, session, now, owner, owner_started, chat_pid, chosen)
+
+    saved = update(path, apply)
+    log(f"state event={event} busy={len(saved['busy'])} grace_until={float(saved['grace_until']):.3f}")
+    _hook_effects(pane, path, event, chosen, saved)
+    return _pane_result(str(chosen["write"]), bool(chosen["ok"]))
+
+
+def _status_view(screen: str, state: dict, held, now: float, app_read_failed: bool = False):
+    """Classify a watcher screen. Explain runs only for a result that writes.
+
+    A failed App read is not a screen. The held banner stays, and explain
+    does not run, so it cannot clear that banner or delete a pid file.
+    """
+    blocked = bool(approval_text(screen)) or held == "blocked"
+    banner = bool(workflow_banner_from(screen)) or (held == "working" and not blocked)
+    view = _unknown_screen()
+    if app_read_failed:
+        return blocked, banner, view
+    if blocked:
+        candidate = "blocked"
+    elif banner:
+        candidate = screen_event(state, "banner")
+    elif prompt_visible(screen) and screen_is_settled(screen):
+        candidate = screen_event(state, "settled")
+    else:
+        action = next_action(len(state.get("busy") or {}), float(state.get("grace_until") or 0), banner, now)
+        candidate = screen_event(state, "continue") if action == "working" else ""
+    if not candidate:
+        return blocked, banner, view
+    write, ok, trial = _preview_pane(state, candidate, now)
+    if write == "refresh" or _leaves_directory_untouched(write, ok, trial, state):
+        return blocked, banner, view
+    view = screen_view(screen)
+    if not view.get("ok"):
+        return blocked, banner, view
+    blocked = view.get("state") == "blocked" or bool(approval_text(screen))
+    banner = view.get("id") == "workflow_banner_working"
+    return blocked, banner, view
 
 
 def commit_pane(
@@ -1775,21 +2035,30 @@ def commit_pane(
     owner_started: str = "",
     session: str = "",
     hook_name: str = "",
+    path: str = "",
+    pane: str = "",
+    chat_pid: int = 0,
+    watch: bool = False,
+    fault: Exception | None = None,
 ) -> tuple[str, bool]:
     """Apply one table result. none assigns nothing and writes no tty.
 
-    refresh updates only the aggregate busy timestamp. A prompt or a tool
-    event at aggregate zero is aggregate_zero. The count decides that, even
-    when the caller omits the session, so a watcher continue or banner does
-    not paint and does not drop a row. A Stop at aggregate zero is
-    aggregate_zero when the call names the aggregate session.
-    record_aggregate, touch_aggregate, touch_partial, and record_named are
-    the only results that create a slot. paint_blocked is the only result
-    that calls emit_osc. remember_owner, including an identity drop, runs
-    only for a result that records an owner. A live owner is not dropped. A
-    row drops only for a done result when that process is not alive, or when
-    the slot has no owner.
+    A path makes this the only door that writes the pane, the seq floor,
+    the log, a watcher pid file, the tty, or OSC. none returns before any
+    of that I/O. refresh writes the busy timestamp and nothing else.
     """
+    if watch:
+        _run_watch(pane, path)
+        return _pane_result("none", True)
+    if fault is not None:
+        log(f"watcher error {type(fault).__name__}: {fault}")
+        clear_watcher(path)
+        return _pane_result("none", False)
+    if event == "refuse_watch":
+        log("refusing watch")
+        return _pane_result("none", False)
+    if path:
+        return _commit_persisted(event, session, now, owner, owner_started, chat_pid, path, pane)
     count = int(state.get("aggregate") or 0)
     prompt_at_zero = count == 0 and event in ("prompt", "start")
     stop_at_zero = session == AGGREGATE and count == 0 and event in ("stop", "piped_chat")
@@ -2608,22 +2877,26 @@ def watch_loop(pane: str, path: str) -> None:
     try:
         _watch_loop(pane, path)
     except Exception as exc:
-        log(f"watcher error {type(exc).__name__}: {exc}")
-        clear_watcher(path)
+        commit_pane(fresh_state(), "watcher_fault", path=path, pane=pane, fault=exc)
 
 
 def _watch_loop(pane: str, path: str) -> None:
+    commit_pane(fresh_state(), "watch", path=path, pane=pane, watch=True)
+
+
+def _run_watch(pane: str, path: str) -> None:
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, _on_term)
     watcher_token = hires_start(os.getpid())
+    armed = {"on": False}
 
     def claim(state: dict) -> None:
         state["watcher"] = os.getpid()
         state["watcher_started"] = watcher_token
 
-    update(path, claim)
-    write_pidfile(path, os.getpid())
-    log(f"watcher loop pane={pane}")
+    def arm() -> None:
+        _arm_watch(path, pane, claim, armed)
+
     reported = None
     misses = 0
     quiet_since = None
@@ -2657,7 +2930,8 @@ def _watch_loop(pane: str, path: str) -> None:
             else:
                 ready_spins = 0
             begin_tick()
-            state = update(path, lambda _state: None)
+            loaded, _existed, readable = _load_for_commit(path)
+            state = loaded if readable else fresh_state()
             if slot_holder_gone(state):
                 log("watcher exit slot holder gone")
                 return
@@ -2717,6 +2991,11 @@ def _watch_loop(pane: str, path: str) -> None:
                     clear_watcher(path)
                     log("watcher exit owner already gone")
                     return
+                exit_event = screen_event(state, "exit")
+                preview, preview_ok, trial = _preview_pane(state, exit_event, now)
+                if preview == "refresh" or _leaves_directory_untouched(preview, preview_ok, trial, state):
+                    return
+                arm()
                 if apply_owner_exit(pane, path):
                     return
                 if not _watcher_still_us(path):
@@ -2732,21 +3011,13 @@ def _watch_loop(pane: str, path: str) -> None:
             # A live weak owner, including one stored as idle_clear, reaches
             # the chooser as pid_reuse. That event writes none.
             if _owner_is_live_weak(state):
-                state = update(path, lambda current: commit_pane(current, screen_event(current, "reuse")))
+                _write, _ok, state, _skipped = _persist_watch(path, state, screen_event(state, "reuse"), now, arm)
             screen = pane_text(pane)
             # None is a failed App read. Explain would call that an idle screen.
             app_read_failed = in_app() and screen is None
             if screen is None:
                 screen = ""
-                view = _unknown_screen()
-            else:
-                view = screen_view(screen)
-            if not view.get("ok"):
-                blocked = approval_text(screen) or held == "blocked"
-                banner = workflow_banner_from(screen) or (held == "working" and not blocked)
-            else:
-                blocked = view.get("state") == "blocked" or approval_text(screen)
-                banner = view.get("id") == "workflow_banner_working"
+            blocked, banner, view = _status_view(screen, state, held, now, app_read_failed)
             if blocked:
                 held = "blocked"
             elif banner:
@@ -2754,12 +3025,16 @@ def _watch_loop(pane: str, path: str) -> None:
             if blocked:
                 quiet_since = None
                 if reported != "blocked":
-                    rule_id = str(view.get("id") or "")
-                    write, ok = commit_blocked(path, rule_id)
-                    if write == "paint_blocked" and ok:
-                        reported, misses = note_report(pane, path, "blocked", reported, misses)
-                        if reported is None and misses >= 30:
-                            return
+                    preview, preview_ok, trial = _preview_pane(state, "blocked", now)
+                    quiet = preview == "refresh" or _leaves_directory_untouched(preview, preview_ok, trial, state)
+                    if not quiet:
+                        arm()
+                        rule_id = str(view.get("id") or "")
+                        write, ok = commit_blocked(path, rule_id)
+                        if write == "paint_blocked" and ok:
+                            reported, misses = note_report(pane, path, "blocked", reported, misses)
+                            if reported is None and misses >= 30:
+                                return
                 continue
             if banner:
                 quiet_since = None
@@ -2768,19 +3043,17 @@ def _watch_loop(pane: str, path: str) -> None:
                     quiet_since = now
                 elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
                     generation = int(state.get("generation") or 0)
-                    decision = {"ok": False}
-
-                    def apply_clear(
-                        current: dict,
-                        decision: dict = decision,
-                        generation: int = generation,
-                    ) -> None:
-                        decision["ok"] = clear_idle_if_current(current, generation)
-
-                    update(path, apply_clear)
-                    if decision["ok"]:
+                    write, ok, state, skipped = _persist_watch(
+                        path,
+                        state,
+                        screen_event(state, "timer"),
+                        now,
+                        arm,
+                        generation,
+                    )
+                    cleared = not skipped and write == "done" and ok and state.get("phase") == "idle_clear"
+                    if cleared:
                         log("screen idle clear")
-                        state = update(path, lambda _current: None)
                     else:
                         quiet_since = None
             else:
@@ -2793,14 +3066,8 @@ def _watch_loop(pane: str, path: str) -> None:
             )
             owners_gone = bool(known_owners) and not owner_alive
             if banner and not owners_gone:
-                chosen = {"write": "none"}
-
-                def apply_banner(current: dict, chosen: dict = chosen) -> None:
-                    write, _ok = commit_pane(current, screen_event(current, "banner"))
-                    chosen["write"] = write
-
-                state = update(path, apply_banner)
-                if chosen["write"] == "working":
+                write, _ok, state, skipped = _persist_watch(path, state, screen_event(state, "banner"), now, arm)
+                if not skipped and write == "working":
                     reported, misses = note_report(pane, path, "working", reported, misses)
                     if reported is None and misses >= 30:
                         return
@@ -2811,24 +3078,18 @@ def _watch_loop(pane: str, path: str) -> None:
             # even when HC_TERMINAL_ID is set.
             if not app_read_failed and action == "idle" and screen_is_quiet(screen):
                 if reported != "idle":
-                    chosen = {"write": "none", "ok": False}
                     generation = int(state.get("generation") or 0)
-
-                    def apply_settled(
-                        current: dict,
-                        chosen: dict = chosen,
-                        generation: int = generation,
-                    ) -> None:
-                        write, ok = commit_if_current(
-                            current,
-                            screen_event(current, "settled"),
-                            generation,
-                        )
-                        chosen["write"] = write
-                        chosen["ok"] = ok
-
-                    state = update(path, apply_settled)
-                    if chosen["write"] == "done" and not chosen["ok"]:
+                    write, ok, state, skipped = _persist_watch(
+                        path,
+                        state,
+                        screen_event(state, "settled"),
+                        now,
+                        arm,
+                        generation,
+                    )
+                    if skipped:
+                        continue
+                    if write == "done" and not ok:
                         # A failed done is not a finished idle. Leave the row.
                         exit_misses += 1
                         if exit_misses >= EXIT_RETRY_CAP:
@@ -2837,7 +3098,7 @@ def _watch_loop(pane: str, path: str) -> None:
                             return
                         time.sleep(min(TICK_SECS * exit_misses, 2.0))
                         continue
-                    if chosen["write"] == "done":
+                    if write == "done":
                         exit_misses = 0
                         reported, misses = note_report(pane, path, "idle", reported, misses)
                         if reported is None and misses >= 30:
@@ -2853,14 +3114,8 @@ def _watch_loop(pane: str, path: str) -> None:
                 continue
             if action != "working" or owners_gone:
                 continue
-            chosen = {"write": "none"}
-
-            def apply_prompt(current: dict, chosen: dict = chosen) -> None:
-                write, _ok = commit_pane(current, screen_event(current, "continue"))
-                chosen["write"] = write
-
-            state = update(path, apply_prompt)
-            if chosen["write"] != "working":
+            write, _ok, state, skipped = _persist_watch(path, state, screen_event(state, "continue"), now, arm)
+            if skipped or write != "working":
                 continue
             reported, misses = note_report(pane, path, "working", reported, misses)
             if reported is None and misses >= 30:
@@ -2900,7 +3155,7 @@ def main() -> int:
             or os.path.islink(given)
             or os.path.realpath(given) != os.path.realpath(expected)
         ):
-            log("refusing watch")
+            commit_pane(fresh_state(), "refuse_watch", pane=pane, path=expected or "")
             return 1
         watch_loop(pane, expected)
         return 0
@@ -2925,66 +3180,17 @@ def main() -> int:
         return 0
     begin_tick()
     owner, owner_started, chat_pid, _chat_lstart = kiro_lineage()
-    log(f"event={event} session={session} pane={pane} chain={process_chain()}")
-
-    chosen = {"write": "none", "ok": False, "release": False}
-
-    def fold(state: dict) -> None:
-        revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
-        write = str(_PANE_OUTCOME["write"])
-        ok = bool(_PANE_OUTCOME["ok"])
-        slot_ev = str(_PANE_OUTCOME["event"])
-        chosen["write"] = write
-        chosen["ok"] = ok
-        chosen["release"] = bool(_PANE_OUTCOME["release"])
-        # A busy hook can stamp the slot and then paint. A Stop at aggregate
-        # zero is refresh for a proven owner and none for every other phase.
-        # The follow-up commit is skipped because Stop is an end event.
-        # SessionStart is record_aggregate, not an exit. Do not follow it
-        # with start when that owner already owes process_exit.
-        if event not in END_EVENTS and slot_ev != "aggregate_zero":
-            target = state if revised is state else revised
-            pane_ev = hook_event(target, event)
-            owed = event == "SessionStart" and _proven_exit_owed(target)
-            if pane_ev != slot_ev and not owed:
-                owner_now = _pane_owner(target)
-                dead = owner_now is not None and not alive(owner_now[0])
-                write2, ok2 = commit_pane(target, pane_ev)
-                if write2 != "none":
-                    chosen["write"] = write2
-                    chosen["ok"] = ok2
-                    revised = target
-                    if write2 == "done" and ok2 and dead:
-                        chosen["release"] = True
-        if revised is not state:
-            saved = dict(revised)
-            state.clear()
-            state.update(saved)
-
-    state = update(path, fold)
-    log(f"state event={event} busy={len(state['busy'])} grace_until={state['grace_until']:.3f}")
-    # none and refresh do not store the floor, claim the watcher, or spawn one.
-    if chosen["write"] not in ("none", "refresh"):
-        ensure_watcher(pane, path)
-    screen = pane_text(pane) or ""
-    action = next_action(
-        len(state["busy"]),
-        float(state["grace_until"]),
-        workflow_banner_from(screen),
-        time.time(),
+    commit_pane(
+        fresh_state(),
+        event,
+        session=session,
+        now=now,
+        owner=owner,
+        owner_started=owner_started,
+        chat_pid=chat_pid,
+        path=path,
+        pane=pane,
     )
-    kind = report_for(screen, action)
-    if chosen["write"] == "done" and chosen["ok"] and (event in END_EVENTS or chosen["release"]):
-        send_report(pane, path, "idle")
-    elif kind == "working" and chosen["write"] == "working":
-        send_report(pane, path, "working")
-    elif kind == "blocked":
-        rule_id = str(screen_view(screen).get("id") or "")
-        write, ok = commit_blocked(path, rule_id)
-        if write == "paint_blocked" and ok:
-            send_report(pane, path, kind)
-    if chosen["release"]:
-        release_authority(pane, path)
     return 0
 
 
