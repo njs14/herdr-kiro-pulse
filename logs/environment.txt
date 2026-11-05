@@ -1,6 +1,0 @@
-herdr 0.9.5
-kiro-cli kiro-cli 2.37.0
-chat.agentEngine=v3 (global)
-launch=kiro-cli chat --v3 --trust-all-tools --trust-workspace
-herdr_release_asset=v0.9.5
-herdr_state_rs=same arbitration code at tag v0.9.5 (2ecf19a) and ee5bfb5

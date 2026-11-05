@@ -245,7 +245,7 @@ def main() -> int:
     if pending or (state_name == "uninstalled" and registered is True):
         problems.append(
             "herdr-kiro is still registered. startup.sh finishes that unlink when a server is up. "
-            "doctor does not change the registration or the files."
+            "doctor does not change the registration."
         )
     if state_name == "installed" and via == "plugin" and registered is False and owned_paths:
         problems.append(

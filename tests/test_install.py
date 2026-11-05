@@ -169,21 +169,46 @@ class InstallTests(unittest.TestCase):
             handle.write("import time\ntime.sleep(60)\n")
         watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file])
         decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file])
+        wrong_start = subprocess.Popen([sys.executable, script, "--watch", "start", state_file])
+        wrong_uid = subprocess.Popen([sys.executable, script, "--watch", "uid", state_file])
+        reuse = subprocess.Popen([sys.executable, script, "--watch", "reuse", state_file])
         self.addCleanup(lambda: watcher.poll() is not None or watcher.kill())
         self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
+        self.addCleanup(lambda: wrong_start.poll() is not None or wrong_start.kill())
+        self.addCleanup(lambda: wrong_uid.poll() is not None or wrong_uid.kill())
+        self.addCleanup(lambda: reuse.poll() is not None or reuse.kill())
         hook.begin_tick()
         ident = hook.watcher_identity(watcher.pid)
         self.assertIsNotNone(ident)
-        # Linux is fractional seconds. Other platforms tag whole seconds with sec:.
-        self.assertRegex(ident["start"], r"^(?:\d+\.\d+|sec:\d+)$")
+        # /proc start ticks are fractional seconds. Where those ticks are absent, the token is sec: plus whole-second lstart.
+        if hook._linux_start_ticks(watcher.pid):
+            self.assertRegex(ident["start"], r"^\d+\.\d+$")
+        else:
+            self.assertRegex(ident["start"], r"^sec:\d+$")
         decoy_ident = hook.watcher_identity(decoy.pid)
+        start_ident = hook.watcher_identity(wrong_start.pid)
+        uid_ident = hook.watcher_identity(wrong_uid.pid)
         self.assertIsNotNone(decoy_ident)
+        self.assertIsNotNone(start_ident)
+        self.assertIsNotNone(uid_ident)
+        other_uid = 0 if os.getuid() != 0 else 1
         pid_dir = os.path.join(state, "pids")
         os.makedirs(pid_dir)
         with open(os.path.join(pid_dir, str(watcher.pid)), "w", encoding="utf-8") as handle:
             handle.write("{}\n{}\n{}\n".format(os.getuid(), ident["start"], ident["comm"]))
         with open(os.path.join(pid_dir, str(decoy.pid)), "w", encoding="utf-8") as handle:
             handle.write("{}\n{}\n{}\n".format(os.getuid(), decoy_ident["start"], "not-the-comm"))
+        with open(os.path.join(pid_dir, str(wrong_start.pid)), "w", encoding="utf-8") as handle:
+            handle.write("{}\n{}\n{}\n".format(os.getuid(), "1", start_ident["comm"]))
+        with open(os.path.join(pid_dir, str(wrong_uid.pid)), "w", encoding="utf-8") as handle:
+            handle.write("{}\n{}\n{}\n".format(other_uid, uid_ident["start"], uid_ident["comm"]))
+        reuse_ident = hook.watcher_identity(reuse.pid)
+        self.assertIsNotNone(reuse_ident)
+        hook.begin_tick()
+        reuse_snap = hook.process_snapshot(reuse.pid) or {}
+        reuse_lstart = reuse_snap.get("lstart") or "1"
+        with open(os.path.join(pid_dir, str(reuse.pid)), "w", encoding="utf-8") as handle:
+            handle.write("{}\n{}\n{}\n".format(os.getuid(), "sec:" + str(reuse_lstart), reuse_ident["comm"]))
         env = dict(os.environ)
         env["HOME"] = home
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
@@ -209,11 +234,28 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(os.path.exists(legacy_state))
         self.assertFalse(os.path.exists(marked))
         self.assertTrue(os.path.exists(decoy_marked))
-        watcher.wait(timeout=5)
-        self.assertIsNotNone(watcher.returncode)
+        # A fractional start is proof and is signaled. sec: plus whole-second
+        # lstart is the same form as a same-second reuse, so it is not.
+        if hook.fine_start(ident["start"]):
+            watcher.wait(timeout=5)
+            self.assertIsNotNone(watcher.returncode)
+        else:
+            self.assertIsNone(watcher.poll())
         self.assertIsNone(decoy.poll())
+        self.assertIsNone(wrong_start.poll())
+        self.assertIsNone(wrong_uid.poll())
+        self.assertIsNone(reuse.poll())
+        if watcher.poll() is None:
+            watcher.kill()
         decoy.kill()
+        wrong_start.kill()
+        wrong_uid.kill()
+        reuse.kill()
+        watcher.wait(timeout=5)
         decoy.wait(timeout=5)
+        wrong_start.wait(timeout=5)
+        wrong_uid.wait(timeout=5)
+        reuse.wait(timeout=5)
 
     def test_uninstall_keeps_a_user_edited_file(self):
         base = tempfile.mkdtemp()

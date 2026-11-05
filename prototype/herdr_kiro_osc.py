@@ -14,7 +14,7 @@ import shutil
 import stat
 import subprocess
 
-# CLI 3.0 reports app=kiro-cli. Older sessions still send app=kiro.
+# The hook writes app=kiro-cli. An incoming status whose app is kiro is still this program.
 APP = "kiro-cli"
 KIRO_APPS = frozenset({"kiro", "kiro-cli"})
 _STATES = {"idle", "working", "done", "blocked", "error", "clear"}
@@ -29,7 +29,7 @@ _FLAG_SETS = (
 
 
 def is_kiro_app(name: object) -> bool:
-    """True for the OSC app name Kiro sends, on CLI 3.0 and on older sessions."""
+    """True when an incoming status app is kiro-cli or kiro."""
     return isinstance(name, str) and name in KIRO_APPS
 
 
@@ -74,143 +74,48 @@ def encode(fields: dict | None) -> bytes:
 
 
 def write_pid(payload: bytes, pid: int) -> str:
-    """Write payload to pid's tty, stdout first. Return the device, or ''."""
+    """Write payload to pid's stdout tty. Return that device, or ''.
+
+    One candidate. A missing fd lookup, an ambiguous fd 1, or a stdout that
+    is not a tty writes nothing. The controlling terminal and /dev/tty are
+    not candidates, and a failed open does not try another device.
+    """
     try:
         number = int(pid)
     except (TypeError, ValueError):
         return ""
     if number <= 1:
         return ""
-    for open_path, device in _tty_opens(number):
-        if _write_path(open_path, device, payload):
-            return device
+    found = list(_tty_opens(number))
+    if len(found) != 1:
+        return ""
+    open_path, device = found[0]
+    if _write_path(open_path, device, payload):
+        return device
     return ""
 
 
-def write_to_pane(payload: bytes, pids: list[int], *, skip: list[int] | None = None) -> str:
-    """Write payload to the first pane tty among pids, then this process and its parents.
-
-    `skip` holds recorded pids that a start token does not identify. Those
-    pids are not written. The walk stops at the first one, so a later
-    ancestor's pty is not written either.
-    """
-    blocked: set[int] = set()
-    for pid in skip or []:
-        try:
-            number = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if number > 1:
-            blocked.add(number)
-    seen: set[int] = set()
-    for pid in pids:
-        try:
-            number = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if number <= 1 or number in seen or number in blocked:
-            continue
-        seen.add(number)
-        found = write_pid(payload, number)
-        if found:
-            return found
-    for pid in _self_chain():
-        try:
-            number = int(pid)
-        except (TypeError, ValueError):
-            continue
-        if number <= 1 or number in seen:
-            continue
-        if number in blocked:
-            return ""
-        seen.add(number)
-        found = write_pid(payload, number)
-        if found:
-            return found
-    return _write_controlling(payload)
-
-
-def _self_chain() -> list[int]:
-    chain = [os.getpid()]
-    pid = os.getpid()
-    for _ in range(16):
-        parent = _ppid(pid)
-        if parent <= 1 or parent in chain:
-            break
-        chain.append(parent)
-        pid = parent
-    return chain
-
-
-def _ppid(pid: int) -> int:
-    text = ""
-    try:
-        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
-        text = ""
-    if text:
-        end = text.rfind(")")
-        fields = text[end + 2 :].split() if end >= 0 else []
-        if len(fields) >= 2:
-            try:
-                return int(fields[1])
-            except ValueError:
-                return 0
-    return _ps_int(pid, "ppid")
-
-
-def _ps_int(pid: int, field: str) -> int:
-    try:
-        return int(_ps_field(pid, field))
-    except ValueError:
-        return 0
-
-
-def _ps_field(pid: int, field: str) -> str:
-    try:
-        completed = subprocess.run(
-            ["ps", "-o", field + "=", "-p", str(int(pid))],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if completed.returncode != 0:
-        return ""
-    return (completed.stdout or "").strip()
-
-
 def _tty_opens(pid: int):
-    """Stdout, then stderr, then stdin.
+    """Yield the stdout tty once, or nothing.
 
-    Linux uses `/proc/<pid>/fd`. Elsewhere `lsof` names those same fds.
-    `ps -o tty=` is only the controlling terminal, and a setsid hook has none.
+    `/proc/<pid>/fd/1` when that directory exists. Elsewhere one lsof path
+    for fd 1. stderr, stdin, `ps -o tty=`, and /dev/tty are not yields.
     """
     proc = f"/proc/{pid}/fd"
     if os.path.isdir(proc):
-        for name in ("1", "2", "0"):
-            link = os.path.join(proc, name)
-            try:
-                target = os.readlink(link)
-            except OSError:
-                continue
-            if _TTY.fullmatch(target):
-                yield link, target
+        link = os.path.join(proc, "1")
+        try:
+            target = os.readlink(link)
+        except OSError:
+            return
+        if _TTY.fullmatch(target):
+            yield link, target
         return
-    seen: set[str] = set()
-    devices = _fd_devices(pid)
-    for name in ("1", "2", "0"):
-        device = devices.get(name) or ""
-        if _TTY.fullmatch(device) and device not in seen:
-            seen.add(device)
-            yield device, device
-    controlling = _tty_from_ps(pid)
-    if controlling and controlling not in seen:
-        yield controlling, controlling
+    if _ambiguous_stdout(_lsof_text(pid)):
+        return
+    stdout = _fd_devices(pid).get("1") or ""
+    if _TTY.fullmatch(stdout):
+        yield stdout, stdout
 
 
 def _devices_from_lsof(text: str) -> dict[str, str]:
@@ -232,6 +137,29 @@ def _devices_from_lsof(text: str) -> dict[str, str]:
     return found
 
 
+def _ambiguous_stdout(text: str) -> bool:
+    """True when fd 1 is named more than once as different paths."""
+    paths: list[str] = []
+    number = ""
+    for line in text.splitlines():
+        if line.startswith("f"):
+            number = ""
+            digits: list[str] = []
+            for ch in line[1:]:
+                if not ch.isdigit():
+                    break
+                digits.append(ch)
+            number = "".join(digits)
+        elif line.startswith("n") and number == "1":
+            paths.append(line[1:].strip())
+            number = ""
+    unique: list[str] = []
+    for path in paths:
+        if path not in unique:
+            unique.append(path)
+    return len(unique) > 1
+
+
 def _lsof_bin() -> str:
     found = shutil.which("lsof") or ""
     if found:
@@ -241,10 +169,10 @@ def _lsof_bin() -> str:
     return ""
 
 
-def _fd_devices(pid: int) -> dict[str, str]:
+def _lsof_text(pid: int) -> str:
     binary = _lsof_bin()
     if not binary:
-        return {}
+        return ""
     try:
         completed = subprocess.run(
             [binary, "-n", "-P", "-a", "-p", str(int(pid)), "-d", "0,1,2", "-F", "fn"],
@@ -255,18 +183,12 @@ def _fd_devices(pid: int) -> dict[str, str]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return {}
-    return _devices_from_lsof(completed.stdout or "")
-
-
-def _tty_from_ps(pid: int) -> str:
-    token = _ps_field(pid, "tty")
-    if token in ("", "?", "??", "-"):
         return ""
-    path = token if token.startswith("/dev/") else "/dev/" + token
-    if _TTY.fullmatch(path):
-        return path
-    return ""
+    return completed.stdout or ""
+
+
+def _fd_devices(pid: int) -> dict[str, str]:
+    return _devices_from_lsof(_lsof_text(pid))
 
 
 def _write_path(open_path: str, device: str, payload: bytes) -> bool:
@@ -306,28 +228,3 @@ def _write_all(fd: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError("short write")
         view = view[written:]
-
-
-def _write_controlling(payload: bytes) -> str:
-    for flags in _FLAG_SETS:
-        try:
-            fd = os.open("/dev/tty", flags)
-        except OSError:
-            continue
-        device = ""
-        try:
-            info = os.fstat(fd)
-            if stat.S_ISCHR(info.st_mode):
-                device = os.ttyname(fd)
-            if not _TTY.fullmatch(device):
-                device = ""
-            elif device:
-                _write_all(fd, payload)
-        except OSError:
-            continue
-        else:
-            if device:
-                return device
-        finally:
-            os.close(fd)
-    return ""

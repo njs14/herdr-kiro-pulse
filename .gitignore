@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 fixtures/wf-repro/*.txt
+logs/
 agent-tools/
 uploads/
 node_modules/

@@ -13,11 +13,11 @@ The App reads status only from OSC 7501 on the program's own output. `hc` is the
 - a question panel is `state=blocked:kind=question:app=kiro-cli`
 - a finished turn is `state=done:app=kiro-cli`
 
-Kiro CLI 3.0 sends `app=kiro-cli`. An older session still sends `app=kiro`. Both are this program.
+The hook writes `app=kiro-cli`. A status whose app is `kiro` is still this program.
 
 `herdr-app ls` shows `blocked` as needing you. It shows `done` while the turn is unseen, and idle once `herdr.seen` is that turn. The painted Agents section is a separate hold: a focused row that was under Done stays under Done after that list status is idle, and selecting another tab in the same space moves the row to Idle. A finished turn stays `state=done` on the wire.
 
-The Herdr TUI path is unchanged. `HERDR_ENV=1` and `HERDR_PANE_ID` still call `herdr pane report-agent` with `working`, `idle`, `blocked`, or `unknown`. A finished turn is an `idle` report. herdr 0.9.5 shows that unseen idle as done. The hook does not call `release-agent` while `kiro-cli` is running.
+The Herdr TUI path is unchanged. `HERDR_ENV=1` and `HERDR_PANE_ID` still call `herdr pane report-agent` with `working`, `idle`, or `blocked`. A finished turn is an `idle` report. herdr 0.9.5 shows that unseen idle as done. The hook does not call `release-agent` while `kiro-cli` is running. A live pid whose token is empty, `sec:` plus a whole-second start, or a bare whole-second start is not an exit and is not painted.
 
 Stock Kiro detection reads the idle prompt and calls the pane idle, including when `▶ name running` is still painted above that prompt. On the TUI, this plugin reports the pane from the workflow and from those dialogs. herdr 0.9.5 does not merge a local detection file with the remote one, so installing this replaces upstream Kiro rules until you uninstall.
 
@@ -49,15 +49,15 @@ Manual install from a clone:
 ./install.sh
 ```
 
-With herdr installed and no server running, that exits 0. Stdout:
+With herdr on `PATH` and no server running, that exits 0. Stdout is `Installed` plus the absolute path of each file, then the restart line. The default paths expand from `$HOME`:
 
 ```text
-Installed ~/.kiro/hooks/herdr-kiro.json
-Installed ~/.config/herdr/agent-detection/kiro.toml
+Installed /home/you/.kiro/hooks/herdr-kiro.json
+Installed /home/you/.config/herdr/agent-detection/kiro.toml
 Restart Kiro CLI so it loads the hook. Start it with: kiro-cli chat
 ```
 
-Stderr when nothing is listening: `note: no herdr server is running; reload happens on the next herdr start`. If `HERDR_SESSION` names a session that is not running, the script exits 2.
+`/home/you` stands in for the home directory. `$KIRO_HOOKS_DIR` replaces `$HOME/.kiro/hooks`, and `$XDG_CONFIG_HOME` replaces `$HOME/.config`, when those are set. Stderr when nothing is listening: `note: no herdr server is running; reload happens on the next herdr start`. If `herdr` is not on `PATH`, stderr is `herdr is not on PATH, skipped manifest reload` and the script still exits 0. If `HERDR_SESSION` names a session that is not running, the script exits 2.
 
 Register the same script as a plugin action:
 
@@ -81,7 +81,7 @@ Kiro CLI 3.0 is the supported CLI. Interactive chat starts on V3. A saved `chat.
 ./uninstall.sh
 ```
 
-`./doctor.sh` prints versions and whether the installed files still match the hashes this package wrote. It does not unlink the plugin and it does not delete files. `./uninstall.sh` removes the hook and `kiro.toml` only when this package still owns them, puts a saved `.original` back when one exists, and writes `uninstalled` in the lifecycle file. If the server is down it appends `pending_unlink=herdr-kiro`. The next `startup.sh` clears that line once `herdr plugin list` succeeds and the plugin is gone.
+`./doctor.sh` prints versions and whether the installed files still match the hashes this package wrote. It does not unlink the plugin, and it does not delete the hook or `kiro.toml`. It does remove a watcher pid file whose process is gone. `./uninstall.sh` removes the hook and `kiro.toml` only when this package still owns them, puts a saved `.original` back when one exists, and writes `uninstalled` in the lifecycle file. If the server is down it appends `pending_unlink=herdr-kiro`. The next `startup.sh` clears that line once `herdr plugin list` succeeds and the plugin is gone.
 
 Rebuild the demo with Node.js 22, FFmpeg, and the `hyperframes` package pinned in `package.json`:
 
@@ -101,13 +101,13 @@ The stock idle rule matches `› ask a question or describe a task` on the botto
 
 - A line that starts with `▶`, then a name, then `running`, and contains `ctrl+x`, is working. `ctrl+g` may be on the next line.
 - `Allow once` / `Deny once`, the subagent widget, and `Trust this workspace?` are blocked, and they beat the banner.
-- The hook releases the pane when the recorded `kiro-cli` or `kiro-cli-chat` process has exited. `Stop` and `SessionEnd` end a turn or a session. They are not process exit.
+- The hook calls `release-agent` only when the proven outer `kiro-cli` process has exited. A gone `kiro-cli-chat` is not an exit and does not call `release-agent`, whether or not a replacement is under the outer process. An agent that is gone, and an empty owner table, are not that exit. A live pid with an empty token, `sec:` plus a whole-second start, a bare whole-second start, or a fine token that no longer matches is not an exit and is not painted. A weak exit does not call `release-agent`. `Stop` and `SessionEnd` end a turn or a session. They are not process exit. A proven owner still ends `state=done` on that pane, including when the chat child is piped. A TUI pane inside the App gets no OSC.
 
 Stay on the stock file if you want herdr to keep applying newer remote Kiro rules. Switch to this if the idle pane during a workflow is the failure you are fixing. The rule-by-rule list is [docs/kiro-detection-diff.md](docs/kiro-detection-diff.md).
 
 ## Status
 
-Version 0.1.1, from `herdr-plugin.toml`. Kiro CLI 3.0 is the supported CLI.
+Version 0.1.0, from `herdr-plugin.toml`. Kiro CLI 3.0 is the supported CLI.
 
 The unit command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
