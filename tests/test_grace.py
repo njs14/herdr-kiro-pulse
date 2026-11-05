@@ -1687,7 +1687,12 @@ class GraceTests(unittest.TestCase):
         def view(_text):
             return {"state": "idle", "id": None, "ok": True}
 
-        def refuse_run(*_args, **_kwargs):
+        def refuse_run(argv, *_args, **_kwargs):
+            # A host without /proc names the owner tty with lsof and ps.
+            # That lookup is not a herdr command. An empty result holds no fd.
+            command = argv[0] if isinstance(argv, (list, tuple)) and argv else ""
+            if os.path.basename(str(command)) in ("lsof", "ps"):
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
             raise AssertionError("command")
 
         with (
