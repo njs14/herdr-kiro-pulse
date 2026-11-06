@@ -50,14 +50,15 @@ class RedactionTests(unittest.TestCase):
         printed = []
 
         def capture(text, flush=False):
-            del flush
-            printed.append(text)
+            printed.append((text, flush))
 
         with mock.patch("builtins.print", capture):
             run_suite.say(f"status {self.api_key}")
         self.assertEqual(len(printed), 1)
-        self.assertNotIn(self.api_key, printed[0])
-        self.assertIn("[redacted]", printed[0])
+        text, flush = printed[0]
+        self.assertTrue(flush)
+        self.assertNotIn(self.api_key, text)
+        self.assertIn("[redacted]", text)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from herdr_kiro_state import __version__, herdr_bin, ownership, sweep_stale_pidfiles
+from herdr_kiro_state import __version__, commit_pane, fresh_state, herdr_bin, ownership
 
 BUILT_AGAINST = "2026.09.19.1"
 SETTINGS_TIMEOUT = 2
@@ -272,7 +272,7 @@ def main() -> int:
     print("watcher pid files: %s" % (len(glob.glob(os.path.join(pid_dir, "*"))) if os.path.isdir(pid_dir) else 0))
     if stale:
         problems.append("stale watcher pid files: {}".format(", ".join(stale)))
-        sweep_stale_pidfiles()
+        commit_pane(fresh_state(), "reap")
     server_code, server_text = run([herdr_bin(), "pane", "list"], 3)
     if server_code != 0 or "server_not_running" in server_text:
         problems.append("herdr server is not running")

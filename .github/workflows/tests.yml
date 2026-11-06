@@ -58,3 +58,16 @@ jobs:
         run: uvx ruff format --check
       - name: ty
         run: uvx ty check
+
+  identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: fetch main
+        run: git fetch origin main
+      - name: commit identity
+        env:
+          CHECK_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: python3 harness/check_commit_identity.py
