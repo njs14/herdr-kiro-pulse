@@ -81,8 +81,8 @@ def write_pid(payload: bytes, pid: int) -> str:
     One candidate. A missing fd lookup, an ambiguous fd 1, or a stdout that
     is not a tty writes nothing. The controlling terminal and /dev/tty are
     not candidates, and a failed open does not try another device. The hook
-    does not call this for an unconfirmed held pid, including a working
-    paint, so that case does not open the live stdout.
+    does not call this for an unconfirmed held pid. working, done, and
+    blocked all refuse that pid, so that case does not open the live stdout.
     """
     try:
         number = int(pid)

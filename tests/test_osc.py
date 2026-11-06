@@ -1798,6 +1798,9 @@ sys.path.insert(0, proto)
 try:
     import herdr_kiro_state as hook
 
+    # HC_TERMINAL_ID makes this an App read. With no hc binary that read is
+    # None, and None is not a screen. The pty check needs a returned banner.
+    hook.pane_text = lambda _pane: "▶ watch-step running 0/0 · ctrl+x expand"
     hook._watch_loop("t7", path)
 except Exception:
     with open(path + ".crash", "w", encoding="utf-8") as handle:
@@ -2027,6 +2030,9 @@ sys.path.insert(0, proto)
 try:
     import herdr_kiro_state as hook
 
+    # HC_TERMINAL_ID makes this an App read. With no hc binary that read is
+    # None, and None is not a screen. The pty check needs a returned banner.
+    hook.pane_text = lambda _pane: "▶ watch-step running 0/0 · ctrl+x expand"
     hook._watch_loop("t7", path)
 except Exception:
     with open(path + ".crash", "w", encoding="utf-8") as handle:

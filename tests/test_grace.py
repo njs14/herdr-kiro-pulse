@@ -1568,9 +1568,9 @@ class GraceTests(unittest.TestCase):
             self.assertEqual(pane.completion, "idle")
 
     def test_app_hc_read_failure_does_not_emit_done_via_app_quiet(self):
-        # A failed App read is not an empty screen. An empty read is not the
-        # Kiro CLI 3.0 chevron, so it does not end the turn. A held working
-        # banner still counts. Neither read reports idle or releases.
+        # A failed App read is none, including after a held working banner.
+        # An empty read is not the Kiro CLI 3.0 chevron, so it does not end
+        # the turn. The banner tick reports working. The failed reads do not.
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "t7.json")
@@ -1642,7 +1642,7 @@ class GraceTests(unittest.TestCase):
                 ),
             )
             hook.watch_loop("t7", path)
-        self.assertEqual(reports, ["working", "working"])
+        self.assertEqual(reports, ["working"])
         self.assertNotIn("idle", reports)
         self.assertEqual(pane_reads["n"], 0)
         self.assertEqual(releases, [])
@@ -2564,24 +2564,85 @@ class PaneFindingTests(unittest.TestCase):
         self.assertEqual(_read_pty(held_master), b"")
         self.assertEqual(_read_pty(owner_master), b"")
 
+    def test_unconfirmed_hold_does_not_paint_blocked(self):
+        held_master, held_slave = os.openpty()
+        owner_master, owner_slave = os.openpty()
+        self.addCleanup(os.close, held_master)
+        self.addCleanup(os.close, held_slave)
+        self.addCleanup(os.close, owner_master)
+        self.addCleanup(os.close, owner_slave)
+        owner = subprocess.Popen(
+            ["sleep", "30"],
+            stdin=subprocess.DEVNULL,
+            stdout=owner_slave,
+            stderr=subprocess.DEVNULL,
+        )
+        other = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: owner.poll() is not None or owner.kill())
+        self.addCleanup(lambda: other.poll() is not None or other.kill())
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        hook._pane_fd = os.dup(held_slave)
+        hook._held_ident = "100.000000"
+        held_fd = hook._pane_fd
+        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+        calls = []
+        real_write = hook.herdr_kiro_osc.write_pid
+
+        def spy(payload, pid, real_write=real_write, calls=calls):
+            calls.append((payload, pid))
+            return real_write(payload, pid)
+
+        for name, held_pid in (("unrecorded", 0), ("other-pid", other.pid)):
+            with self.subTest(name=name):
+                hook._held_pid = held_pid
+                state = hook.fresh_state()
+                state["aggregate"] = 1
+                state["busy"] = {hook.AGGREGATE: 1.0}
+                state["owners"] = {hook.AGGREGATE: owner.pid}
+                state["owner_ident"] = {hook.AGGREGATE: "100.000000"}
+                state["proven_pid"] = owner.pid
+                state["proven_ident"] = "100.000000"
+                state["phase"] = "proven"
+                before = copy.deepcopy(state)
+                calls.clear()
+                _read_pty(held_master)
+                _read_pty(owner_master)
+                with (
+                    mock.patch.object(hook, "process_snapshot", lambda _pid, snap=snap: snap),
+                    mock.patch.object(hook, "hires_start", lambda _pid: "100.000000"),
+                    mock.patch.object(hook.herdr_kiro_osc, "write_pid", spy),
+                ):
+                    write, ok = hook.commit_pane(state, "blocked")
+                self.assertEqual((write, ok), ("paint_blocked", False))
+                self.assertEqual(state, before)
+                self.assertEqual(calls, [])
+                self.assertEqual(hook._pane_fd, held_fd)
+                self.assertEqual(hook._held_pid, held_pid)
+                self.assertEqual(_read_pty(held_master), b"")
+                self.assertEqual(_read_pty(owner_master), b"")
+
     def test_reap_unlinks_only_a_confirmed_dead_or_mismatched_pidfile(self):
         denied = hook.PidFileView(1, errno.EPERM, "1.000000", "kiro-cli", "2.000000", "other", False)
         dead = hook.PidFileView(1, errno.ESRCH, "", "", "", "", False)
         unknown = hook.PidFileView(1, None, "", "kiro-cli", "1.000000", "other", False)
         snapped = hook.PidFileView(1, None, "1.000000", "kiro-cli", "2.000000", "other", True)
+        matched_comm = hook.PidFileView(1, None, "1.000000", "kiro-cli", "1.000000", "renamed", False)
         self.assertEqual(hook.classify_pidfile(denied), "keep")
         self.assertEqual(hook.classify_pidfile(dead), "reap")
         self.assertEqual(hook.classify_pidfile(unknown), "keep")
         self.assertEqual(hook.classify_pidfile(snapped), "keep")
+        self.assertEqual(hook.classify_pidfile(matched_comm), "keep")
         root = tempfile.mkdtemp(prefix="herdr-kiro-reap-")
         self.addCleanup(shutil.rmtree, root, True)
         pid_dir = os.path.join(root, "herdr-kiro", "pids")
         os.makedirs(pid_dir)
-        dead_pid, bad_pid, ok_pid = 424242, 434343, 444444
+        dead_pid, bad_pid, ok_pid, renamed_pid = 424242, 434343, 444444, 454545
         files = {
             str(dead_pid): f"{os.getuid()}\nnot-a-start\nstale\n",
             str(bad_pid): f"{os.getuid()}\n1700000000.999999\nnot-the-comm\n",
             str(ok_pid): f"{os.getuid()}\n100.000000\nkiro-cli\n",
+            str(renamed_pid): f"{os.getuid()}\n100.000000\nold-comm\n",
         }
         for name, text in files.items():
             with open(os.path.join(pid_dir, name), "w", encoding="utf-8") as handle:
@@ -2590,19 +2651,21 @@ class PaneFindingTests(unittest.TestCase):
         def kill(pid, _sig, real_kill=os.kill):
             if pid == dead_pid:
                 raise OSError(errno.ESRCH, "gone")
-            if pid in (bad_pid, ok_pid):
+            if pid in (bad_pid, ok_pid, renamed_pid):
                 return None
             return real_kill(pid, _sig)
 
         def snap(pid):
             if pid == ok_pid:
                 return {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
+            if pid == renamed_pid:
+                return {"ppid": 1, "lstart": "10", "comm": "renamed"}
             if pid == bad_pid:
                 return {"ppid": 1, "lstart": "10", "comm": "other"}
             return None
 
         def start(pid):
-            return "100.000000" if pid == ok_pid else "200.000000"
+            return "100.000000" if pid in (ok_pid, renamed_pid) else "200.000000"
 
         env = {"XDG_STATE_HOME": root}
         with (
@@ -2618,6 +2681,7 @@ class PaneFindingTests(unittest.TestCase):
             self.assertFalse(os.path.isfile(os.path.join(pid_dir, str(dead_pid))))
             self.assertFalse(os.path.isfile(os.path.join(pid_dir, str(bad_pid))))
             self.assertTrue(os.path.isfile(os.path.join(pid_dir, str(ok_pid))))
+            self.assertTrue(os.path.isfile(os.path.join(pid_dir, str(renamed_pid))))
 
     def test_live_sec_idle_clear_is_weak_and_reaches_pid_reuse(self):
         proc = subprocess.Popen(["sleep", "30"])
@@ -3955,7 +4019,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
         for event in self._WATCH:
             for count in self._COUNTS:
                 keys.append(("weak_pidfile", event, "weak", count, "weak_pidfile"))
-        for event in ("Stop", "SessionEnd", "idle_clear", "settled"):
+        for event in ("Stop", "SessionEnd", "idle_clear", "settled", "blocked"):
             for owner in ("proven", "chat_gone"):
                 for count in self._COUNTS:
                     keys.append(("held_unconfirmed", event, owner, count, "held"))
@@ -4309,9 +4373,12 @@ class PaneWriteMatrixTests(unittest.TestCase):
         self._clear_watch_slot(book)
 
     def _watch_screen(self, book, event, now, quiet_since, reported, stale):
-        # A failed App read is not a screen. It is not the prompt, so the
-        # oracle keeps the busy working report and does not paint done.
-        screen = "" if self._pane_mode == "app_fail" else self._screen_for(event)
+        # A failed App read is none. It is not "", a prompt, a banner, a
+        # start, or aggregate_zero, and it is not refresh. A held banner
+        # or blocker is not painted from a screen that was not returned.
+        if self._pane_mode == "app_fail":
+            return [], quiet_since, reported, False
+        screen = self._screen_for(event)
         painted = []
         if hook.approval_text(screen):
             mark = {"write": "none", "ok": False}
@@ -4320,7 +4387,10 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 write, ok, osc = self._commit(state, "blocked", 0.0)
                 mark["write"] = write
                 mark["ok"] = ok
-                painted.append(osc)
+                if ok:
+                    painted.append(osc)
+                if not ok:
+                    return "none"
                 return write
 
             held_done = self._done_via_held(book.state)
@@ -4440,7 +4510,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return ""
 
         book.apply(clear, self._BASE)
-        book.files.pop(f"pids/{os.getpid()}", None)
 
     def _claim(self, state, token):
         state["watcher"] = os.getpid()
@@ -4666,6 +4735,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 state["busy"][hook.AGGREGATE] = now if now else self._BASE
             return write, True, b""
         if write == "paint_blocked":
+            owner_now = hook._pane_owner(state)
+            if owner_now is not None and hook._held_pid_unconfirmed(owner_now[0], owner_now[1]):
+                return write, False, b""
             ok = self._can_paint(state)
             return write, ok, self._osc("blocked", rule_id) if ok else b""
         if write == "record_aggregate":
@@ -4674,6 +4746,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
             state["grace_until"] = 0.0
             return write, True, b""
         if write == "touch_aggregate":
+            if hook._owner_held_unconfirmed(state):
+                return write, False, b""
             state["busy"][hook.AGGREGATE] = now
             return write, True, b""
         if write == "touch_partial":
@@ -5248,6 +5322,218 @@ class ScreenReadPurityTests(unittest.TestCase):
             problems.append(f"{len(violations)} writes outside commit_pane:\n" + "\n".join(violations[:20]))
         if problems:
             self.fail("\n".join(problems))
+
+
+class NoneReadWriteTests(unittest.TestCase):
+    """Failed App reads and unconfirmed holds write nothing.
+
+    A None pane_text is not a prompt, a banner, aggregate_zero, or refresh.
+    A later None tick does not paint a held blocker or banner. A fault that
+    returns none does not unlink a pid file.
+    """
+
+    _BANNER = "▶ watch-step running 0/0 · ctrl+x expand · ctrl+g monitor\n"
+    _BLOCKED = "esc to close · ↑↓ to navigate · ↵ to select\n"
+
+    def _snapshot(self, root):
+        found = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                with open(path, "rb") as handle:
+                    found[os.path.relpath(path, root)] = handle.read()
+        return found
+
+    def _owner(self):
+        master, slave = os.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        proc = subprocess.Popen(
+            ["sleep", "60"],
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        return master, proc
+
+    def _prepare(self, proc, count):
+        root = tempfile.mkdtemp(prefix="herdr-kiro-none-")
+        self.addCleanup(shutil.rmtree, root, True)
+        state = os.path.join(root, "herdr-kiro")
+        os.makedirs(os.path.join(state, "pids"), mode=0o700)
+        token = hook.hires_start(proc.pid)
+        self.assertTrue(hook.fine_start(token), token)
+        pane = hook.fresh_state()
+        pane["seq"] = 4
+        pane["aggregate"] = count
+        pane["busy"] = {hook.AGGREGATE: 1000.0, "old": 900.0}
+        pane["grace_until"] = 3.5
+        pane["generation"] = 7
+        pane["phase"] = "proven"
+        pane["owners"] = {hook.AGGREGATE: proc.pid}
+        pane["owner_ident"] = {hook.AGGREGATE: token}
+        pane["proven_pid"] = proc.pid
+        pane["proven_ident"] = token
+        pane["watcher"] = os.getpid()
+        pane["watcher_started"] = hook.hires_start(os.getpid())
+        path = os.path.join(state, "t7.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(pane))
+        with open(path + ".seq", "w", encoding="utf-8") as handle:
+            handle.write("50")
+        stale = f"{os.getuid()}\nnot-the-live-start\nstale-comm\n".encode()
+        with open(os.path.join(state, "pids", "424242"), "wb") as handle:
+            handle.write(stale)
+        own = f"{os.getuid()}\n{pane['watcher_started']}\npython\n".encode()
+        with open(os.path.join(state, "pids", str(os.getpid())), "wb") as handle:
+            handle.write(own)
+        return root, state, path, token
+
+    def _env(self, root):
+        return {
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t7",
+            "XDG_STATE_HOME": root,
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
+
+    def _watch(self, root, path, screens):
+        pending = list(screens)
+        previous_hup = signal.getsignal(signal.SIGHUP)
+        previous_term = signal.getsignal(signal.SIGTERM)
+
+        def screen(_pane, pending=pending):
+            if not pending:
+                raise SystemExit("done")
+            return pending.pop(0)
+
+        def wait(_self, _pids, _timeout, pending=pending):
+            if not pending:
+                raise SystemExit("done")
+            return False
+
+        try:
+            with (
+                mock.patch.dict(os.environ, self._env(root), clear=False),
+                mock.patch.object(hook, "pane_text", screen),
+                mock.patch.object(hook.OwnerExitWatch, "wait", wait),
+                mock.patch.object(hook.time, "sleep", lambda _delay: None),
+            ):
+                os.environ.pop("HERDR_KIRO_LOG", None)
+                os.environ.pop("HERDR_SESSION", None)
+                hook.begin_tick()
+                try:
+                    hook.watch_loop("t7", path)
+                except SystemExit:
+                    return
+        finally:
+            signal.signal(signal.SIGHUP, previous_hup)
+            signal.signal(signal.SIGTERM, previous_term)
+
+    def _diff(self, before, after):
+        names = sorted(set(before) | set(after))
+        lines = []
+        for name in names:
+            if before.get(name) != after.get(name):
+                lines.append(f"{name}: {before.get(name)!r:.120} -> {after.get(name)!r:.120}")
+        return "\n".join(lines)
+
+    def test_none_read_at_count_one_does_not_paint_working(self):
+        master, proc = self._owner()
+        root, state, path, _token = self._prepare(proc, 1)
+        before = self._snapshot(state)
+        with _WriteTracer() as tracer:
+            self._watch(root, path, [None])
+        after = self._snapshot(state)
+        osc = _read_pty(master)
+        stray = [item for item in tracer.violations if "_open_held" not in item and "_hold_live_owner" not in item]
+        self.assertEqual(stray, [])
+        self.assertEqual(osc, b"", osc)
+        self.assertEqual(after, before, self._diff(before, after))
+
+    def test_none_read_at_count_zero_is_not_refresh(self):
+        master, proc = self._owner()
+        root, state, path, _token = self._prepare(proc, 0)
+        before = self._snapshot(state)
+        with _WriteTracer() as tracer:
+            self._watch(root, path, [None])
+        after = self._snapshot(state)
+        osc = _read_pty(master)
+        stray = [item for item in tracer.violations if "_open_held" not in item and "_hold_live_owner" not in item]
+        self.assertEqual(stray, [])
+        self.assertEqual(osc, b"", osc)
+        self.assertEqual(after, before, self._diff(before, after))
+
+    def test_later_none_tick_does_not_paint_held_blocked(self):
+        master, proc = self._owner()
+        root, _state, path, _token = self._prepare(proc, 1)
+        self._watch(root, path, [self._BLOCKED, None])
+        osc = _read_pty(master)
+        self.assertEqual(osc.count(b"state=blocked"), 1, osc)
+        self.assertNotIn(b"state=working", osc)
+
+    def test_later_none_tick_does_not_paint_held_banner(self):
+        master, proc = self._owner()
+        root, _state, path, _token = self._prepare(proc, 1)
+        self._watch(root, path, [self._BANNER, None])
+        osc = _read_pty(master)
+        self.assertEqual(osc.count(b"state=working"), 1, osc)
+        self.assertNotIn(b"state=blocked", osc)
+
+    def test_unconfirmed_prompt_does_not_touch_aggregate_or_paint_blocked(self):
+        master, proc = self._owner()
+        root, state, _path, token = self._prepare(proc, 1)
+        before = self._snapshot(state)
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        _held_master, held_slave = os.openpty()
+        self.addCleanup(os.close, _held_master)
+        self.addCleanup(os.close, held_slave)
+        hook._pane_fd = os.dup(held_slave)
+        hook._held_ident = token
+        hook._held_pid = 0
+
+        def screen(_pane):
+            return self._BLOCKED
+
+        with (
+            mock.patch.dict(os.environ, self._env(root), clear=False),
+            mock.patch.object(sys, "argv", ["herdr-kiro", "UserPromptSubmit"]),
+            mock.patch.object(sys, "stdin", io.StringIO("{}")),
+            mock.patch.object(hook, "pane_text", screen),
+            mock.patch.object(hook, "kiro_lineage", lambda: (proc.pid, token, 0, "")),
+        ):
+            os.environ.pop("HERDR_KIRO_LOG", None)
+            os.environ.pop("HERDR_SESSION", None)
+            hook.begin_tick()
+            self.assertEqual(hook.main(), 0)
+        after = self._snapshot(state)
+        osc = _read_pty(master)
+        self.assertEqual(after, before, self._diff(before, after))
+        self.assertEqual(osc, b"", osc)
+
+    def test_fault_none_does_not_unlink_the_pidfile(self):
+        _master, proc = self._owner()
+        root, state, path, _token = self._prepare(proc, 1)
+        pid_name = f"pids/{os.getpid()}"
+        stale_name = "pids/424242"
+        before = self._snapshot(state)
+        with mock.patch.dict(os.environ, self._env(root), clear=False):
+            os.environ.pop("HERDR_KIRO_LOG", None)
+            write, ok = hook.commit_pane(
+                hook.fresh_state(),
+                "watcher_fault",
+                path=path,
+                pane="t7",
+                fault=RuntimeError("boom"),
+            )
+        after = self._snapshot(state)
+        self.assertEqual((write, ok), ("none", False))
+        self.assertEqual(after.get(pid_name), before[pid_name])
+        self.assertEqual(after.get(stale_name), before[stale_name])
 
 
 if __name__ == "__main__":

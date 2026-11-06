@@ -24,10 +24,14 @@ lstart, or a fine token that no longer matches is not an exit and is not
 painted. The owner is the outer process. A gone chat child is not an exit
 and does not release the pane. release-agent runs only after that proven
 outer process is gone. A screen read returns a result and does not touch
-the filesystem, the tty, or OSC. A failed App read is not an empty screen
-and is not explained. It is not painted from that missing screen. A busy
-slot still reports working. An unconfirmed held pid writes nothing,
-including a working paint, and does not open the live stdout.
+the filesystem, the tty, or OSC. A failed App read is none. It is not an
+empty screen, a prompt, a banner, a start, or aggregate_zero, and it is
+not refresh. It is not explained and it is not painted, including when a
+banner or blocker was already held. An unconfirmed held pid writes
+nothing, including a working paint and blocked, and does not open the
+live stdout. reap unlinks a pid file only for a confirmed dead pid or a
+confirmed token mismatch. A live pid whose token matches is not reaped
+when only the comm name differs. A none result unlinks nothing.
 """
 
 from __future__ import annotations
@@ -863,7 +867,9 @@ def emit_osc(state: dict | str, kind: str, rule_id: str = "") -> bool:
     commit_pane is the only caller in this module. working and done are
     painted there through paint_status. A chat pty, a second recorded pid,
     and this process's tty are not targets. Unknown is not a protocol
-    state, so it is a no-op. A path loads the saved pane.
+    state, so it is a no-op. An unconfirmed held pid, including zero,
+    writes nothing and does not open the live stdout. A path loads the
+    saved pane.
     """
     if isinstance(state, str):
         state = _load_state(state)
@@ -881,6 +887,8 @@ def emit_osc(state: dict | str, kind: str, rule_id: str = "") -> bool:
         return False
     pid, token = owner
     if not identity_proven(pid, token):
+        return False
+    if _held_pid_unconfirmed(pid, token):
         return False
     try:
         payload = herdr_kiro_osc.encode(fields)
@@ -1280,15 +1288,13 @@ def classify_pidfile(view: PidFileView) -> str:
 
     reap is a confirmed death (kill errno ESRCH) or a confirmed token
     mismatch. EPERM, a snapshot error, and an empty recorded start stay.
+    A live pid whose token matches is kept when only the comm name differs.
     """
     if view.kill_errno == errno.ESRCH:
         return "reap"
     if view.kill_errno is not None or view.snap_error or not view.recorded_start:
         return "keep"
-    mismatched = bool(view.live_start) and view.live_start != view.recorded_start
-    if view.recorded_comm and view.live_comm and view.recorded_comm != view.live_comm:
-        mismatched = True
-    if mismatched:
+    if view.live_start and view.live_start != view.recorded_start:
         return "reap"
     return "keep"
 
@@ -1333,8 +1339,7 @@ def sweep_stale_pidfiles() -> None:
         view = PidFileView(pid, kill_errno, recorded, recorded_comm, live_start, live_comm, snap_error)
         if classify_pidfile(view) != "reap":
             continue
-        with contextlib.suppress(OSError):
-            os.remove(path)
+        remove_pidfile(os.path.join(state_dir(), "pane.json"), pid)
 
 
 def cleanup_rules() -> None:
@@ -1940,14 +1945,15 @@ def _owner_held_unconfirmed(state: dict) -> bool:
 def _leaves_directory_untouched(write: str, ok: bool, trial: dict, state: dict) -> bool:
     """True when this result must not open the pane, the floor, or the log.
 
-    none with an unchanged trial does not. A done or working result that
-    refused an unconfirmed held pid does not either, so that refusal does
-    not arm a watcher or rewrite the pane.
+    none with an unchanged trial does not. A done, working, or blocked
+    result that refused an unconfirmed held pid does not either, even when
+    an earlier trial assignment changed the copy. That refusal does not
+    arm a watcher or rewrite the pane.
     """
     if write == "none" and trial == state:
         return True
-    refused = write in ("done", "working") and not ok and trial == state
-    return refused and _owner_held_unconfirmed(state)
+    refused = write in ("done", "working", "paint_blocked") and not ok
+    return bool(refused and _owner_held_unconfirmed(state))
 
 
 def _file_generation_matches(path: str, generation: int) -> bool:
@@ -2192,9 +2198,11 @@ def commit_pane(
     returns before that I/O and leaves the state directory unchanged,
     including pid files. refresh writes the busy timestamp and nothing
     else. reap unlinks a pid file only when the pid is confirmed dead or
-    its recorded token is confirmed mismatched. fault logs the error and
-    clears the watcher, then returns none. refuse_watch logs the refusal,
-    then returns none.
+    its recorded token is confirmed mismatched. A matching token is kept
+    when only the comm name differs. blocked does not paint an unconfirmed
+    held pid. fault logs the error and clears the watcher fields, and that
+    none does not unlink a pid file. refuse_watch logs the refusal, then
+    returns none.
     """
     if watch:
         _run_watch(pane, path)
@@ -2231,6 +2239,9 @@ def commit_pane(
             state["busy"][AGGREGATE] = now if now else time.time()
         return _pane_result(write, True)
     if write == "paint_blocked":
+        owner_now = _pane_owner(state)
+        if owner_now is not None and _held_pid_unconfirmed(owner_now[0], owner_now[1]):
+            return _pane_result(write, False)
         with _in_apply():
             painted = emit_osc(state, "blocked", rule_id)
         return _pane_result(write, painted)
@@ -2241,6 +2252,8 @@ def commit_pane(
         state["grace_until"] = 0.0
         return _pane_result(write, True)
     if write == "touch_aggregate":
+        if _owner_held_unconfirmed(state):
+            return _pane_result(write, False)
         state["busy"][AGGREGATE] = now
         remember_owner(state, AGGREGATE, owner, owner_started)
         return _pane_result(write, True)
@@ -2292,7 +2305,23 @@ def commit_pane(
 
 
 def commit_blocked(path: str, rule_id: str = "") -> tuple[str, bool]:
-    """Run the blocked event through the table and paint only that result."""
+    """Run the blocked event through the table and paint only that result.
+
+    An unconfirmed held pid returns before update, so the pane and the seq
+    floor stay as they were and the live stdout is not opened.
+    """
+    loaded, _existed, readable = _load_for_commit(path)
+    trial = copy.deepcopy(loaded) if readable else fresh_state()
+    before = copy.deepcopy(trial)
+    global _COMMIT_DRY
+    previous = _COMMIT_DRY
+    _COMMIT_DRY = True
+    try:
+        preview, preview_ok = commit_pane(trial, "blocked", rule_id)
+    finally:
+        _COMMIT_DRY = previous
+    if _leaves_directory_untouched(preview, preview_ok, trial, before):
+        return _pane_result(preview, preview_ok)
     chosen = {"write": "none", "ok": False}
 
     def apply(current: dict, chosen: dict = chosen, rule_id: str = rule_id) -> None:
@@ -2718,13 +2747,18 @@ def ensure_watcher(pane: str, path: str) -> None:
 
 
 def clear_watcher(path: str) -> None:
+    """Clear this process's watcher fields. Do not unlink the pid file.
+
+    A none result unlinks nothing. Watcher exit removes a pid file only
+    when commit_pane applies reap, and reap keeps a live matching token.
+    """
+
     def clear(state: dict) -> None:
         if int(state.get("watcher") or 0) == os.getpid():
             state["watcher"] = 0
             state["watcher_started"] = ""
 
     update(path, clear)
-    remove_pidfile(path, os.getpid())
 
 
 def commit_if_current(current: dict, event: str, generation: int) -> tuple[str, bool]:
@@ -3163,16 +3197,13 @@ def _run_watch(pane: str, path: str) -> None:
             if _owner_is_live_weak(state):
                 _write, _ok, state, _skipped = _persist_watch(path, state, screen_event(state, "reuse"), now, arm)
             screen = pane_text(pane)
-            # None is a failed App read. It is not "". It is not explained,
-            # and it is not painted from that screen. A banner or blocker
-            # already held still counts, and this read does not clear it.
-            app_read_failed = not isinstance(screen, str)
-            if app_read_failed:
-                blocked = held == "blocked"
-                banner = held == "working" and not blocked
-                view = _unknown_screen()
-            else:
-                blocked, banner, view = _status_view(screen, state, held, now)
+            # None is a failed App read. It is none: not "", a prompt, a
+            # banner, a start, or aggregate_zero, and not refresh. It is
+            # not explained and not painted. A held banner or blocker is
+            # not painted from a screen that was not returned.
+            if not isinstance(screen, str):
+                continue
+            blocked, banner, view = _status_view(screen, state, held, now)
             if blocked:
                 held = "blocked"
             elif banner:
@@ -3193,7 +3224,7 @@ def _run_watch(pane: str, path: str) -> None:
                 continue
             if banner:
                 quiet_since = None
-            elif not app_read_failed and prompt_visible(screen) and screen_is_settled(screen):
+            elif prompt_visible(screen) and screen_is_settled(screen):
                 if quiet_since is None:
                     quiet_since = now
                 elif now - quiet_since >= IDLE_CLEAR_SECS and state["busy"]:
@@ -3229,10 +3260,10 @@ def _run_watch(pane: str, path: str) -> None:
                 continue
             # Idle is only the Kiro CLI 3.0 chevron prompt. An empty App
             # screen is not that prompt and does not end the turn. A failed
-            # read is not the prompt either, so it does not paint done. A
-            # busy slot still reports working. A TUI pane keeps the TUI
-            # rule, even when HC_TERMINAL_ID is set.
-            if not app_read_failed and action == "idle" and screen_is_quiet(screen):
+            # read already continued, so it is not this prompt and it does
+            # not paint done. A TUI pane keeps the TUI rule, even when
+            # HC_TERMINAL_ID is set.
+            if action == "idle" and screen_is_quiet(screen):
                 if reported != "idle":
                     generation = int(state.get("generation") or 0)
                     write, ok, state, skipped = _persist_watch(
