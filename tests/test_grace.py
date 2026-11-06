@@ -4745,13 +4745,15 @@ class PaneWriteMatrixTests(unittest.TestCase):
             ok = self._can_paint(state)
             return write, ok, self._osc("blocked", rule_id) if ok else b""
         if write == "record_aggregate":
+            if hook._owner_held_unconfirmed(state):
+                return "none", True, b""
             state["aggregate"] = int(state.get("aggregate") or 0) + 1
             state["busy"][hook.AGGREGATE] = now
             state["grace_until"] = 0.0
             return write, True, b""
         if write == "touch_aggregate":
             if hook._owner_held_unconfirmed(state):
-                return write, False, b""
+                return "none", True, b""
             state["busy"][hook.AGGREGATE] = now
             return write, True, b""
         if write == "touch_partial":
@@ -5678,6 +5680,134 @@ class NoneReadWriteTests(unittest.TestCase):
         self.assertEqual((write, ok), ("none", False))
         self.assertEqual(tracer.violations, [])
         self.assertEqual(after, before, self._diff(before, after))
+
+    def _fine_token(self, proc):
+        real = hook.hires_start
+        token = real(proc.pid)
+        if hook.fine_start(token):
+            return token
+        token = self._PINNED_OWNER
+        pins = {proc.pid: (token, proc)}
+
+        def hires(asked, real_hires=real, pins=pins):
+            return pinned_start(real_hires, pins, asked)
+
+        patch = mock.patch.object(hook, "hires_start", side_effect=hires)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.assertTrue(hook.fine_start(token))
+        return token
+
+    def _plant_phase(self, proc, phase, token, floor, watcher):
+        root = tempfile.mkdtemp(prefix="herdr-kiro-phase-")
+        self.addCleanup(shutil.rmtree, root, True)
+        state = os.path.join(root, "herdr-kiro")
+        os.makedirs(os.path.join(state, "pids"), mode=0o700)
+        pane = hook.fresh_state()
+        pane["seq"] = 4
+        pane["aggregate"] = 2
+        pane["busy"] = {hook.AGGREGATE: 1000.0}
+        pane["grace_until"] = 3.5
+        pane["generation"] = 7
+        pane["phase"] = phase
+        pane["owners"] = {hook.AGGREGATE: proc.pid}
+        pane["owner_ident"] = {hook.AGGREGATE: token}
+        if phase != "weak":
+            pane["proven_pid"] = proc.pid
+            pane["proven_ident"] = token
+        pane["watcher"] = watcher
+        if watcher:
+            pane["watcher_started"] = hook.hires_start(watcher)
+        path = os.path.join(state, "t7.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(pane))
+        if floor == "ahead":
+            with open(path + ".seq", "w", encoding="utf-8") as handle:
+                handle.write("50")
+        stale = f"{os.getuid()}\nnot-the-live-start\nstale-comm\n".encode()
+        with open(os.path.join(state, "pids", "424242"), "wb") as handle:
+            handle.write(stale)
+        if watcher:
+            own = f"{os.getuid()}\n{pane['watcher_started']}\npython\n".encode()
+            with open(os.path.join(state, "pids", str(watcher)), "wb") as handle:
+                handle.write(own)
+        hook.begin_tick()
+        self.assertEqual(hook.owner_phase(pane), phase)
+        return root, state
+
+    def _quiet_main(self, root, proc, token, event):
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def popen(args, *pos, **kwargs):
+            command = args if isinstance(args, (list, tuple)) else [str(args)]
+            if any(part == "--watch" for part in command):
+                spawned.append(list(command))
+                proc_stub = mock.Mock()
+                proc_stub.pid = 515151
+                return proc_stub
+            return real_popen(args, *pos, **kwargs)
+
+        with mock.patch.object(hook.subprocess, "Popen", popen):
+            tracer = self._main(root, proc, token, event)
+        return tracer, spawned
+
+    def test_unconfirmed_hold_writes_nothing_for_idle_clear_weak_and_exited(self):
+        _master, proc = self._owner()
+        fine = self._fine_token(proc)
+        phases = {"idle_clear": fine, "weak": "sec:10", "exited": fine}
+        events = ("UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionStart")
+        cases = [(phase, event, floor, 0) for phase in phases for event in events for floor in ("ahead", "absent")]
+        cases.extend((phase, "UserPromptSubmit", "absent", os.getpid()) for phase in phases)
+        for phase, event, floor, watcher in cases:
+            with self.subTest(phase=phase, event=event, floor=floor, watcher=watcher):
+                root, state = self._plant_phase(proc, phase, phases[phase], floor, watcher)
+                before = self._snapshot(state)
+                self._hold(phases[phase], 0)
+                tracer, spawned = self._quiet_main(root, proc, phases[phase], event)
+                after = self._snapshot(state)
+                problems = []
+                if after != before:
+                    problems.append(self._diff(before, after))
+                if spawned:
+                    problems.append("watcher started")
+                if tracer.violations:
+                    problems.append("\n".join(tracer.violations[:8]))
+                self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_refuse_watch_returns_none_before_any_io(self):
+        root = tempfile.mkdtemp(prefix="herdr-kiro-refuse-")
+        self.addCleanup(shutil.rmtree, root, True)
+        state = os.path.join(root, "herdr-kiro")
+        os.makedirs(state, mode=0o700)
+        before = self._snapshot(state)
+        with (
+            mock.patch.dict(os.environ, self._env(root), clear=False),
+            mock.patch.object(sys, "argv", ["herdr-kiro", "--watch", "t7", os.path.join(root, "nope.json")]),
+            mock.patch.object(hook, "_run_watch", side_effect=AssertionError("watch")),
+            _WriteTracer() as tracer,
+        ):
+            os.environ.pop("HERDR_KIRO_LOG", None)
+            os.environ.pop("HERDR_SESSION", None)
+            code = hook.main()
+        after = self._snapshot(state)
+        self.assertEqual(code, 1)
+        self.assertEqual(tracer.violations, [])
+        self.assertEqual(after, before, self._diff(before, after))
+        write, ok = hook.commit_pane(hook.fresh_state(), "refuse_watch", pane="t7", path=os.path.join(state, "t7.json"))
+        self.assertEqual((write, ok), ("none", False))
+        self.assertEqual(self._snapshot(state), before, self._diff(before, self._snapshot(state)))
+
+    def test_watch_result_runs_the_watcher_and_is_not_none(self):
+        ran = []
+
+        def spy(pane, path):
+            ran.append((pane, path))
+
+        with mock.patch.object(hook, "_run_watch", spy):
+            write, ok = hook.commit_pane(hook.fresh_state(), "watch", path="pane.json", pane="t7", watch=True)
+        self.assertEqual(ran, [("t7", "pane.json")])
+        self.assertEqual((write, ok), ("watch", True))
 
 
 if __name__ == "__main__":

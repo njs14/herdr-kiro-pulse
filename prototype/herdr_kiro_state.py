@@ -28,11 +28,16 @@ the filesystem, the tty, or OSC. A failed App read is none. It is not an
 empty screen, a prompt, a banner, a start, or aggregate_zero, and it is
 not refresh. It is not explained and it is not painted, including when a
 banner or blocker was already held. An unconfirmed held pid writes
-nothing, including touch_partial, refresh, a working paint, and blocked,
-and does not open the live stdout. reap unlinks a pid file only for a
-confirmed dead pid or a confirmed token mismatch. A live pid whose token
-matches is not reaped when only the comm name differs. A none result,
-including fault, returns before any I/O and unlinks nothing.
+nothing for every stored phase, including proven, idle_clear, weak, and
+exited. That includes touch_aggregate, record_aggregate, refresh,
+touch_partial, blocked, and a working paint, and does not open the live
+stdout. There is no pane file, aggregate, busy, grace_until, generation,
+seq, seq floor, log, watcher, watcher_at, watcher_started, or watcher pid
+file. reap unlinks a pid file only for a confirmed dead pid or a confirmed
+token mismatch. A live pid whose token matches is not reaped when only
+the comm name differs. A none result, including fault and refuse_watch,
+returns before any I/O and unlinks nothing. The watch result runs the
+watcher. It is applied only by commit_pane and it is not none.
 """
 
 from __future__ import annotations
@@ -1959,18 +1964,17 @@ def _owner_held_unconfirmed(state: dict) -> bool:
     return _held_pid_unconfirmed(owner[0], owner[1])
 
 
-def _leaves_directory_untouched(write: str, ok: bool, trial: dict, state: dict) -> bool:
+def _leaves_directory_untouched(write: str, _ok: bool, trial: dict, state: dict) -> bool:
     """True when this result must not open the pane, the floor, or the log.
 
-    none with an unchanged trial does not. A done, working, or blocked
-    result that refused an unconfirmed held pid does not either, even when
-    an earlier trial assignment changed the copy. That refusal does not
-    arm a watcher or rewrite the pane.
+    none with an unchanged trial does not. An unconfirmed held pid does
+    not, for every stored phase and every result, including when an
+    earlier assignment changed the trial. That refusal does not arm a
+    watcher or rewrite the pane.
     """
-    if write == "none" and trial == state:
+    if _owner_held_unconfirmed(state):
         return True
-    refused = write in ("done", "working", "paint_blocked") and not ok
-    return bool(refused and _owner_held_unconfirmed(state))
+    return write == "none" and trial == state
 
 
 def _file_generation_matches(path: str, generation: int) -> bool:
@@ -2013,6 +2017,8 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
     if generation is not None and not _file_generation_matches(path, generation):
         return "none", False, state, True
     write, ok, trial = _preview_pane(state, event, now)
+    if _owner_held_unconfirmed(state):
+        return "none", True, state, True
     if write == "refresh":
         # pane_text may have moved the file generation after this state was loaded.
         # Refresh rewrites that file, so the new timestamp has to land on it.
@@ -2126,7 +2132,10 @@ def _commit_persisted(
     path: str,
     pane: str,
 ) -> tuple[str, bool]:
-    """Persist one hook. none returns before update, the floor, and the log."""
+    """Persist one hook. none returns before update, the floor, and the log.
+
+    An unconfirmed held pid returns before that I/O for every stored phase.
+    """
     loaded, existed, readable = _load_for_commit(path)
     trial = copy.deepcopy(loaded) if readable else fresh_state()
     before = copy.deepcopy(trial)
@@ -2140,6 +2149,8 @@ def _commit_persisted(
         _COMMIT_DRY = previous
     write = str(chosen["write"])
     ok = bool(chosen["ok"])
+    if _owner_held_unconfirmed(before):
+        return _pane_result("none", True)
     if write == "none" and trial == before:
         return _pane_result("none", True)
     if write == "refresh":
@@ -2221,24 +2232,24 @@ def commit_pane(
     returns before that I/O and leaves the state directory unchanged,
     including pid files. refresh writes the busy timestamp and nothing
     else, and only for a proven owner. An unconfirmed held pid writes
-    nothing. touch_partial, refresh, and record_named return none.
-    touch_aggregate does not write. There is no generation, seq, floor, log,
-    watcher, tty, or OSC.
+    nothing for every stored phase, including proven, idle_clear, weak,
+    and exited. For that pid, touch_aggregate, record_aggregate,
+    touch_partial, refresh, and record_named return none. There is no
+    generation, seq, floor, log, watcher, tty, or OSC.
     reap unlinks a pid file only when the pid is confirmed dead or its
     recorded token is confirmed mismatched. A matching token is kept when
     only the comm name differs. blocked does not paint an unconfirmed held
-    pid. fault is none and returns before any I/O, so it does not log, clear
-    the watcher, bump seq, or write the pane. refuse_watch logs the refusal,
-    then returns none.
+    pid. fault and refuse_watch are none and return before any I/O, so
+    they do not log, clear the watcher, bump seq, or write the pane.
+    The watch result runs the watcher. It is not none, and a watcher is
+    not started as a side effect of none.
     """
     if watch:
         _run_watch(pane, path)
-        return _pane_result("none", True)
+        return _pane_result("watch", True)
     if fault is not None:
         return _pane_result("none", False)
     if event == "refuse_watch":
-        with _applying():
-            log("refusing watch")
         return _pane_result("none", False)
     if path:
         return _commit_persisted(event, session, now, owner, owner_started, chat_pid, path, pane)
@@ -2272,6 +2283,8 @@ def commit_pane(
             painted = emit_osc(state, "blocked", rule_id)
         return _pane_result(write, painted)
     if write == "record_aggregate":
+        if _owner_held_unconfirmed(state):
+            return _pane_result("none", True)
         state["aggregate"] = int(state.get("aggregate") or 0) + 1
         state["busy"][AGGREGATE] = now
         remember_owner(state, AGGREGATE, owner, owner_started)
@@ -2279,7 +2292,7 @@ def commit_pane(
         return _pane_result(write, True)
     if write == "touch_aggregate":
         if _owner_held_unconfirmed(state):
-            return _pane_result(write, False)
+            return _pane_result("none", True)
         state["busy"][AGGREGATE] = now
         remember_owner(state, AGGREGATE, owner, owner_started)
         return _pane_result(write, True)
