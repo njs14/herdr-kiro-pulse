@@ -5334,6 +5334,7 @@ class NoneReadWriteTests(unittest.TestCase):
 
     _BANNER = "▶ watch-step running 0/0 · ctrl+x expand · ctrl+g monitor\n"
     _BLOCKED = "esc to close · ↑↓ to navigate · ↵ to select\n"
+    _PINNED_OWNER = "1700000000.111111"
 
     def _snapshot(self, root):
         found = {}
@@ -5363,8 +5364,21 @@ class NoneReadWriteTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         state = os.path.join(root, "herdr-kiro")
         os.makedirs(os.path.join(state, "pids"), mode=0o700)
-        token = hook.hires_start(proc.pid)
-        self.assertTrue(hook.fine_start(token), token)
+        # macOS has no /proc start ticks, so this sleep is sec: or empty.
+        # The pin applies only while the process is still running.
+        real_hires = hook.hires_start
+        token = real_hires(proc.pid)
+        if not hook.fine_start(token):
+            token = self._PINNED_OWNER
+            pins = {proc.pid: (token, proc)}
+
+            def hires(asked, real_hires=real_hires, pins=pins):
+                return pinned_start(real_hires, pins, asked)
+
+            patch = mock.patch.object(hook, "hires_start", side_effect=hires)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.assertTrue(hook.fine_start(token))
         pane = hook.fresh_state()
         pane["seq"] = 4
         pane["aggregate"] = count
