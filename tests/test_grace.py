@@ -2623,11 +2623,11 @@ class PaneFindingTests(unittest.TestCase):
                 self.assertEqual(_read_pty(owner_master), b"")
 
     def test_reap_unlinks_only_a_confirmed_dead_or_mismatched_pidfile(self):
-        denied = hook.PidFileView(1, errno.EPERM, "1.000000", "kiro-cli", "2.000000", "other", False)
-        dead = hook.PidFileView(1, errno.ESRCH, "", "", "", "", False)
-        unknown = hook.PidFileView(1, None, "", "kiro-cli", "1.000000", "other", False)
-        snapped = hook.PidFileView(1, None, "1.000000", "kiro-cli", "2.000000", "other", True)
-        matched_comm = hook.PidFileView(1, None, "1.000000", "kiro-cli", "1.000000", "renamed", False)
+        denied = hook.PidFileView(1, errno.EPERM, "1.000000", "2.000000", False)
+        dead = hook.PidFileView(1, errno.ESRCH, "", "", False)
+        unknown = hook.PidFileView(1, None, "", "1.000000", False)
+        snapped = hook.PidFileView(1, None, "1.000000", "2.000000", True)
+        matched_comm = hook.PidFileView(1, None, "1.000000", "1.000000", False)
         self.assertEqual(hook.classify_pidfile(denied), "keep")
         self.assertEqual(hook.classify_pidfile(dead), "reap")
         self.assertEqual(hook.classify_pidfile(unknown), "keep")
@@ -4731,6 +4731,10 @@ class PaneWriteMatrixTests(unittest.TestCase):
         if write == "none":
             return write, True, b""
         if write == "refresh":
+            # An unconfirmed hold is none. Refresh is only a proven owner's
+            # busy timestamp, and this pid is not that owner.
+            if hook._owner_held_unconfirmed(state):
+                return "none", True, b""
             if hook.AGGREGATE in state["busy"]:
                 state["busy"][hook.AGGREGATE] = now if now else self._BASE
             return write, True, b""
@@ -4751,12 +4755,18 @@ class PaneWriteMatrixTests(unittest.TestCase):
             state["busy"][hook.AGGREGATE] = now
             return write, True, b""
         if write == "touch_partial":
+            # The old oracle wrote the partial stop for an unconfirmed hold.
+            # That pid writes nothing: no count, no busy stamp, no grace.
+            if hook._owner_held_unconfirmed(state):
+                return "none", True, b""
             if count > 1:
                 state["aggregate"] = count - 1
             state["busy"][hook.AGGREGATE] = now
             state["grace_until"] = 0.0
             return write, True, b""
         if write == "record_named":
+            if hook._owner_held_unconfirmed(state):
+                return "none", True, b""
             return write, True, b""
         if write == "reap":
             return write, True, b""
@@ -5548,6 +5558,126 @@ class NoneReadWriteTests(unittest.TestCase):
         self.assertEqual((write, ok), ("none", False))
         self.assertEqual(after.get(pid_name), before[pid_name])
         self.assertEqual(after.get(stale_name), before[stale_name])
+
+    def _hold(self, token, held_pid):
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        _master, slave = os.openpty()
+        self.addCleanup(os.close, _master)
+        self.addCleanup(os.close, slave)
+        hook._pane_fd = os.dup(slave)
+        hook._held_ident = token
+        hook._held_pid = held_pid
+
+    def _main(self, root, proc, token, event, payload="{}"):
+        with (
+            mock.patch.dict(os.environ, self._env(root), clear=False),
+            mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+            mock.patch.object(sys, "stdin", io.StringIO(payload)),
+            mock.patch.object(hook, "pane_text", lambda _pane: "still writing the reply\n"),
+            mock.patch.object(hook, "kiro_lineage", lambda: (proc.pid, token, 0, "")),
+            _WriteTracer() as tracer,
+        ):
+            os.environ.pop("HERDR_KIRO_LOG", None)
+            os.environ.pop("HERDR_SESSION", None)
+            hook.begin_tick()
+            self.assertEqual(hook.main(), 0)
+        return tracer
+
+    def test_unconfirmed_partial_stop_writes_nothing(self):
+        _master, proc = self._owner()
+        other = subprocess.Popen(
+            ["sleep", "60"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: other.poll() is not None or other.kill())
+        for event in ("Stop", "SessionEnd"):
+            for held_pid in (0, other.pid):
+                with self.subTest(event=event, held_pid=held_pid):
+                    root, state, _path, token = self._prepare(proc, 2)
+                    before = self._snapshot(state)
+                    self._hold(token, held_pid)
+                    tracer = self._main(root, proc, token, event)
+                    after = self._snapshot(state)
+                    self.assertEqual(tracer.violations, [])
+                    self.assertEqual(after, before, self._diff(before, after))
+
+    def test_unconfirmed_aggregate_zero_does_not_refresh(self):
+        _master, proc = self._owner()
+        for event in ("Stop", "UserPromptSubmit"):
+            with self.subTest(event=event):
+                root, state, _path, token = self._prepare(proc, 0)
+                before = self._snapshot(state)
+                self._hold(token, 0)
+                tracer = self._main(root, proc, token, event)
+                after = self._snapshot(state)
+                self.assertEqual(tracer.violations, [])
+                self.assertEqual(after, before, self._diff(before, after))
+
+    def test_unconfirmed_named_prompt_does_not_record_or_refresh(self):
+        _master, proc = self._owner()
+        root, state, _path, token = self._prepare(proc, 0)
+        before = self._snapshot(state)
+        self._hold(token, 0)
+        tracer = self._main(
+            root,
+            proc,
+            token,
+            "UserPromptSubmit",
+            json.dumps({"session_id": "sess"}),
+        )
+        after = self._snapshot(state)
+        self.assertEqual(tracer.violations, [])
+        self.assertEqual(after, before, self._diff(before, after))
+
+    def test_proven_named_prompt_refreshes_only_the_busy_timestamp(self):
+        _master, proc = self._owner()
+        root, state, _path, token = self._prepare(proc, 0)
+        hook._close_held_fd()
+        self.addCleanup(hook._close_held_fd)
+        before = self._snapshot(state)
+        tracer = self._main(
+            root,
+            proc,
+            token,
+            "UserPromptSubmit",
+            json.dumps({"session_id": "sess"}),
+        )
+        after = self._snapshot(state)
+        self.assertEqual(tracer.violations, [])
+        names = sorted(set(before) | set(after))
+        changed = [name for name in names if before.get(name) != after.get(name)]
+        self.assertEqual(changed, ["t7.json"], self._diff(before, after))
+        saved = json.loads(after["t7.json"])
+        original = json.loads(before["t7.json"])
+        self.assertNotEqual(saved["busy"][hook.AGGREGATE], original["busy"][hook.AGGREGATE])
+        self.assertNotIn("sess", saved["busy"])
+        self.assertNotIn("sess", saved["owners"])
+        saved["busy"][hook.AGGREGATE] = original["busy"][hook.AGGREGATE]
+        self.assertEqual(saved, original)
+
+    def test_fault_none_returns_before_any_io(self):
+        _master, proc = self._owner()
+        root, state, path, _token = self._prepare(proc, 1)
+        before = self._snapshot(state)
+        with (
+            mock.patch.dict(os.environ, self._env(root), clear=False),
+            _WriteTracer() as tracer,
+        ):
+            os.environ.pop("HERDR_KIRO_LOG", None)
+            write, ok = hook.commit_pane(
+                hook.fresh_state(),
+                "watcher_fault",
+                path=path,
+                pane="t7",
+                fault=RuntimeError("boom"),
+            )
+        after = self._snapshot(state)
+        self.assertEqual((write, ok), ("none", False))
+        self.assertEqual(tracer.violations, [])
+        self.assertEqual(after, before, self._diff(before, after))
 
 
 if __name__ == "__main__":

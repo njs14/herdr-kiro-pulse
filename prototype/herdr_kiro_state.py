@@ -28,10 +28,11 @@ the filesystem, the tty, or OSC. A failed App read is none. It is not an
 empty screen, a prompt, a banner, a start, or aggregate_zero, and it is
 not refresh. It is not explained and it is not painted, including when a
 banner or blocker was already held. An unconfirmed held pid writes
-nothing, including a working paint and blocked, and does not open the
-live stdout. reap unlinks a pid file only for a confirmed dead pid or a
-confirmed token mismatch. A live pid whose token matches is not reaped
-when only the comm name differs. A none result unlinks nothing.
+nothing, including touch_partial, refresh, a working paint, and blocked,
+and does not open the live stdout. reap unlinks a pid file only for a
+confirmed dead pid or a confirmed token mismatch. A live pid whose token
+matches is not reaped when only the comm name differs. A none result,
+including fault, returns before any I/O and unlinks nothing.
 """
 
 from __future__ import annotations
@@ -65,7 +66,6 @@ AGENT = "kiro"
 # Herdr already shows idle within half a second of Stop once the banner is gone.
 # Half a second still covers the gap before the next step's SessionStart.
 SETTLE_SECS = 0.5
-STALE_SECS = 1800.0
 TICK_SECS = 0.2
 # A pidfd or kqueue exit that is already visible must not spin the watcher.
 # The sleep grows with consecutive wakes and never exceeds this cap.
@@ -580,12 +580,14 @@ def update(path: str, fn):
         # removed afterwards. Unreadable bytes stay. A real mutation still
         # raises seq to the floor.
         if write == "refresh":
-            if not changed:
+            # Named-session stamps on this trial are not part of refresh.
+            refreshed = _refresh_state(before, loaded)
+            if refreshed == before:
                 silent = True
             else:
                 handle.seek(0)
                 handle.truncate()
-                handle.write(json.dumps(loaded))
+                handle.write(json.dumps(refreshed))
                 handle.flush()
                 os.chmod(path, FILE_MODE)
         elif not changed and write in ("", "none"):
@@ -631,6 +633,27 @@ def _load_for_commit(path: str):
     if not isinstance(parsed, dict):
         return fresh_state(), True, False
     return parsed, True, True
+
+
+def _refresh_state(before: dict, trial: dict) -> dict:
+    """The pane after refresh. Only the aggregate busy timestamp may change.
+
+    A named session can stamp other keys on the trial before the fold labels
+    the result refresh. Those keys, the owner row, grace, and generation stay
+    as they were on disk.
+    """
+    refreshed = copy.deepcopy(before)
+    before_busy = before.get("busy")
+    trial_busy = trial.get("busy")
+    if not isinstance(before_busy, dict) or not isinstance(trial_busy, dict):
+        return refreshed
+    if AGGREGATE not in before_busy or AGGREGATE not in trial_busy:
+        return refreshed
+    busy = refreshed.get("busy")
+    if not isinstance(busy, dict):
+        return refreshed
+    busy[AGGREGATE] = trial_busy[AGGREGATE]
+    return refreshed
 
 
 def _write_refresh(path: str, state: dict) -> None:
@@ -1277,9 +1300,7 @@ class PidFileView:
     pid: int
     kill_errno: int | None
     recorded_start: str
-    recorded_comm: str
     live_start: str
-    live_comm: str
     snap_error: bool
 
 
@@ -1319,9 +1340,7 @@ def sweep_stale_pidfiles() -> None:
         except OSError as exc:
             kill_errno = exc.errno
         recorded = ""
-        recorded_comm = ""
         live_start = ""
-        live_comm = ""
         snap_error = False
         if kill_errno is None:
             try:
@@ -1330,13 +1349,11 @@ def sweep_stale_pidfiles() -> None:
             except OSError:
                 continue
             recorded = lines[1].strip() if len(lines) > 1 else ""
-            recorded_comm = lines[2].strip() if len(lines) > 2 else ""
             snap = process_snapshot(pid)
             snap_error = not snap or bool(snap.get("error"))
             if not snap_error:
                 live_start = hires_start(pid)
-                live_comm = (snap or {}).get("comm") or ""
-        view = PidFileView(pid, kill_errno, recorded, recorded_comm, live_start, live_comm, snap_error)
+        view = PidFileView(pid, kill_errno, recorded, live_start, snap_error)
         if classify_pidfile(view) != "reap":
             continue
         remove_pidfile(os.path.join(state_dir(), "pane.json"), pid)
@@ -2004,8 +2021,10 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
             return write, ok, state, True
         file_write, file_ok, file_trial = _preview_pane(loaded, event, now)
         if file_write == "refresh" and file_trial != loaded:
-            with _applying():
-                _write_refresh(path, file_trial)
+            refreshed = _refresh_state(loaded, file_trial)
+            if refreshed != loaded:
+                with _applying():
+                    _write_refresh(path, refreshed)
             return file_write, file_ok, file_trial, False
         return file_write, file_ok, state, True
     if _leaves_directory_untouched(write, ok, trial, state):
@@ -2124,9 +2143,13 @@ def _commit_persisted(
     if write == "none" and trial == before:
         return _pane_result("none", True)
     if write == "refresh":
-        if existed and readable and trial != before:
-            with _applying():
-                _write_refresh(path, trial)
+        # The trial may carry a named-session stamp. Disk gets the busy
+        # timestamp and nothing else in the state directory.
+        if existed and readable:
+            refreshed = _refresh_state(before, trial)
+            if refreshed != before:
+                with _applying():
+                    _write_refresh(path, refreshed)
         return _pane_result("refresh", True)
     if _leaves_directory_untouched(write, ok, trial, before):
         return _pane_result(write, ok)
@@ -2197,20 +2220,21 @@ def commit_pane(
     the log, a watcher pid file, the tty, or OSC. A table result of none
     returns before that I/O and leaves the state directory unchanged,
     including pid files. refresh writes the busy timestamp and nothing
-    else. reap unlinks a pid file only when the pid is confirmed dead or
-    its recorded token is confirmed mismatched. A matching token is kept
-    when only the comm name differs. blocked does not paint an unconfirmed
-    held pid. fault logs the error and clears the watcher fields, and that
-    none does not unlink a pid file. refuse_watch logs the refusal, then
-    returns none.
+    else, and only for a proven owner. An unconfirmed held pid writes
+    nothing. touch_partial, refresh, and record_named return none.
+    touch_aggregate does not write. There is no generation, seq, floor, log,
+    watcher, tty, or OSC.
+    reap unlinks a pid file only when the pid is confirmed dead or its
+    recorded token is confirmed mismatched. A matching token is kept when
+    only the comm name differs. blocked does not paint an unconfirmed held
+    pid. fault is none and returns before any I/O, so it does not log, clear
+    the watcher, bump seq, or write the pane. refuse_watch logs the refusal,
+    then returns none.
     """
     if watch:
         _run_watch(pane, path)
         return _pane_result("none", True)
     if fault is not None:
-        with _applying():
-            log(f"watcher error {type(fault).__name__}: {fault}")
-            clear_watcher(path)
         return _pane_result("none", False)
     if event == "refuse_watch":
         with _applying():
@@ -2235,6 +2259,8 @@ def commit_pane(
     if write == "none":
         return _pane_result(write, True)
     if write == "refresh":
+        if _owner_held_unconfirmed(state):
+            return _pane_result("none", True)
         if AGGREGATE in state["busy"]:
             state["busy"][AGGREGATE] = now if now else time.time()
         return _pane_result(write, True)
@@ -2258,6 +2284,8 @@ def commit_pane(
         remember_owner(state, AGGREGATE, owner, owner_started)
         return _pane_result(write, True)
     if write == "touch_partial":
+        if _owner_held_unconfirmed(state):
+            return _pane_result("none", True)
         count = int(state.get("aggregate") or 0)
         if count > 1:
             state["aggregate"] = count - 1
@@ -2265,6 +2293,8 @@ def commit_pane(
         state["grace_until"] = 0.0
         return _pane_result(write, True)
     if write == "record_named":
+        if _owner_held_unconfirmed(state):
+            return _pane_result("none", True)
         _record_named(state, hook_name or event, session, now, owner, owner_started)
         state["grace_until"] = 0.0
         return _pane_result(write, True)
