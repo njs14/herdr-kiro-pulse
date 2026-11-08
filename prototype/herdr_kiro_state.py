@@ -1378,8 +1378,10 @@ def _on_term(signum, _frame):
 def explain_env() -> dict:
     """Point herdr at the toml next to this script. The temp dir is removed on exit.
 
-    This does not sweep pid files. A pid file is removed only when commit_pane
-    applies reap.
+    This does not sweep pid files. In this module a pid file is removed only
+    when commit_pane applies reap, and uninstall.sh also removes one with our
+    uid when the process is gone, or after it signals a process whose
+    fractional start token and comm basename match.
     """
     global _EXPLAIN_ENV
     if _EXPLAIN_ENV is not None:
@@ -1964,7 +1966,7 @@ def _owner_held_unconfirmed(state: dict) -> bool:
     return _held_pid_unconfirmed(owner[0], owner[1])
 
 
-def _leaves_directory_untouched(write: str, _ok: bool, trial: dict, state: dict) -> bool:
+def _leaves_directory_untouched(write: str, trial: dict, state: dict) -> bool:
     """True when this result must not open the pane, the floor, or the log.
 
     none with an unchanged trial does not. An unconfirmed held pid does
@@ -2033,7 +2035,7 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
                     _write_refresh(path, refreshed)
             return file_write, file_ok, file_trial, False
         return file_write, file_ok, state, True
-    if _leaves_directory_untouched(write, ok, trial, state):
+    if _leaves_directory_untouched(write, trial, state):
         return write, ok, state, True
     arm()
 
@@ -2162,7 +2164,7 @@ def _commit_persisted(
                 with _applying():
                     _write_refresh(path, refreshed)
         return _pane_result("refresh", True)
-    if _leaves_directory_untouched(write, ok, trial, before):
+    if _leaves_directory_untouched(write, trial, before):
         return _pane_result(write, ok)
 
     def apply(current: dict, chosen: dict = chosen) -> None:
@@ -2197,8 +2199,8 @@ def _status_view(screen: str, state: dict, held, now: float):
         candidate = screen_event(state, "continue") if action == "working" else ""
     if not candidate:
         return blocked, banner, view
-    write, ok, trial = _preview_pane(state, candidate, now)
-    if write == "refresh" or _leaves_directory_untouched(write, ok, trial, state):
+    write, _ok, trial = _preview_pane(state, candidate, now)
+    if write == "refresh" or _leaves_directory_untouched(write, trial, state):
         return blocked, banner, view
     with _in_apply():
         view = screen_view(screen)
@@ -2363,7 +2365,7 @@ def commit_blocked(path: str, rule_id: str = "") -> tuple[str, bool]:
         preview, preview_ok = commit_pane(trial, "blocked", rule_id)
     finally:
         _COMMIT_DRY = previous
-    if _leaves_directory_untouched(preview, preview_ok, trial, before):
+    if _leaves_directory_untouched(preview, trial, before):
         return _pane_result(preview, preview_ok)
     chosen = {"write": "none", "ok": False}
 
@@ -3219,8 +3221,8 @@ def _run_watch(pane: str, path: str) -> None:
                     log("watcher exit owner already gone")
                     return
                 exit_event = screen_event(state, "exit")
-                preview, preview_ok, trial = _preview_pane(state, exit_event, now)
-                if _leaves_directory_untouched(preview, preview_ok, trial, state):
+                preview, _preview_ok, trial = _preview_pane(state, exit_event, now)
+                if _leaves_directory_untouched(preview, trial, state):
                     return
                 arm()
                 if apply_owner_exit(pane, path):
@@ -3254,8 +3256,8 @@ def _run_watch(pane: str, path: str) -> None:
             if blocked:
                 quiet_since = None
                 if reported != "blocked":
-                    preview, preview_ok, trial = _preview_pane(state, "blocked", now)
-                    quiet = _leaves_directory_untouched(preview, preview_ok, trial, state)
+                    preview, _preview_ok, trial = _preview_pane(state, "blocked", now)
+                    quiet = _leaves_directory_untouched(preview, trial, state)
                     if not quiet:
                         arm()
                         rule_id = str(view.get("id") or "")
