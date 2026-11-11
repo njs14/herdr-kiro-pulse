@@ -1007,6 +1007,37 @@ class GraceTests(unittest.TestCase):
         self.assertEqual(state["owner_ident"], {"fine": "100.000000"})
         self.assertEqual(sorted(state["busy"]), ["empty", "fine", "sec"])
 
+    def test_forgetting_a_dead_unpinned_owner_drops_the_rows_it_held(self):
+        # Every named slot keyed to the dead pid ends. The aggregate row is
+        # shared by sessions with no id, so it stays. A live pid and a fine
+        # token keep their rows.
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        state = hook.fresh_state()
+        state["busy"] = {"old": 1.0, "old#2": 1.0, hook.AGGREGATE: 1.0, "live": 1.0, "fine": 1.0}
+        state["aggregate"] = 2
+        state["owners"] = {
+            "old": gone.pid,
+            "old#2": gone.pid,
+            hook.AGGREGATE: gone.pid,
+            "live": os.getpid(),
+            "fine": gone.pid,
+        }
+        state["owner_ident"] = {"fine": "100.000000"}
+        hook._forget_unpinned_owners(state)
+        self.assertEqual(sorted(state["busy"]), [hook.AGGREGATE, "fine", "live"])
+        self.assertEqual(state["owners"], {"fine": gone.pid})
+        self.assertEqual(state["aggregate"], 2)
+
+    def test_forgetting_an_unpinned_owner_kill_cannot_see_keeps_its_row(self):
+        state = hook.fresh_state()
+        state["busy"] = {"old": 1.0}
+        state["owners"] = {"old": 4242}
+        with mock.patch.object(hook.os, "kill", side_effect=PermissionError(errno.EPERM, "denied")):
+            hook._forget_unpinned_owners(state)
+        self.assertEqual(sorted(state["busy"]), ["old"])
+        self.assertEqual(state["owners"], {})
+
     def test_a_gone_chat_child_is_not_an_owner_exit(self):
         state = hook.fresh_state()
         state["owners"] = {"sess": 50}
@@ -5818,8 +5849,8 @@ class KiroThreeOneLineageTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         return proc, chain, root
 
-    def _main(self, root, chain, event, calls=None):
-        payload = json.dumps({"cwd": root, "hook_event_name": event, "session_id": "sess_31"})
+    def _main(self, root, chain, event, calls=None, session="sess_31"):
+        payload = json.dumps({"cwd": root, "hook_event_name": event, "session_id": session})
         sink = [] if calls is None else calls
         env = {
             "HERDR_ENV": "",
@@ -5897,6 +5928,35 @@ class KiroThreeOneLineageTests(unittest.TestCase):
                     self.assertEqual(saved["busy"], {}, saved)
                     self.assertEqual(saved["owners"], {}, saved)
                     self.assertEqual(saved["owner_ident"], {}, saved)
+
+    def _ended_session_then_new_stop(self, seeded_pid, chain_extra=None):
+        # A 0.1.0 session ended, but its Stop never cleared the row. A new
+        # kiro-cli then runs a whole session in the same pane.
+        _proc, chain, root = self._kiro()
+        if chain_extra:
+            chain = {**chain, **chain_extra}
+        self._seed_unpinned_owner(root, seeded_pid, "")
+        for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+            self._main(root, chain, event, session="sess_new")
+        return self._saved(root)
+
+    def test_a_new_session_stop_ends_a_row_whose_unpinned_owner_is_dead(self):
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        saved = self._ended_session_then_new_stop(gone.pid)
+        self.assertEqual(saved["busy"], {}, saved)
+        self.assertEqual(saved["owners"], {}, saved)
+
+    def test_a_live_or_unreadable_unpinned_owner_keeps_its_row(self):
+        # A live pid may still be running that turn. A ps error is not death.
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        for extra in (None, {other.pid: {"error": True}}):
+            with self.subTest(snapshot="error" if extra else "missing"):
+                saved = self._ended_session_then_new_stop(other.pid, extra)
+                self.assertEqual(sorted(saved["busy"]), ["sess_31"], saved)
+                self.assertEqual(saved["owners"], {}, saved)
 
     def test_an_app_terminal_stop_runs_no_herdr_report(self):
         _proc, chain, root = self._kiro()
