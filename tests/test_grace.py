@@ -5842,6 +5842,51 @@ class AppTerminalReportTests(unittest.TestCase):
             self.assertTrue(hook.release_authority("w1:p1", path))
         self.assertEqual([args[:2] for args in calls], [("report-agent", "w1:p1"), ("release-agent", "w1:p1")])
 
+    def _no_owner_watch(self, env, lookup):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-app-watch-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: state.update({"seq": 1, "busy": {"sess": time.time()}}))
+        hits = {"n": 0}
+
+        def fake_wait(_self, _pids, _timeout):
+            hits["n"] += 1
+            if hits["n"] > 6:
+                raise AssertionError("watcher stayed up with no owner")
+            return False
+
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "agent_lookup", lookup),
+            mock.patch.object(hook, "pane_text", lambda _pane: "plain shell\n"),
+            mock.patch.object(hook, "herdr", side_effect=AssertionError("herdr")),
+            mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
+            mock.patch.object(hook, "GONE_CONFIRM_SECS", 0),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook, "log") as logged,
+        ):
+            hook.watch_loop(env["HERDR_PANE_ID"] or env["HC_TERMINAL_ID"], path)
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        return saved, [call.args[0] for call in logged.call_args_list]
+
+    def test_an_app_watcher_asks_herdr_nothing_and_still_exits_with_no_owner(self):
+        # The Herdr TUI server does not know an App terminal id. With no
+        # owner the watcher has nothing to paint, so it exits as before.
+        lookup = mock.Mock(side_effect=AssertionError("agent_lookup"))
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
+        saved, logged = self._no_owner_watch(env, lookup)
+        lookup.assert_not_called()
+        self.assertIn("watcher exit agent gone", logged)
+        self.assertEqual(sorted(saved["busy"]), ["sess"])
+
+    def test_a_tui_watcher_still_asks_herdr_for_the_pane(self):
+        lookup = mock.Mock(return_value="gone")
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}
+        _saved, logged = self._no_owner_watch(env, lookup)
+        lookup.assert_called_with("w1:p1")
+        self.assertIn("watcher exit agent gone", logged)
+
 
 class KiroThreeOneLineageTests(unittest.TestCase):
     """Kiro CLI 3.1 runs each hook under node <- bun <- kiro-cli.
