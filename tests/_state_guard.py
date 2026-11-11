@@ -13,8 +13,11 @@ server socket, so it is not watched.
 While a module is isolated, subprocess.Popen, and so run, call, and
 check_output, refuses a shell or script run whose env could reach those dirs. A
 shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run,
-and the env checked is the one it gets after those words, env -S, env -u, and
-env -i are applied. The hooks, agent-detection, and state dirs that env leads
+and the env checked is the one it gets after those words and env's -i, -u, and
+-S options are applied in order. Those options count in their long forms, alone,
+with the value in the same word (-uNAME, -SSTRING), and combined with other short
+options in one word (-iS, -vS, -iu NAME). -S splits its string with shlex rules
+and does not expand ${VAR}. The hooks, agent-detection, and state dirs that env leads
 to are resolved through any symlink on the way. os.posix_spawn and
 os.posix_spawnp get the same check, and os.system, os.exec*, and os.spawn*
 always raise. In a forked child a refusal exits the child instead.
@@ -63,7 +66,7 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 SCRIPTS = {"herdr_kiro_state.py", "herdr_kiro_doctor.py"}
 # Commands that run the next word as the command, with the options that take a value.
 WRAPPERS = {
-    "env": {"-u", "--unset", "-C", "--chdir", "-P"},
+    "env": {"--chdir", "--argv0"},
     "nice": {"-n", "--adjustment"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
     "exec": {"-a"},
@@ -146,11 +149,35 @@ def _is_assignment(word):
     return bool(eq) and name.replace("_", "a").isalnum() and not name[0].isdigit()
 
 
+# env short options that take a value: the rest of the word, or else the next word.
+ENV_VALUE_OPTIONS = "SuCPa"
+
+
+def _env_short_options(letters, argv, env):
+    """Apply one env short-option word, like -i, -uNAME, or -ivS, left to right, as GNU and BSD env do.
+
+    -i clears env, -u unsets its value, and -S splits its value into words put back
+    at the front of argv. Other letters do not change env. Return the new env.
+    """
+    for at, letter in enumerate(letters):
+        if letter == "i":
+            env = {}
+        elif letter in ENV_VALUE_OPTIONS:
+            value = letters[at + 1 :] or (argv.pop(0) if argv else "")
+            if letter == "S":
+                argv[:0] = shlex.split(value)
+            elif letter == "u":
+                env.pop(value, None)
+            break
+    return env
+
+
 def _parse(argv, env):
     """Split off leading VAR=val words and env, nice, timeout, or exec wrappers.
 
     Return the command left and the env it runs with: env with the VAR=val words
-    applied, and cleared by env -i or a bare - and unset by env -u on the way.
+    applied, cleared by env -i or a bare -, and unset by env -u on the way, with
+    env short options combined in one word, like -iS or -iu NAME, applied in order.
     """
     argv = list(argv)
     env = dict(env)
@@ -166,20 +193,18 @@ def _parse(argv, env):
             option = argv.pop(0)
             if option == "--":
                 break
-            if option in ("-S", "--split-string") and argv:
+            if name == "env" and not option.startswith("--"):
+                env = _env_short_options(option[1:], argv, env)
+            elif name == "env" and option == "--split-string" and argv:
                 argv[:1] = shlex.split(argv[0])
-            elif option.startswith("-S") and not option.startswith("--"):
-                argv[:0] = shlex.split(option[2:])
-            elif option.startswith("--split-string="):
+            elif name == "env" and option.startswith("--split-string="):
                 argv[:0] = shlex.split(option.partition("=")[2])
-            elif name == "env" and option in ("-i", "--ignore-environment"):
+            elif name == "env" and option == "--ignore-environment":
                 env = {}
-            elif name == "env" and option in ("-u", "--unset") and argv:
+            elif name == "env" and option == "--unset" and argv:
                 env.pop(argv.pop(0), None)
             elif name == "env" and option.startswith("--unset="):
                 env.pop(option.partition("=")[2], None)
-            elif name == "env" and option.startswith("-u") and not option.startswith("--"):
-                env.pop(option[2:], None)
             elif option in WRAPPERS[name] and argv:
                 argv.pop(0)
         if argv and argv[0] == "-":
