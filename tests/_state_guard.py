@@ -31,6 +31,25 @@ if os.environ.get("XDG_CONFIG_HOME"):
 REAL_CONFIG_DIRS = tuple(sorted({os.path.join(base, "herdr", "agent-detection") for base in _configs}))
 
 
+def _real(path):
+    return os.path.realpath(path)
+
+
+def scratch_env_problem(env):
+    """Say why a script env could reach the real herdr config or state, or return None."""
+    config = env.get("XDG_CONFIG_HOME")
+    if not config:
+        return "XDG_CONFIG_HOME is not set, so the script falls back to $HOME/.config"
+    if _real(os.path.join(config, "herdr", "agent-detection")) in {_real(path) for path in REAL_CONFIG_DIRS}:
+        return f"XDG_CONFIG_HOME {config} is the inherited herdr config"
+    state = env.get("XDG_STATE_HOME")
+    if not state:
+        return "XDG_STATE_HOME is not set, so the script falls back to $HOME/.local/state"
+    if _real(os.path.join(state, "herdr-kiro")) in {_real(path) for path in REAL_DIRS}:
+        return f"XDG_STATE_HOME {state} is the inherited herdr-kiro state"
+    return None
+
+
 def _stat(path):
     try:
         info = os.stat(path)

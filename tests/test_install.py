@@ -30,6 +30,22 @@ def tearDownModule():
 
 
 class InstallTests(unittest.TestCase):
+    def setUp(self):
+        real_run = subprocess.run
+
+        def checked_run(args, *rest, **kwargs):
+            # A script run must pin its config and state to scratch. Raise before it runs.
+            env = kwargs.get("env")
+            if env is not None and args and args[0] == "sh":
+                problem = _state_guard.scratch_env_problem(env)
+                if problem:
+                    raise AssertionError(f"{args[1:]}: {problem}")
+            return real_run(args, *rest, **kwargs)
+
+        patcher = mock.patch.object(subprocess, "run", checked_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_install_quotes_a_path_with_space_quote_and_backslash(self):
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
