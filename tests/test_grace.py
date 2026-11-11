@@ -5902,14 +5902,55 @@ class KiroThreeOneLineageTests(unittest.TestCase):
         self.assertNotIn("sess_31", self._saved(root)["busy"])
         self.assertEqual(calls, [])
 
-    def test_compaction_events_do_not_touch_the_pane(self):
-        _proc, chain, root = self._kiro()
-        for event in ("SessionStart", "UserPromptSubmit"):
-            self._main(root, chain, event)
-        before = self._saved(root)
+    def _compact_payload(self, root, event):
+        """The keys Kiro 3.2.0 sent live for /compact, with dummy values."""
+        payload = {
+            "compaction_id": "cmp_1",
+            "cwd": root,
+            "hook_event_name": event,
+            "message_count": 12,
+            "reason": "manual",
+            "session_id": "sess_31",
+            "transcript_path": os.path.join(root, "transcript.jsonl"),
+        }
+        if event == "PostCompact":
+            payload["summary"] = "dummy summary"
+            payload["summary_path"] = os.path.join(root, "summary.md")
+        return payload
+
+    def test_compaction_events_return_before_the_lineage(self):
+        # PreCompact and PostCompact are not registered. If Kiro sends one
+        # anyway, main() returns before kiro_lineage, commit_pane, and log.
+        root = tempfile.mkdtemp(prefix="herdr-kiro-compact-")
+        self.addCleanup(shutil.rmtree, root, True)
+        keys = ["compaction_id", "cwd", "hook_event_name", "message_count", "reason", "session_id", "transcript_path"]
+        expected = {"PreCompact": keys, "PostCompact": [*keys, "summary", "summary_path"]}
+        env = {
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t5",
+            "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
         for event in ("PreCompact", "PostCompact"):
-            self._main(root, chain, event)
-        self.assertEqual(self._saved(root), before)
+            with self.subTest(event=event):
+                payload = self._compact_payload(root, event)
+                self.assertEqual(sorted(payload), sorted(expected[event]))
+                with (
+                    mock.patch.dict(os.environ, env, clear=False),
+                    mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(hook, "kiro_lineage", side_effect=AssertionError("kiro_lineage")) as lineage,
+                    mock.patch.object(hook, "commit_pane", side_effect=AssertionError("commit_pane")) as commit,
+                    mock.patch.object(hook, "log", side_effect=AssertionError("log")) as logged,
+                ):
+                    self.assertEqual(hook.main(), 0)
+                lineage.assert_not_called()
+                commit.assert_not_called()
+                logged.assert_not_called()
+        self.assertFalse(os.path.exists(os.path.join(root, "herdr-kiro", "t5.json")))
+        self.assertFalse(os.path.exists(os.path.join(root, "hook.log")))
 
 
 if __name__ == "__main__":
