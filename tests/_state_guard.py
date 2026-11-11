@@ -14,7 +14,8 @@ While a module is isolated, subprocess.Popen, and so run, call, and
 check_output, refuses a shell or script run whose env could reach those dirs. A
 shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run.
 os.posix_spawn and os.posix_spawnp get the same check, and os.system, os.exec*,
-and os.spawn* always raise. A child Python that calls them is not checked.
+and os.spawn* always raise. In a forked child a refusal exits the child instead.
+A child Python that calls them is not checked.
 """
 
 import os
@@ -194,21 +195,32 @@ OS_RUNS = tuple(name for name in _OS_RUNS.split() if hasattr(os, name))
 OS_SPAWNS = tuple(name for name in ("posix_spawn", "posix_spawnp") if hasattr(os, name))
 
 
-def _refuse(name):
+REFUSED_IN_CHILD = 125
+
+
+def _fail(message, pid):
+    """Raise in the test process. A forked child exits instead, so it never unwinds into a second test run."""
+    if os.getpid() != pid:
+        os.write(2, f"state guard: {message}\n".encode(errors="replace"))
+        os._exit(REFUSED_IN_CHILD)
+    raise AssertionError(message)
+
+
+def _refuse(name, pid):
     def refuse(*_args, **_kwargs):
-        raise AssertionError(f"os.{name} skips the state guard's run check; use subprocess with a scratch env")
+        _fail(f"os.{name} skips the state guard's run check; use subprocess with a scratch env", pid)
 
     return refuse
 
 
-def _checked_spawn(real):
+def _checked_spawn(real, pid):
     def spawn(path, argv, env, *rest, **kwargs):
         # path is what runs. argv[0] is only the name it sees.
         command = [path, *list(argv)[1:]]
         if _is_script_run(command, False):
             problem = scratch_env_problem(env)
             if problem:
-                raise AssertionError(f"{_argv(command)}: {problem}")
+                _fail(f"{_argv(command)}: {problem}", pid)
         return real(path, argv, env, *rest, **kwargs)
 
     return spawn
@@ -303,8 +315,9 @@ class Isolation:
         os.environ["XDG_STATE_HOME"] = os.path.join(self.root, "state")
         os.environ["HERDR_KIRO_LOG"] = os.path.join(self.root, "hook.log")
         self.patches = [mock.patch.object(subprocess, "Popen", CheckedPopen)]
-        self.patches += [mock.patch.object(os, name, _refuse(name)) for name in OS_RUNS]
-        self.patches += [mock.patch.object(os, name, _checked_spawn(getattr(os, name))) for name in OS_SPAWNS]
+        pid = os.getpid()
+        self.patches += [mock.patch.object(os, name, _refuse(name, pid)) for name in OS_RUNS]
+        self.patches += [mock.patch.object(os, name, _checked_spawn(getattr(os, name), pid)) for name in OS_SPAWNS]
         for patch in self.patches:
             patch.start()
 
