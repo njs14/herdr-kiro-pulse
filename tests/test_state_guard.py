@@ -122,6 +122,40 @@ class RunCheckTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertFalse(_state_guard._is_script_run(argv, False))
 
+    def test_argv_overrides_of_a_scratch_env_are_rejected(self):
+        hooks = os.path.join(REAL_HOME, ".kiro", "hooks")
+        for argv in (
+            ["env", f"HOME={REAL_HOME}", "XDG_CONFIG_HOME=", "KIRO_HOOKS_DIR=", "sh", "-c", "true"],
+            ["env", "-S", f"HOME={REAL_HOME} sh -c true"],
+            ["env", f"KIRO_HOOKS_DIR={hooks}", "sh", "-c", "true"],
+            [f"KIRO_HOOKS_DIR={hooks}", "sh", "-c", "true"],
+            ["nice", "-n", "5", f"HOME={REAL_HOME}", "sh", "-c", "true"],
+            ["env", "-u", "XDG_CONFIG_HOME", "sh", "-c", "true"],
+            ["env", "--unset=XDG_STATE_HOME", "sh", "-c", "true"],
+            ["env", "-i", "PATH=/usr/bin:/bin", "sh", "-c", "true"],
+            ["env", "-", "PATH=/usr/bin:/bin", "sh", "-c", "true"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(AssertionError):
+                subprocess.run(argv, env=self.scratch(), check=False)
+
+    def test_scratch_argv_overrides_run(self):
+        env = self.scratch()
+        other = os.path.join(self.base, "other")
+        words = [f"{key}={env[key]}" for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME")]
+        for argv in (
+            ["env", f"XDG_CONFIG_HOME={other}", "sh", "-c", "true"],
+            ["env", "-S", f"HOME={other} sh -c true"],
+            ["env", "-i", *words, "sh", "-c", "true"],
+            ["env", "-u", "KIRO_HOOKS_DIR", "sh", "-c", "true"],
+        ):
+            with self.subTest(argv=argv):
+                subprocess.run(argv, env=env, check=True)
+
+    def test_argv_overrides_do_not_excuse_an_inherited_env(self):
+        self.assert_rejected(
+            lambda: subprocess.run(["env", "-i", f"HOME={self.base}", "sh", "-c", "true"], check=False)
+        )
+
     def fake_real_home(self):
         """Register a temp dir as the real home's .kiro, .config, and .local/state, so no test links the real ones."""
         real = os.path.join(self.base, "real")
@@ -242,6 +276,11 @@ class OsRunTests(unittest.TestCase):
         for spawn in (os.posix_spawn, os.posix_spawnp):
             with self.subTest(spawn=spawn.__name__), self.assertRaises(AssertionError):
                 os.waitpid(spawn("/bin/sh", ["sh", "-c", "true"], dict(os.environ)), 0)
+
+    def test_posix_spawn_with_an_argv_override_is_rejected(self):
+        env = _state_guard.scratch_env(os.path.join(self.base, "home"))
+        with self.assertRaises(AssertionError):
+            os.waitpid(os.posix_spawn("/usr/bin/env", ["env", f"HOME={REAL_HOME}", "sh", "-c", "true"], env), 0)
 
     def test_posix_spawn_of_a_plain_command_and_popen_still_run(self):
         os.waitpid(os.posix_spawn("/usr/bin/true", ["true"], dict(os.environ)), 0)
