@@ -225,13 +225,13 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     """Record a slot's owner pid and the start token main() read for it.
 
     main() decides who is an owner, and it passes one only with a start
-    finer than one second. The pid file is a separate store and is not
-    this proof.
+    finer than one second. A coarser token is not stored. The pid file is
+    a separate store and is not this proof.
     """
     if not owner:
         return
     state["owners"][key] = int(owner)
-    if not started:
+    if not fine_start(started):
         return
     idents = state.get("owner_ident")
     if not isinstance(idents, dict):
