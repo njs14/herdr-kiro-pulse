@@ -14,7 +14,19 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import _state_guard
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 class InstallTests(unittest.TestCase):
@@ -37,6 +49,8 @@ class InstallTests(unittest.TestCase):
             handle.write('{"version":"v1","hooks":[]}\n')
         env = dict(os.environ)
         env["HOME"] = home
+        env.pop("XDG_STATE_HOME", None)
+        env.pop("HERDR_KIRO_LOG", None)
         env.pop("KIRO_HOOKS_DIR", None)
         env.pop("HERDR_SESSION", None)
         completed = subprocess.run(
@@ -65,6 +79,7 @@ class InstallTests(unittest.TestCase):
         env["HOME"] = home
         env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
+        env.pop("HERDR_KIRO_LOG", None)
         env.pop("KIRO_HOOKS_DIR", None)
         env.pop("HERDR_SESSION", None)
         return env
@@ -214,6 +229,7 @@ class InstallTests(unittest.TestCase):
         env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
         env["TMPDIR"] = tmp
         env["HERDR_KIRO_LEGACY_DIR"] = decoy_root
+        env.pop("HERDR_KIRO_LOG", None)
         env.pop("KIRO_HOOKS_DIR", None)
         env.pop("HERDR_SESSION", None)
         completed = subprocess.run(

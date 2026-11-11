@@ -12,7 +12,19 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import _state_guard
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 class _Timed:
@@ -44,6 +56,7 @@ class DoctorTests(unittest.TestCase):
         self.env["PATH"] = self.bindir + os.pathsep + self.env.get("PATH", "")
         self.env.pop("HERDR_BIN_PATH", None)
         self.env.pop("HERDR_SESSION", None)
+        self.env.pop("HERDR_KIRO_LOG", None)
 
     def write_herdr(self, remote="2026.09.19.1", server=True, plugin=True):
         server_body = '{"result":{"panes":[]}}' if server else '{"error":{"code":"server_not_running"}}'

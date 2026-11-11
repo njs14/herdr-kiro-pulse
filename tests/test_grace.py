@@ -27,8 +27,20 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "prototype"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import _state_guard
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 def pinned_start(real, pins, asked):
@@ -4050,9 +4062,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
             "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(state_root, "hook.log"),
             "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
         }
-        os.environ.pop("HERDR_KIRO_LOG", None)
         hook.begin_tick()
         self._drain(self.live_master)
         file_start = self._file_start(start)
@@ -4083,7 +4095,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             expected_files[name] = raw
         clock = [self._BASE]
         with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             # A cached explain env would skip the pid sweep. Each cell explains fresh.
             if planted or mode == "chooser":
                 hook._EXPLAIN_ENV = None
@@ -5211,6 +5222,7 @@ class ScreenReadPurityTests(unittest.TestCase):
         self._reset_explain()
         env = {
             "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(state, "hook.log"),
             "HERDR_ENV": "",
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
@@ -5218,7 +5230,6 @@ class ScreenReadPurityTests(unittest.TestCase):
         }
         violations = []
         with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             with _WriteTracer() as tracer:
                 hook.explain(quiet)
                 hook.explain(hook.ScreenSnapshot(None, None))
@@ -5423,6 +5434,7 @@ class NoneReadWriteTests(unittest.TestCase):
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
             "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "herdr-kiro", "hook.log"),
             "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
         }
 
@@ -5448,7 +5460,6 @@ class NoneReadWriteTests(unittest.TestCase):
                 mock.patch.object(hook.OwnerExitWatch, "wait", wait),
                 mock.patch.object(hook.time, "sleep", lambda _delay: None),
             ):
-                os.environ.pop("HERDR_KIRO_LOG", None)
                 os.environ.pop("HERDR_SESSION", None)
                 hook.begin_tick()
                 try:
@@ -5532,7 +5543,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.object(hook, "pane_text", screen),
             mock.patch.object(hook, "kiro_lineage", lambda: (proc.pid, token, 0, "")),
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             os.environ.pop("HERDR_SESSION", None)
             hook.begin_tick()
             self.assertEqual(hook.main(), 0)
@@ -5548,7 +5558,6 @@ class NoneReadWriteTests(unittest.TestCase):
         stale_name = "pids/424242"
         before = self._snapshot(state)
         with mock.patch.dict(os.environ, self._env(root), clear=False):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             write, ok = hook.commit_pane(
                 hook.fresh_state(),
                 "watcher_fault",
@@ -5580,7 +5589,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.object(hook, "kiro_lineage", lambda: (proc.pid, token, 0, "")),
             _WriteTracer() as tracer,
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             os.environ.pop("HERDR_SESSION", None)
             hook.begin_tick()
             self.assertEqual(hook.main(), 0)
@@ -5668,7 +5676,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.dict(os.environ, self._env(root), clear=False),
             _WriteTracer() as tracer,
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             write, ok = hook.commit_pane(
                 hook.fresh_state(),
                 "watcher_fault",
@@ -5787,7 +5794,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.object(hook, "_run_watch", side_effect=AssertionError("watch")),
             _WriteTracer() as tracer,
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             os.environ.pop("HERDR_SESSION", None)
             code = hook.main()
         after = self._snapshot(state)
