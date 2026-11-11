@@ -58,7 +58,7 @@ Cleanup sends `SIGTERM` to the watcher pid recorded in this run's state file and
 
 CI can run, with herdr 0.9.5 installed and no Kiro key:
 
-- `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`
+- `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc tests.test_state_guard`
 - `python3 .cursor/skills/verify-herdr-kiro/drive.py` for idle, working, tool approval, workspace trust, finished turn, and release handoff
 
 `tests.test_osc` is the OSC 7501 check CI can run. It opens a pty, writes the sequence the way the hook does, and reads those bytes on the master. It does not start herdr-app, herdr-core, or `hc`. `drive.py` is the Herdr TUI stand-in. It paints a herdr 0.9.5 pane and reads `herdr agent get`. It does not write OSC 7501 and it is not a Herdr App check.

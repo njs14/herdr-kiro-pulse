@@ -10,7 +10,26 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "harness"))
-import run_suite
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import _state_guard
+
+# run_suite reads the hook log path, and so makes the state dir, on import.
+_IMPORT = _state_guard.Isolation(__name__ + " import")
+_IMPORT.start()
+try:
+    import run_suite
+finally:
+    _IMPORT.stop()
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 class RedactionTests(unittest.TestCase):

@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import shlex
+import stat
 import sys
 
 MARKER = ".herdr-kiro-owned"
@@ -46,11 +47,12 @@ def marker_hash(path):
     return ""
 
 
-def write_bytes(path, payload):
+def write_bytes(path, payload, mode=0o600):
     """Write payload without following a symlink at path.
 
     The temp file is created with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600,
-    then renamed onto path. A symlink destination is left alone.
+    then renamed onto path and set to mode. A symlink destination is left
+    alone.
     """
     if os.path.islink(path):
         sys.stderr.write("left %s alone\n" % path)
@@ -106,7 +108,7 @@ def write_bytes(path, payload):
             pass
         raise
     try:
-        os.chmod(path, 0o600)
+        os.chmod(path, mode)
     except OSError:
         pass
     return True
@@ -153,13 +155,16 @@ def install_owned(dest, payload):
     marker = dest + MARKER
     original = dest + ".original"
     existing = None
+    existing_mode = 0o600
     if os.path.isfile(dest) and not os.path.islink(dest):
         with open(dest, "rb") as handle:
             existing = handle.read()
+            existing_mode = stat.S_IMODE(os.fstat(handle.fileno()).st_mode)
     owned_hash = marker_hash(marker) if os.path.isfile(marker) and not os.path.islink(marker) else None
     if existing is not None and owned_hash is None and existing != payload:
         if not os.path.isfile(original):
-            if not write_bytes(original, existing):
+            # uninstall renames this back onto dest, so it keeps the user's mode.
+            if not write_bytes(original, existing, existing_mode):
                 print("Left %s unchanged" % dest)
                 return False
         else:

@@ -222,15 +222,17 @@ def members_of(busy: dict, key: str) -> list:
 
 
 def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
+    """Record a slot's owner pid and the start token main() read for it.
+
+    main() decides who is an owner, and it passes one only with a start
+    finer than one second. A coarser token is not stored. The pid file is
+    a separate store and is not this proof.
+    """
     if not owner:
         return
     state["owners"][key] = int(owner)
-    if not started:
+    if not fine_start(started):
         return
-    # owner_ident keeps hires_start only when that token is finer than one
-    # second. sec: plus whole-second lstart, and a bare whole-second lstart,
-    # match a pid reused in that same second, so neither is this owner. The
-    # pid file is a separate store and is not this proof.
     idents = state.get("owner_ident")
     if not isinstance(idents, dict):
         idents = {}
@@ -239,11 +241,7 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     current = idents.get(key) or ""
     if isinstance(current, str) and fine_start(current):
         return
-    ident = hires_start(int(owner))
-    if fine_start(ident):
-        idents[key] = ident
-        return
-    idents.pop(key, None)
+    idents[key] = started
 
 
 def _keep_proven_pane(state: dict, key: str) -> None:
@@ -945,7 +943,10 @@ def send_report(pane: str, path: str, kind: str) -> bool:
     # place while kiro-cli is running. release-agent after it drops done:
     # an idle screen settles to idle with no completion, and a working
     # footer returns to working before that later idle screen also settles idle.
-    # OSC is commit_pane's paint. This report is the Herdr TUI only.
+    # OSC is commit_pane's paint. This report is the Herdr TUI only: an App
+    # terminal id is not a TUI pane, so there is nothing to report.
+    if not in_tui():
+        return True
     return emit_report(pane, path, kind)
 
 
@@ -974,6 +975,9 @@ def release_authority(pane: str, path: str) -> bool:
     if not pane_id_ok(pane):
         log("refusing release")
         return False
+    # release-agent is the Herdr TUI only, like send_report.
+    if not in_tui():
+        return True
 
     def bump_release(state: dict) -> None:
         state["seq"] += 1
@@ -2051,6 +2055,32 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
     return recorded, bool(_PANE_OUTCOME.get("ok")), saved, False
 
 
+def _forget_unpinned_owners(state: dict) -> None:
+    """Drop a saved owner whose stored start is not finer than one second.
+
+    main() records no such owner. A pane file written before that rule can
+    still hold one, and that owner kept every Stop at none. A stored fine
+    token stays, including one that no longer matches the live pid.
+
+    When kill reports that pid gone (ESRCH), the named slot keyed to it
+    loses its busy row too: 0.1.0 never cleared a row on Stop, and that
+    owner is the only proof the session ended. A live pid, EPERM, and the
+    aggregate slot, which every session with no id shares, keep the row.
+    """
+    owners = state.get("owners")
+    if not isinstance(owners, dict):
+        return
+    idents = _ident_map(state)
+    busy = state.get("busy")
+    for key in list(owners):
+        if fine_start(idents.get(key) or ""):
+            continue
+        pid = owners.pop(key, None)
+        idents.pop(key, None)
+        if key != AGGREGATE and isinstance(busy, dict) and _pid_gone(pid):
+            busy.pop(key, None)
+
+
 def _fold_hook(
     state: dict,
     event: str,
@@ -2062,6 +2092,7 @@ def _fold_hook(
     chosen: dict,
 ) -> None:
     """The hook fold. A later none keeps an earlier mutation for update()."""
+    _forget_unpinned_owners(state)
     revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
     chosen["write"] = str(_PANE_OUTCOME["write"])
     chosen["ok"] = bool(_PANE_OUTCOME["ok"])
@@ -2686,7 +2717,11 @@ def command_name(comm: str) -> str:
 
 
 def kiro_lineage() -> tuple:
-    """Outer kiro-cli and the kiro-cli-chat under it. Hook shells are not owners."""
+    """Outer kiro-cli and the kiro-cli-chat under it. Hook shells are not owners.
+
+    Kiro CLI 3.1 has no kiro-cli-chat. Its hooks run under node and bun, so
+    the chat pid is 0.
+    """
     pid = os.getppid()
     seen = set()
     outer = (0, "")
@@ -3164,7 +3199,14 @@ def _run_watch(pane: str, path: str) -> None:
             if slot_holder_gone(state):
                 log("watcher exit slot holder gone")
                 return
-            looked = agent_lookup(pane)
+            # The Herdr TUI server does not know an App terminal id. With no
+            # pane owner an App watcher has nothing to paint, so it exits as
+            # it would on gone, but logs why, since herdr was not asked. An
+            # App owner keeps herdr's answer.
+            if not in_tui() and _pane_owner(state) is None:
+                looked, gone_reason = "gone", "app no owner"
+            else:
+                looked, gone_reason = agent_lookup(pane), "agent gone"
             now = time.time()
             current_owners = []
             for owner in (state.get("owners") or {}).values():
@@ -3208,7 +3250,7 @@ def _run_watch(pane: str, path: str) -> None:
                 if gone_confirmed(gone_since, now, gone_hits):
                     # An empty owner table is not an outer exit. Do not release.
                     clear_watcher(path)
-                    log("watcher exit agent gone")
+                    log(f"watcher exit {gone_reason}")
                     return
             else:
                 gone_since = None
@@ -3411,7 +3453,14 @@ def main() -> int:
     if event not in BUSY_EVENTS and event not in END_EVENTS:
         return 0
     begin_tick()
-    owner, owner_started, chat_pid, _chat_lstart = kiro_lineage()
+    owner, _owner_lstart, chat_pid, _chat_lstart = kiro_lineage()
+    # An owner whose start cannot be pinned below one second is not recorded,
+    # so its slot ends on Stop. That is any host without /proc start ticks,
+    # including macOS on Kiro CLI 3.0 and 3.1. This is the one read of the
+    # owner's start for this hook.
+    owner_started = hires_start(owner) if owner else ""
+    if not fine_start(owner_started):
+        owner, owner_started = 0, ""
     commit_pane(
         fresh_state(),
         event,

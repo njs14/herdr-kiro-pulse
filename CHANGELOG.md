@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Kiro CLI 3.1 is supported. It runs each hook under `node` and `bun` below the outer `kiro-cli`, and there is no `kiro-cli-chat`.
+
+On a host without `/proc` start times, such as macOS, the hook cannot tell the outer `kiro-cli` start time to better than one second. It used to record that process as the pane's owner anyway, and after that a Stop never ended the turn, so the plugin's pane state stayed busy. The hook now records no owner in that case, and Stop ends the turn. A pane file saved by 0.1.0 can still hold such an owner. The next hook in that pane drops it. If that owner's process is gone, the hook also ends the busy row it held, because 0.1.0 never cleared a row on Stop. So a session that ended under 0.1.0 no longer keeps the pane busy after a new session's Stop. If that pid is still running, or the hook cannot tell, the row stays until a Stop for that session or until you delete the pane file. A `kiro-cli` that kept running across the upgrade needs no restart for this as long as its hook command still points at the upgraded script. If the upgrade put the plugin in a new directory, restart `kiro-cli` so it loads the new hook path.
+
+This restores the plugin's own pane state and its Herdr TUI reports. It does not change what the Herdr App shows on macOS: there the App status comes from herdr-core and Kiro, not from this plugin.
+
+The hook no longer runs `herdr report-agent` or `herdr release-agent` from an App terminal. Those are for a Herdr TUI pane only. A watcher in an App terminal with no owner process, which is every App terminal on macOS, no longer runs `herdr agent get` either. The Herdr TUI server does not know an App terminal id, and that watcher has nothing to paint, so it exits as it did when herdr answered that the agent was gone. It logs `watcher exit app no owner` instead of `watcher exit agent gone`, since herdr was not asked.
+
+If `kiro-cli` is killed in the middle of a turn that this version recorded on such a host, that session stays busy in the plugin's pane state. A later session in the same pane ends its own turns but does not clear the killed one. Deleting that pane's file under `$XDG_STATE_HOME/herdr-kiro` (by default `~/.local/state/herdr-kiro`) clears it.
+
+`PreCompact` and `PostCompact` are not registered. Kiro sends no Stop after `/compact` (seen live on Kiro 3.2.0), so a busy mark set there would never clear. If those events arrive anyway, the hook returns without reading or writing anything.
+
+Uninstall puts a file of yours back with the mode it had before install. It used to come back as 0600.
+
 ## 0.1.0
 
 herdr-kiro reports a Kiro CLI session to the Herdr App with OSC 7501 on the pane tty, and still reports the Herdr TUI with `herdr pane report-agent`. Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A saved `chat.agentEngine` of `v2` still selects V2. The hook writes `app=kiro-cli`. A status whose app is `kiro` is still this program.

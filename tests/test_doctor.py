@@ -12,7 +12,19 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import _state_guard
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 class _Timed:
@@ -37,13 +49,9 @@ class DoctorTests(unittest.TestCase):
         os.makedirs(settings)
         with open(os.path.join(settings, "cli.json"), "w", encoding="utf-8") as handle:
             json.dump({"chat.agentEngine": "v3", "chat.enableWorkflows": True}, handle)
-        self.env = os.environ.copy()
-        self.env["HOME"] = self.home
-        self.env["XDG_CONFIG_HOME"] = os.path.join(self.home, ".config")
-        self.env["XDG_STATE_HOME"] = os.path.join(self.home, ".local", "state")
+        self.env = _state_guard.scratch_env(self.home)
         self.env["PATH"] = self.bindir + os.pathsep + self.env.get("PATH", "")
         self.env.pop("HERDR_BIN_PATH", None)
-        self.env.pop("HERDR_SESSION", None)
 
     def write_herdr(self, remote="2026.09.19.1", server=True, plugin=True):
         server_body = '{"result":{"panes":[]}}' if server else '{"error":{"code":"server_not_running"}}'

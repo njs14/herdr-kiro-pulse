@@ -27,8 +27,20 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "prototype"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import _state_guard
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 def pinned_start(real, pins, asked):
@@ -251,6 +263,7 @@ class GraceTests(unittest.TestCase):
 
     def test_watcher_exits_after_idle_and_a_new_session_restarts_it(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         hook.update(path, lambda _state: None)
         reads = {"n": 0}
@@ -309,6 +322,7 @@ class GraceTests(unittest.TestCase):
 
     def test_reset_seq_does_not_fall_below_the_high_water(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def raise_seq(state):
@@ -334,6 +348,7 @@ class GraceTests(unittest.TestCase):
 
     def test_state_file_is_private(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def touch(state):
@@ -345,25 +360,17 @@ class GraceTests(unittest.TestCase):
 
     def test_log_stays_bounded_and_private(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "hook.log")
-        previous = os.environ.get("HERDR_KIRO_LOG")
-        os.environ["HERDR_KIRO_LOG"] = path
-        limit = hook.LOG_LIMIT
-        keep = hook.LOG_KEEP
-        hook.LOG_LIMIT = 400
-        hook.LOG_KEEP = 180
-        try:
+        with (
+            mock.patch.dict(os.environ, {"HERDR_KIRO_LOG": path}),
+            mock.patch.object(hook, "LOG_LIMIT", 400),
+            mock.patch.object(hook, "LOG_KEEP", 180),
+        ):
             for index in range(40):
                 hook.log(f"row {index} " + ("x" * 30))
             self.assertLess(os.path.getsize(path), 700)
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
-        finally:
-            hook.LOG_LIMIT = limit
-            hook.LOG_KEEP = keep
-            if previous is None:
-                os.environ.pop("HERDR_KIRO_LOG", None)
-            else:
-                os.environ["HERDR_KIRO_LOG"] = previous
 
     def test_shell_wrapper_reuses_the_ancestor_key(self):
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "prototype"))
@@ -371,10 +378,14 @@ class GraceTests(unittest.TestCase):
             f"import sys; sys.path.insert(0, {root!r}); import herdr_kiro_state as hook; print(hook.session_of({{}}))"
         )
         quoted = shlex.quote(code)
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        env = _state_guard.scratch_env(base)
 
         def run():
             completed = subprocess.run(
                 ["sh", "-c", "python3 -c " + quoted],
+                env=env,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -468,6 +479,7 @@ class GraceTests(unittest.TestCase):
 
     def test_release_authority_reports_success(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         hook.update(path, lambda _state: None)
         calls = []
@@ -476,7 +488,10 @@ class GraceTests(unittest.TestCase):
             calls.append(args)
             return True
 
-        with mock.patch.object(hook, "herdr", fake_herdr):
+        with (
+            mock.patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p9"}),
+            mock.patch.object(hook, "herdr", fake_herdr),
+        ):
             self.assertTrue(hook.release_authority("w1:p9", path))
         self.assertEqual(calls[0][0], "release-agent")
         self.assertIn("w1:p9", calls[0])
@@ -488,6 +503,7 @@ class GraceTests(unittest.TestCase):
 
     def test_missing_agent_is_a_blip_while_the_owner_lives(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         holder = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: holder.poll() is not None or holder.kill())
@@ -533,6 +549,7 @@ class GraceTests(unittest.TestCase):
 
     def test_dead_owner_with_banner_stops_the_watcher(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         reports = []
@@ -584,6 +601,7 @@ class GraceTests(unittest.TestCase):
 
     def test_session_end_then_process_exit_stops_the_watcher(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -664,6 +682,7 @@ class GraceTests(unittest.TestCase):
 
     def test_late_release_does_not_fire_after_the_slot_moves(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def seed(state):
@@ -684,6 +703,7 @@ class GraceTests(unittest.TestCase):
 
     def test_retiring_watcher_does_not_block_the_next_one(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def mark(state):
@@ -718,6 +738,7 @@ class GraceTests(unittest.TestCase):
             return None
 
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def seed(current):
@@ -893,6 +914,7 @@ class GraceTests(unittest.TestCase):
 
     def test_exit_prompt_text_does_not_release_a_live_owner(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -949,6 +971,7 @@ class GraceTests(unittest.TestCase):
 
     def test_no_owner_and_sustained_not_found_exits(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def seed(state):
@@ -978,53 +1001,68 @@ class GraceTests(unittest.TestCase):
 
     def test_later_busy_event_records_a_fine_token(self):
         # The first event can see no start token. A later busy event for the
-        # session already in busy has to store a fine one. sec: plus lstart
-        # is not that token.
-        calls = {"n": 0}
-
-        def hires(_pid):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return ""
-            return "100.000000"
-
-        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
-        with (
-            mock.patch.object(hook, "hires_start", hires),
-            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
-        ):
-            state = hook.apply_event(
-                hook.fresh_state(),
-                "SessionStart",
-                "sess",
-                1.0,
-                owner=50,
-                owner_started="10",
-            )
-            self.assertEqual(state["owner_ident"], {})
-            self.assertEqual(state["owners"].get("sess"), 50)
-            self.assertNotIn("owner_started", state)
-            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
+        # session already in busy stores the fine token main() read.
+        state = hook.apply_event(hook.fresh_state(), "SessionStart", "sess", 1.0, owner=50, owner_started="")
+        self.assertEqual(state["owner_ident"], {})
+        self.assertEqual(state["owners"].get("sess"), 50)
+        self.assertNotIn("owner_started", state)
+        state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="100.000000")
+        self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
+        state = hook.apply_event(state, "UserPromptSubmit", "sess", 3.0, owner=50, owner_started="200.000000")
         self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
 
-    def test_later_prompt_drops_a_sec_owner_ident(self):
-        # A stored sec: token is not the owner. The next prompt must not
-        # leave it in place. The live pid is not an exit.
+    def test_remember_owner_stores_no_start_coarser_than_one_second(self):
+        for started in ("sec:1794361688", "1794361688", "x"):
+            with self.subTest(started=started):
+                state = hook.fresh_state()
+                hook.remember_owner(state, "sess", 50, started)
+                self.assertEqual(state["owners"], {"sess": 50})
+                self.assertEqual(state["owner_ident"], {})
+
+    def test_a_hook_drops_a_saved_owner_with_no_fine_start(self):
+        # A stored sec: or empty token is not the owner. The hook fold drops
+        # that owner and keeps the busy row while the pid is not gone. A
+        # stored fine token stays, even when it no longer matches the live pid.
         state = hook.fresh_state()
-        state["busy"] = {"sess": 1.0}
-        state["owners"] = {"sess": 50}
-        state["owner_ident"] = {"sess": "sec:10"}
-        state["generation"] = 1
-        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
-        with (
-            mock.patch.object(hook, "hires_start", lambda _pid: "sec:10"),
-            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
-        ):
-            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
-            self.assertTrue(hook.alive(50))
-            self.assertEqual(hook.owner_phase(state), "weak")
-        self.assertIn("sess", state["busy"])
-        self.assertNotIn("sess", state["owner_ident"])
+        state["busy"] = {"sec": 1.0, "empty": 1.0, "fine": 1.0}
+        state["owners"] = {"sec": 50, "empty": 51, "fine": 52}
+        state["owner_ident"] = {"sec": "sec:10", "fine": "100.000000"}
+        with mock.patch.object(hook, "_pid_gone", return_value=False):
+            hook._forget_unpinned_owners(state)
+        self.assertEqual(state["owners"], {"fine": 52})
+        self.assertEqual(state["owner_ident"], {"fine": "100.000000"})
+        self.assertEqual(sorted(state["busy"]), ["empty", "fine", "sec"])
+
+    def test_forgetting_a_dead_unpinned_owner_drops_the_rows_it_held(self):
+        # Every named slot keyed to the dead pid ends. The aggregate row is
+        # shared by sessions with no id, so it stays. A live pid and a fine
+        # token keep their rows.
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        state = hook.fresh_state()
+        state["busy"] = {"old": 1.0, "old#2": 1.0, hook.AGGREGATE: 1.0, "live": 1.0, "fine": 1.0}
+        state["aggregate"] = 2
+        state["owners"] = {
+            "old": gone.pid,
+            "old#2": gone.pid,
+            hook.AGGREGATE: gone.pid,
+            "live": os.getpid(),
+            "fine": gone.pid,
+        }
+        state["owner_ident"] = {"fine": "100.000000"}
+        hook._forget_unpinned_owners(state)
+        self.assertEqual(sorted(state["busy"]), [hook.AGGREGATE, "fine", "live"])
+        self.assertEqual(state["owners"], {"fine": gone.pid})
+        self.assertEqual(state["aggregate"], 2)
+
+    def test_forgetting_an_unpinned_owner_kill_cannot_see_keeps_its_row(self):
+        state = hook.fresh_state()
+        state["busy"] = {"old": 1.0}
+        state["owners"] = {"old": 4242}
+        with mock.patch.object(hook.os, "kill", side_effect=PermissionError(errno.EPERM, "denied")):
+            hook._forget_unpinned_owners(state)
+        self.assertEqual(sorted(state["busy"]), ["old"])
+        self.assertEqual(state["owners"], {})
 
     def test_a_gone_chat_child_is_not_an_owner_exit(self):
         state = hook.fresh_state()
@@ -1053,6 +1091,7 @@ class GraceTests(unittest.TestCase):
 
     def test_explain_failure_under_a_banner_stays_working(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -1092,6 +1131,7 @@ class GraceTests(unittest.TestCase):
 
     def test_dead_owner_does_not_spin_when_another_watcher_holds_the_slot(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -1156,6 +1196,7 @@ class GraceTests(unittest.TestCase):
 
     def test_dead_slot_holder_exits_without_waiting_for_the_owner(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -1327,7 +1368,9 @@ class GraceTests(unittest.TestCase):
             path = hook.resolved_state_file("w1:p1")
             self.assertTrue(path.endswith(os.path.join("herdr-kiro", "w1_p1.json")))
             self.assertTrue(hook.inside_state_dir(path))
-            env = dict(os.environ)
+            env = _state_guard.scratch_env(os.path.join(base, "home"))
+            env["XDG_CONFIG_HOME"] = os.path.join(base, "config")
+            env["XDG_STATE_HOME"] = state_home
             script = os.path.abspath(hook.__file__)
             completed = subprocess.run(
                 [sys.executable, script, "--watch", "w1:p1", outside],
@@ -1508,7 +1551,10 @@ class GraceTests(unittest.TestCase):
                 calls.append(args)
                 return True
 
-            with mock.patch.object(hook, "herdr", fake_herdr):
+            with (
+                mock.patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}),
+                mock.patch.object(hook, "herdr", fake_herdr),
+            ):
                 self.assertTrue(hook.send_report("w1:p1", path, kind))
             return [args[args.index("--state") + 1] for args in calls]
 
@@ -1545,7 +1591,10 @@ class GraceTests(unittest.TestCase):
                     pane.release()
                 return True
 
-            with mock.patch.object(hook, "herdr", fake_herdr):
+            with (
+                mock.patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}),
+                mock.patch.object(hook, "herdr", fake_herdr),
+            ):
                 self.assertTrue(hook.send_report("w1:p1", path, "idle"))
                 self.assertTrue(
                     hook.finish_if_unchanged(
@@ -2187,7 +2236,7 @@ class PaneFindingTests(unittest.TestCase):
         self.assertEqual((write, ok), ("none", False))
         self.assertEqual(state["phase"], "proven")
 
-    def test_gone_proven_outer_still_writes_done_and_releases(self):
+    def test_gone_proven_outer_still_writes_done_and_drops_the_owner(self):
         events = ("Stop", "SessionEnd", "UserPromptSubmit")
         for event in events:
             with self.subTest(event=event):
@@ -2258,7 +2307,8 @@ class PaneFindingTests(unittest.TestCase):
             self.assertEqual(saved["owners"].get("sess"), proc.pid)
         else:
             self.assertIn(done, _read_pty(master))
-            self.assertIn(("release-agent", "t7"), [args[:2] for args in calls])
+            # An App terminal runs no report-agent or release-agent.
+            self.assertEqual(calls, [])
             self.assertNotIn("sess", saved.get("owners") or {})
         hook._close_held_fd()
 
@@ -3796,7 +3846,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
     no log. A read, a reload, and a generation mismatch are none results:
     they do not store the seq floor. A refresh changes exactly one value in
     that directory, the busy timestamp. Seq stays, generation stays, no
-    floor file is written, and no watcher pid or pid file appears.
+    floor file is written, and no watcher pid or pid file appears. A spawned
+    watcher gets a scratch HOME and config and no KIRO_HOOKS_DIR, and keeps
+    the cell's state dir and log.
     """
 
     _FLOOR = 50
@@ -3835,6 +3887,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
     def setUpClass(cls):
         cls._owner_pins = None
         cls.addClassCleanup(cls._stop_owner_pins)
+        cls.scratch_home = tempfile.mkdtemp()
+        cls.addClassCleanup(shutil.rmtree, cls.scratch_home, True)
         hook.begin_tick()
         master, slave = os.openpty()
         cls.live_master = master
@@ -4050,9 +4104,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
             "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(state_root, "hook.log"),
             "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
         }
-        os.environ.pop("HERDR_KIRO_LOG", None)
         hook.begin_tick()
         self._drain(self.live_master)
         file_start = self._file_start(start)
@@ -4083,7 +4137,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             expected_files[name] = raw
         clock = [self._BASE]
         with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             # A cached explain env would skip the pid sweep. Each cell explains fresh.
             if planted or mode == "chooser":
                 hook._EXPLAIN_ENV = None
@@ -4177,7 +4230,18 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return self._screen_for(event)
 
         if not watching:
+            checked = subprocess.Popen
+
+            def popen(args, *rest, **kwargs):
+                if kwargs.get("env") is None:
+                    env = _state_guard.scratch_env(self.scratch_home)
+                    # Keep the cell's state dir and log.
+                    env.update((key, os.environ[key]) for key in _state_guard.KEYS if key in os.environ)
+                    kwargs["env"] = env
+                return checked(args, *rest, **kwargs)
+
             with (
+                mock.patch.object(hook.subprocess, "Popen", popen),
                 mock.patch.object(hook.time, "time", now),
                 mock.patch.object(hook.time, "sleep", sleep),
                 mock.patch.object(sys, "argv", ["herdr-kiro", event]),
@@ -4297,17 +4361,15 @@ class PaneWriteMatrixTests(unittest.TestCase):
         painted = b"".join(osc)
         busy = len((book.state or {}).get("busy") or {})
         grace = float((book.state or {}).get("grace_until") or 0.0)
-        reported = self._report_after_hook(book, event, held["chosen"], held["ok"], held["release"])
+        # t7 is an App terminal, so the hook runs no herdr report and seq stays.
         if held["chosen"] not in ("none", "refresh") and not self._watcher_current(book.state):
             self._spawn_into(book)
         blocked_osc = b""
         if self._chooser_follow_up(book.state, held["chosen"]):
             blocked_osc = self._osc("blocked")
-            if reported == "":
-                book.apply(lambda state: self._bump_report(state, "blocked"), self._BASE)
-            reported = "blocked"
-        if held["chosen"] not in ("none", "refresh"):
-            self._record_hook_log(book, event, painted, busy, grace, reported, blocked_osc)
+        # A dropped unpinned owner is a write even when the table says none.
+        if held["chosen"] not in ("none", "refresh") or (held["chosen"] == "none" and self._forgot):
+            self._record_hook_log(book, event, painted, busy, grace, blocked_osc)
         return book.files, painted + blocked_osc
 
     def _expect_watch(self, start, event, prepared):
@@ -4380,6 +4442,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return [], quiet_since, reported, False
         screen = self._screen_for(event)
         painted = []
+        if hook.approval_text(screen) and reported == "blocked":
+            return painted, None, reported, False
         if hook.approval_text(screen):
             mark = {"write": "none", "ok": False}
 
@@ -4399,8 +4463,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if mark["write"] == "paint_blocked" and mark["ok"]:
                 self._arm_log(book, now)
                 self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-                book.apply(lambda state: self._bump_report(state, "blocked"), now)
-                self._note_report(book, now, "blocked")
+                reported = "blocked"
             return painted, None, reported, False
         banner = hook.workflow_banner_from(screen)
         if banner:
@@ -4447,8 +4510,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if mark["write"] == "working" and mark.get("ok"):
                 self._arm_log(book, now)
                 self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-                book.apply(lambda state: self._bump_report(state, "working"), now)
-                self._note_report(book, now, "working")
+                reported = "working"
             return painted, quiet_since, reported, False
         if action == "idle" and hook.screen_is_quiet(screen):
             if reported != "idle" and not stale:
@@ -4467,8 +4529,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 if mark["write"] == "done" and mark["ok"]:
                     self._arm_log(book, now)
                     self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-                    book.apply(lambda state: self._bump_report(state, "idle"), now)
-                    self._note_report(book, now, "idle")
                     self._note(book, now, "watcher idle")
                     reported = "idle"
                 else:
@@ -4478,7 +4538,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 self._clear_watch_slot(book)
                 return painted, quiet_since, reported, True
             return painted, quiet_since, reported, False
-        if action != "working":
+        # An App terminal runs no herdr report, so a paint counts as reported.
+        if action != "working" or action == reported:
             return painted, quiet_since, reported, False
 
         mark = {"write": "none"}
@@ -4498,8 +4559,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
         if mark["write"] == "working" and mark.get("ok"):
             self._arm_log(book, now)
             self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-            book.apply(lambda state: self._bump_report(state, "working"), now)
-            self._note_report(book, now, "working")
+            reported = "working"
         return painted, quiet_since, reported, False
 
     def _clear_watch_slot(self, book):
@@ -4516,27 +4576,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
         state["watcher_started"] = token
         return ""
 
-    def _bump_report(self, state, kind):
-        state["seq"] = int(state.get("seq") or 0) + 1
-        if kind == "idle":
-            state["grace_until"] = 0.0
-        return ""
-
-    def _report_after_hook(self, book, event, chosen, ok, release):
-        if self._pane_mode == "app_fail":
-            return ""
-        if book.state is None:
-            return ""
-        action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), False, self._BASE)
-        kind = hook.report_for("", action)
-        if chosen == "done" and ok and (event in hook.END_EVENTS or release):
-            book.apply(lambda state: self._bump_report(state, "idle"), self._BASE)
-            return "idle"
-        if kind == "working" and chosen == "working":
-            book.apply(lambda state: self._bump_report(state, "working"), self._BASE)
-            return "working"
-        return ""
-
     def _chooser_follow_up(self, state, chosen):
         if self._pane_mode != "chooser" or chosen in ("none", "refresh") or state is None:
             return False
@@ -4544,7 +4583,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return False
         return hook.pane_transition(hook.owner_phase(state), "blocked") == "paint_blocked"
 
-    def _record_hook_log(self, book, event, osc, busy, grace, reported, blocked_osc):
+    def _record_hook_log(self, book, event, osc, busy, grace, blocked_osc):
         lines = [f"event={event} session={hook.AGGREGATE} pane=t7 chain={hook.process_chain()}"]
         device = self._owner_device(self.live.pid)
         if osc and device:
@@ -4560,18 +4599,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             lines.append("watcher spawned pid=__SPAWN__")
         if blocked_osc and device:
             lines.append(f"osc blocked via {device}")
-        if reported and book.state is not None:
-            seq = int(book.state.get("seq") or 0)
-            lines.append(
-                "herdr report-agent t7 --source "
-                + hook.SOURCE
-                + " --agent "
-                + hook.AGENT
-                + " --state "
-                + reported
-                + " --seq "
-                + str(seq)
-            )
         self._append_log(book, lines)
 
     def _note(self, book, clock, line):
@@ -4609,23 +4636,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             where = self._owner_device(self.live.pid)
         if where:
             self._note(book, clock, f"osc {kind} via {where}")
-
-    def _note_report(self, book, clock, kind):
-        if book.state is None:
-            return
-        seq = int(book.state.get("seq") or 0)
-        self._note(
-            book,
-            clock,
-            "herdr report-agent t7 --source "
-            + hook.SOURCE
-            + " --agent "
-            + hook.AGENT
-            + " --state "
-            + kind
-            + " --seq "
-            + str(seq),
-        )
 
     def _done_via_held(self, state):
         if state is None:
@@ -4693,7 +4703,20 @@ class PaneWriteMatrixTests(unittest.TestCase):
             expected["hook.log"] = raw_log.replace(b"__SPAWN__", str(pid).encode())
         return ""
 
+    def _forget_unpinned(self, state):
+        """The hook drops a saved owner whose stored start is not a fine token."""
+        if hook._owner_held_unconfirmed(state):
+            return False
+        owners = state.get("owners") or {}
+        idents = state.get("owner_ident") or {}
+        dropped = [key for key in owners if not hook.fine_start(idents.get(key) or "")]
+        for key in dropped:
+            owners.pop(key, None)
+            idents.pop(key, None)
+        return bool(dropped)
+
     def _hook_fold(self, state, event):
+        self._forgot = self._forget_unpinned(state)
         owner_before = hook._pane_owner(state)
         ev = hook.choose_pane_event(state, event, hook.AGGREGATE)
         write, ok, osc = self._commit(state, ev, self._BASE, session=hook.AGGREGATE, hook_name=event)
@@ -5211,6 +5234,7 @@ class ScreenReadPurityTests(unittest.TestCase):
         self._reset_explain()
         env = {
             "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(state, "hook.log"),
             "HERDR_ENV": "",
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
@@ -5218,7 +5242,6 @@ class ScreenReadPurityTests(unittest.TestCase):
         }
         violations = []
         with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             with _WriteTracer() as tracer:
                 hook.explain(quiet)
                 hook.explain(hook.ScreenSnapshot(None, None))
@@ -5423,6 +5446,7 @@ class NoneReadWriteTests(unittest.TestCase):
             "HERDR_PANE_ID": "",
             "HC_TERMINAL_ID": "t7",
             "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "herdr-kiro", "hook.log"),
             "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
         }
 
@@ -5448,7 +5472,6 @@ class NoneReadWriteTests(unittest.TestCase):
                 mock.patch.object(hook.OwnerExitWatch, "wait", wait),
                 mock.patch.object(hook.time, "sleep", lambda _delay: None),
             ):
-                os.environ.pop("HERDR_KIRO_LOG", None)
                 os.environ.pop("HERDR_SESSION", None)
                 hook.begin_tick()
                 try:
@@ -5532,7 +5555,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.object(hook, "pane_text", screen),
             mock.patch.object(hook, "kiro_lineage", lambda: (proc.pid, token, 0, "")),
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             os.environ.pop("HERDR_SESSION", None)
             hook.begin_tick()
             self.assertEqual(hook.main(), 0)
@@ -5548,7 +5570,6 @@ class NoneReadWriteTests(unittest.TestCase):
         stale_name = "pids/424242"
         before = self._snapshot(state)
         with mock.patch.dict(os.environ, self._env(root), clear=False):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             write, ok = hook.commit_pane(
                 hook.fresh_state(),
                 "watcher_fault",
@@ -5580,7 +5601,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.object(hook, "kiro_lineage", lambda: (proc.pid, token, 0, "")),
             _WriteTracer() as tracer,
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             os.environ.pop("HERDR_SESSION", None)
             hook.begin_tick()
             self.assertEqual(hook.main(), 0)
@@ -5668,7 +5688,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.dict(os.environ, self._env(root), clear=False),
             _WriteTracer() as tracer,
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             write, ok = hook.commit_pane(
                 hook.fresh_state(),
                 "watcher_fault",
@@ -5787,7 +5806,6 @@ class NoneReadWriteTests(unittest.TestCase):
             mock.patch.object(hook, "_run_watch", side_effect=AssertionError("watch")),
             _WriteTracer() as tracer,
         ):
-            os.environ.pop("HERDR_KIRO_LOG", None)
             os.environ.pop("HERDR_SESSION", None)
             code = hook.main()
         after = self._snapshot(state)
@@ -5808,6 +5826,288 @@ class NoneReadWriteTests(unittest.TestCase):
             write, ok = hook.commit_pane(hook.fresh_state(), "watch", path="pane.json", pane="t7", watch=True)
         self.assertEqual(ran, [("t7", "pane.json")])
         self.assertEqual((write, ok), ("watch", True))
+
+
+class AppTerminalReportTests(unittest.TestCase):
+    """herdr report-agent and release-agent are for a Herdr TUI pane.
+
+    An App terminal (HC_TERMINAL_ID without HERDR_ENV=1) gets OSC only.
+    """
+
+    def test_reports_and_release_skip_herdr_in_an_app_terminal(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-app-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        calls = []
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+        ):
+            for kind in ("working", "idle", "blocked"):
+                self.assertTrue(hook.send_report("t7", path, kind))
+            self.assertTrue(hook.release_authority("t7", path))
+        self.assertEqual(calls, [])
+
+    def test_reports_and_release_reach_herdr_in_a_tui_pane(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        calls = []
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+        ):
+            self.assertTrue(hook.send_report("w1:p1", path, "idle"))
+            self.assertTrue(hook.release_authority("w1:p1", path))
+        self.assertEqual([args[:2] for args in calls], [("report-agent", "w1:p1"), ("release-agent", "w1:p1")])
+
+    def _no_owner_watch(self, env, lookup):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-app-watch-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        hook.update(path, lambda state: state.update({"seq": 1, "busy": {"sess": time.time()}}))
+        hits = {"n": 0}
+
+        def fake_wait(_self, _pids, _timeout):
+            hits["n"] += 1
+            if hits["n"] > 6:
+                raise AssertionError("watcher stayed up with no owner")
+            return False
+
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "agent_lookup", lookup),
+            mock.patch.object(hook, "pane_text", lambda _pane: "plain shell\n"),
+            mock.patch.object(hook, "herdr", side_effect=AssertionError("herdr")),
+            mock.patch.object(hook, "screen_view", lambda _text: {"state": "idle", "id": None, "ok": True}),
+            mock.patch.object(hook, "GONE_CONFIRM_SECS", 0),
+            mock.patch.object(hook.OwnerExitWatch, "wait", fake_wait),
+            mock.patch.object(hook, "log") as logged,
+        ):
+            hook.watch_loop(env["HERDR_PANE_ID"] or env["HC_TERMINAL_ID"], path)
+        with open(path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        return saved, [call.args[0] for call in logged.call_args_list]
+
+    def test_an_app_watcher_asks_herdr_nothing_and_still_exits_with_no_owner(self):
+        # The Herdr TUI server does not know an App terminal id. With no
+        # owner the watcher has nothing to paint, so it exits as before.
+        lookup = mock.Mock(side_effect=AssertionError("agent_lookup"))
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
+        saved, logged = self._no_owner_watch(env, lookup)
+        lookup.assert_not_called()
+        # herdr was not asked, so the log does not say it answered gone.
+        self.assertIn("watcher exit app no owner", logged)
+        self.assertNotIn("watcher exit agent gone", logged)
+        self.assertEqual(sorted(saved["busy"]), ["sess"])
+
+    def test_a_tui_watcher_still_asks_herdr_for_the_pane(self):
+        lookup = mock.Mock(return_value="gone")
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}
+        _saved, logged = self._no_owner_watch(env, lookup)
+        lookup.assert_called_with("w1:p1")
+        self.assertIn("watcher exit agent gone", logged)
+
+
+class KiroThreeOneLineageTests(unittest.TestCase):
+    """Kiro CLI 3.1 runs each hook under node <- bun <- kiro-cli.
+
+    There is no kiro-cli-chat. Where /proc start ticks are absent, as on
+    macOS, the outer kiro-cli start is sec: plus a whole-second lstart.
+    """
+
+    _NODE = 990003
+    _BUN = 990002
+    _ZSH = 990001
+    _PROMPT = "› ask a question or describe a task\n"
+
+    def _kiro(self):
+        proc = subprocess.Popen(
+            ["sleep", "60"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        chain = {
+            self._NODE: {"ppid": self._BUN, "lstart": "1794361689", "comm": "node"},
+            self._BUN: {"ppid": proc.pid, "lstart": "1794361689", "comm": "bun"},
+            proc.pid: {"ppid": self._ZSH, "lstart": "1794361688", "comm": "kiro-cli"},
+            self._ZSH: {"ppid": 1, "lstart": "1794361688", "comm": "zsh"},
+        }
+        root = tempfile.mkdtemp(prefix="herdr-kiro-31-")
+        self.addCleanup(shutil.rmtree, root, True)
+        return proc, chain, root
+
+    def _main(self, root, chain, event, calls=None, session="sess_31"):
+        payload = json.dumps({"cwd": root, "hook_event_name": event, "session_id": session})
+        sink = [] if calls is None else calls
+        env = {
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t5",
+            "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+            mock.patch.object(sys, "stdin", io.StringIO(payload)),
+            mock.patch.object(hook.os, "getppid", return_value=self._NODE),
+            mock.patch.object(hook, "process_snapshot", lambda pid: chain.get(int(pid))),
+            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
+            mock.patch.object(hook, "ensure_watcher", lambda *_args: None),
+            mock.patch.object(hook, "pane_text", lambda _pane: self._PROMPT),
+            mock.patch.object(hook, "screen_view", lambda _text: hook._unknown_screen()),
+            mock.patch.object(hook, "herdr", lambda *args: sink.append(args) or True),
+        ):
+            hook.begin_tick()
+            self.assertEqual(hook.main(), 0)
+
+    def _saved(self, root):
+        with open(os.path.join(root, "herdr-kiro", "t5.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_lineage_has_an_outer_and_no_chat_child(self):
+        proc, chain, _root = self._kiro()
+        with (
+            mock.patch.object(hook.os, "getppid", return_value=self._NODE),
+            mock.patch.object(hook, "process_snapshot", lambda pid: chain.get(int(pid))),
+        ):
+            self.assertEqual(hook.kiro_lineage(), (proc.pid, "1794361688", 0, ""))
+
+    def test_stop_ends_the_turn_when_the_outer_start_is_whole_seconds(self):
+        _proc, chain, root = self._kiro()
+        for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            self._main(root, chain, event)
+        self.assertIn("sess_31", self._saved(root)["busy"])
+        self._main(root, chain, "Stop")
+        saved = self._saved(root)
+        self.assertNotIn("sess_31", saved["busy"], saved)
+        with open(os.path.join(root, "hook.log"), encoding="utf-8") as handle:
+            self.assertIn("event=Stop", handle.read())
+
+    def _seed_unpinned_owner(self, root, pid, token):
+        # 0.1.0 recorded the outer kiro-cli with no fine start token. Its
+        # remember_owner left owner_ident empty; an older file can hold sec:.
+        directory = os.path.join(root, "herdr-kiro")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+
+        def seed(state):
+            state["busy"] = {"sess_31": time.time()}
+            state["owners"] = {"sess_31": pid}
+            state["owner_ident"] = {"sess_31": token} if token else {}
+            state["generation"] = 3
+
+        hook.update(os.path.join(directory, "t5.json"), seed)
+
+    def test_stop_clears_an_unpinned_owner_saved_before_the_upgrade(self):
+        for live in (True, False):
+            for token in ("", "sec:1794361688"):
+                with self.subTest(live=live, token=token):
+                    proc, chain, root = self._kiro()
+                    owner = proc.pid
+                    if not live:
+                        gone = subprocess.Popen(["true"])
+                        gone.wait()
+                        owner = gone.pid
+                    self._seed_unpinned_owner(root, owner, token)
+                    self._main(root, chain, "Stop")
+                    saved = self._saved(root)
+                    self.assertEqual(saved["busy"], {}, saved)
+                    self.assertEqual(saved["owners"], {}, saved)
+                    self.assertEqual(saved["owner_ident"], {}, saved)
+
+    def _ended_session_then_new_stop(self, seeded_pid, chain_extra=None):
+        # A 0.1.0 session ended, but its Stop never cleared the row. A new
+        # kiro-cli then runs a whole session in the same pane.
+        _proc, chain, root = self._kiro()
+        if chain_extra:
+            chain = {**chain, **chain_extra}
+        self._seed_unpinned_owner(root, seeded_pid, "")
+        for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+            self._main(root, chain, event, session="sess_new")
+        return self._saved(root)
+
+    def test_a_new_session_stop_ends_a_row_whose_unpinned_owner_is_dead(self):
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        saved = self._ended_session_then_new_stop(gone.pid)
+        self.assertEqual(saved["busy"], {}, saved)
+        self.assertEqual(saved["owners"], {}, saved)
+
+    def test_a_live_or_unreadable_unpinned_owner_keeps_its_row(self):
+        # A live pid may still be running that turn. A ps error is not death.
+        other = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        for extra in (None, {other.pid: {"error": True}}):
+            with self.subTest(snapshot="error" if extra else "missing"):
+                saved = self._ended_session_then_new_stop(other.pid, extra)
+                self.assertEqual(sorted(saved["busy"]), ["sess_31"], saved)
+                self.assertEqual(saved["owners"], {}, saved)
+
+    def test_an_app_terminal_stop_runs_no_herdr_report(self):
+        _proc, chain, root = self._kiro()
+        calls = []
+        for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+            self._main(root, chain, event, calls)
+        self.assertNotIn("sess_31", self._saved(root)["busy"])
+        self.assertEqual(calls, [])
+
+    def _compact_payload(self, root, event):
+        """The keys Kiro 3.2.0 sent live for /compact, with dummy values."""
+        payload = {
+            "compaction_id": "cmp_1",
+            "cwd": root,
+            "hook_event_name": event,
+            "message_count": 12,
+            "reason": "manual",
+            "session_id": "sess_31",
+            "transcript_path": os.path.join(root, "transcript.jsonl"),
+        }
+        if event == "PostCompact":
+            payload["summary"] = "dummy summary"
+            payload["summary_path"] = os.path.join(root, "summary.md")
+        return payload
+
+    def test_compaction_events_return_before_the_lineage(self):
+        # PreCompact and PostCompact are not registered. If Kiro sends one
+        # anyway, main() returns before kiro_lineage, commit_pane, and log.
+        root = tempfile.mkdtemp(prefix="herdr-kiro-compact-")
+        self.addCleanup(shutil.rmtree, root, True)
+        keys = ["compaction_id", "cwd", "hook_event_name", "message_count", "reason", "session_id", "transcript_path"]
+        expected = {"PreCompact": keys, "PostCompact": [*keys, "summary", "summary_path"]}
+        env = {
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t5",
+            "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
+        for event in ("PreCompact", "PostCompact"):
+            with self.subTest(event=event):
+                payload = self._compact_payload(root, event)
+                self.assertEqual(sorted(payload), sorted(expected[event]))
+                with (
+                    mock.patch.dict(os.environ, env, clear=False),
+                    mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+                    mock.patch.object(hook, "kiro_lineage", side_effect=AssertionError("kiro_lineage")) as lineage,
+                    mock.patch.object(hook, "commit_pane", side_effect=AssertionError("commit_pane")) as commit,
+                    mock.patch.object(hook, "log", side_effect=AssertionError("log")) as logged,
+                ):
+                    self.assertEqual(hook.main(), 0)
+                lineage.assert_not_called()
+                commit.assert_not_called()
+                logged.assert_not_called()
+        self.assertFalse(os.path.exists(os.path.join(root, "herdr-kiro", "t5.json")))
+        self.assertFalse(os.path.exists(os.path.join(root, "hook.log")))
 
 
 if __name__ == "__main__":

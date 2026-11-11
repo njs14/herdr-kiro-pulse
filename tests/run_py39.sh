@@ -13,5 +13,5 @@ if [ -z "$PY" ] || [ ! -x "$PY" ]; then
   exit 1
 fi
 cd "$ROOT"
-"$PY" -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc -q
+"$PY" -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc tests.test_state_guard -q
 echo "python39 $($PY -c 'import sys; print("%s.%s" % sys.version_info[:2])') ok"

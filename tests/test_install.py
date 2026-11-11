@@ -14,7 +14,19 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "prototype"))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import _state_guard
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 class InstallTests(unittest.TestCase):
@@ -35,10 +47,7 @@ class InstallTests(unittest.TestCase):
         previous = os.path.join(existing, "herdr-kiro.json")
         with open(previous, "w", encoding="utf-8") as handle:
             handle.write('{"version":"v1","hooks":[]}\n')
-        env = dict(os.environ)
-        env["HOME"] = home
-        env.pop("KIRO_HOOKS_DIR", None)
-        env.pop("HERDR_SESSION", None)
+        env = self._home_env(home)
         completed = subprocess.run(
             ["sh", os.path.join(weird, "install.sh")],
             env=env,
@@ -61,13 +70,7 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(handle.read(), b'{"version":"v1","hooks":[]}\n')
 
     def _home_env(self, home):
-        env = dict(os.environ)
-        env["HOME"] = home
-        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
-        env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
-        env.pop("KIRO_HOOKS_DIR", None)
-        env.pop("HERDR_SESSION", None)
-        return env
+        return _state_guard.scratch_env(home)
 
     def _files(self, home):
         found = {}
@@ -88,6 +91,7 @@ class InstallTests(unittest.TestCase):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as handle:
                 handle.write(payload)
+            os.chmod(path, 0o644)
         before = self._files(home)
         env = self._home_env(home)
         for _ in range(2):
@@ -115,6 +119,9 @@ class InstallTests(unittest.TestCase):
         after.pop(".config/herdr/.plugins.lock", None)
         before.pop(".config/herdr/.plugins.lock", None)
         self.assertEqual(after, before)
+        # A restored user file keeps the mode it had before install.
+        for relative in seed:
+            self.assertEqual(os.stat(os.path.join(home, relative)).st_mode & 0o777, 0o644, relative)
 
     def test_install_twice_then_uninstall_on_a_fresh_home(self):
         self._round_trip({})
@@ -167,11 +174,12 @@ class InstallTests(unittest.TestCase):
         script = os.path.join(base, "herdr_kiro_state.py")
         with open(script, "w", encoding="utf-8") as handle:
             handle.write("import time\ntime.sleep(60)\n")
-        watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file])
-        decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file])
-        wrong_start = subprocess.Popen([sys.executable, script, "--watch", "start", state_file])
-        wrong_uid = subprocess.Popen([sys.executable, script, "--watch", "uid", state_file])
-        reuse = subprocess.Popen([sys.executable, script, "--watch", "reuse", state_file])
+        fake_env = self._home_env(home)
+        watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file], env=fake_env)
+        decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file], env=fake_env)
+        wrong_start = subprocess.Popen([sys.executable, script, "--watch", "start", state_file], env=fake_env)
+        wrong_uid = subprocess.Popen([sys.executable, script, "--watch", "uid", state_file], env=fake_env)
+        reuse = subprocess.Popen([sys.executable, script, "--watch", "reuse", state_file], env=fake_env)
         self.addCleanup(lambda: watcher.poll() is not None or watcher.kill())
         self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
         self.addCleanup(lambda: wrong_start.poll() is not None or wrong_start.kill())
@@ -209,13 +217,9 @@ class InstallTests(unittest.TestCase):
         reuse_lstart = reuse_snap.get("lstart") or "1"
         with open(os.path.join(pid_dir, str(reuse.pid)), "w", encoding="utf-8") as handle:
             handle.write("{}\n{}\n{}\n".format(os.getuid(), "sec:" + str(reuse_lstart), reuse_ident["comm"]))
-        env = dict(os.environ)
-        env["HOME"] = home
-        env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
+        env = self._home_env(home)
         env["TMPDIR"] = tmp
         env["HERDR_KIRO_LEGACY_DIR"] = decoy_root
-        env.pop("KIRO_HOOKS_DIR", None)
-        env.pop("HERDR_SESSION", None)
         completed = subprocess.run(
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,

@@ -20,9 +20,21 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "prototype"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import _state_guard
 import herdr_kiro_osc as osc
 import herdr_kiro_state as hook
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
 
 
 def _reaped_pid():
@@ -287,8 +299,8 @@ class OscHookTests(unittest.TestCase):
                 loaded = json.load(handle)
             self.assertEqual(hook.commit_pane(loaded, "stop")[0], "done")
             self.assertTrue(hook.send_report("t7", path, "idle"))
-        self.assertEqual([args[args.index("--state") + 1] for args in calls], ["idle"])
-        self.assertNotIn("release-agent", [args[0] for args in calls])
+        # An App terminal gets OSC only. report-agent is the Herdr TUI's.
+        self.assertEqual(calls, [])
         got = _read_ready(master, 1.0)
         self.assertIn(b"\x1b]7501;state=done:app=kiro-cli\x1b\\", got)
         _stop(holder)
@@ -304,7 +316,7 @@ class OscHookTests(unittest.TestCase):
             calls.append(args)
             return True
 
-        env = {"HC_TERMINAL_ID": "", "HERDR_ENV": ""}
+        env = {"HC_TERMINAL_ID": "", "HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}
         with (
             mock.patch.object(hook, "herdr", fake_herdr),
             mock.patch.dict(os.environ, env, clear=False),
@@ -427,12 +439,11 @@ class OscHookTests(unittest.TestCase):
             mock.patch.object(hook.subprocess, "check_output", refuse_pane),
         ):
             # No recorded owner. working and done are not painted here.
-            # The herdr report still succeeds.
+            # An App terminal runs no herdr report, and that is not a miss.
             self.assertTrue(hook.send_report("t7", path, "idle"))
             self.assertTrue(hook.finish_if_unchanged("t7", path, {"generation": 1, "busy": {}}, "idle"))
         self.assertEqual(osc_writes, [])
-        self.assertEqual([row[row.index("--state") + 1] for row in calls if row[0] == "report-agent"], ["idle"])
-        self.assertFalse(any(row[0] == "release-agent" for row in calls))
+        self.assertEqual(calls, [])
 
     def test_a_second_idle_report_stays_done(self):
         master, slave = os.openpty()
@@ -578,8 +589,8 @@ class AppExitOscTests(unittest.TestCase):
         self.assertNotIn(("emit", path, "idle", ""), order)
         self.assertLess(order.index(("held",)), order.index(("clear", path)))
         self.assertIn(done, _read_ready(master, 0.5))
-        released = [(item[0], item[1][:2]) for item in order if item[0] == "herdr"]
-        self.assertIn(("herdr", ("release-agent", "t7")), released)
+        # An App terminal runs no release-agent. That is the Herdr TUI's.
+        self.assertEqual([item for item in order if item[0] == "herdr"], [])
         with open(path, encoding="utf-8") as handle:
             self.assertEqual(json.load(handle)["watcher"], 0)
 
