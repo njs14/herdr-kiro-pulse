@@ -98,6 +98,7 @@ class InstallTests(unittest.TestCase):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "wb") as handle:
                 handle.write(payload)
+            os.chmod(path, 0o644)
         before = self._files(home)
         env = self._home_env(home)
         for _ in range(2):
@@ -125,6 +126,9 @@ class InstallTests(unittest.TestCase):
         after.pop(".config/herdr/.plugins.lock", None)
         before.pop(".config/herdr/.plugins.lock", None)
         self.assertEqual(after, before)
+        # A restored user file keeps the mode it had before install.
+        for relative in seed:
+            self.assertEqual(os.stat(os.path.join(home, relative)).st_mode & 0o777, 0o644, relative)
 
     def test_install_twice_then_uninstall_on_a_fresh_home(self):
         self._round_trip({})
