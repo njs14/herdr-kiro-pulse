@@ -239,14 +239,9 @@ class InstallTests(unittest.TestCase):
         reuse_lstart = reuse_snap.get("lstart") or "1"
         with open(os.path.join(pid_dir, str(reuse.pid)), "w", encoding="utf-8") as handle:
             handle.write("{}\n{}\n{}\n".format(os.getuid(), "sec:" + str(reuse_lstart), reuse_ident["comm"]))
-        env = dict(os.environ)
-        env["HOME"] = home
-        env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
+        env = self._home_env(home)
         env["TMPDIR"] = tmp
         env["HERDR_KIRO_LEGACY_DIR"] = decoy_root
-        env.pop("HERDR_KIRO_LOG", None)
-        env.pop("KIRO_HOOKS_DIR", None)
-        env.pop("HERDR_SESSION", None)
         completed = subprocess.run(
             ["sh", os.path.join(ROOT, "uninstall.sh")],
             env=env,

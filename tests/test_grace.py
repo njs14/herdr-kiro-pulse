@@ -1365,6 +1365,7 @@ class GraceTests(unittest.TestCase):
             self.assertTrue(path.endswith(os.path.join("herdr-kiro", "w1_p1.json")))
             self.assertTrue(hook.inside_state_dir(path))
             env = dict(os.environ)
+            env["XDG_CONFIG_HOME"] = os.path.join(base, "config")
             script = os.path.abspath(hook.__file__)
             completed = subprocess.run(
                 [sys.executable, script, "--watch", "w1:p1", outside],
