@@ -5894,6 +5894,37 @@ class KiroThreeOneLineageTests(unittest.TestCase):
         with open(os.path.join(root, "hook.log"), encoding="utf-8") as handle:
             self.assertIn("event=Stop", handle.read())
 
+    def _seed_unpinned_owner(self, root, pid, token):
+        # 0.1.0 recorded the outer kiro-cli with no fine start token. Its
+        # remember_owner left owner_ident empty; an older file can hold sec:.
+        directory = os.path.join(root, "herdr-kiro")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+
+        def seed(state):
+            state["busy"] = {"sess_31": time.time()}
+            state["owners"] = {"sess_31": pid}
+            state["owner_ident"] = {"sess_31": token} if token else {}
+            state["generation"] = 3
+
+        hook.update(os.path.join(directory, "t5.json"), seed)
+
+    def test_stop_clears_an_unpinned_owner_saved_before_the_upgrade(self):
+        for live in (True, False):
+            for token in ("", "sec:1794361688"):
+                with self.subTest(live=live, token=token):
+                    proc, chain, root = self._kiro()
+                    owner = proc.pid
+                    if not live:
+                        gone = subprocess.Popen(["true"])
+                        gone.wait()
+                        owner = gone.pid
+                    self._seed_unpinned_owner(root, owner, token)
+                    self._main(root, chain, "Stop")
+                    saved = self._saved(root)
+                    self.assertEqual(saved["busy"], {}, saved)
+                    self.assertEqual(saved["owners"], {}, saved)
+                    self.assertEqual(saved["owner_ident"], {}, saved)
+
     def test_an_app_terminal_stop_runs_no_herdr_report(self):
         _proc, chain, root = self._kiro()
         calls = []
