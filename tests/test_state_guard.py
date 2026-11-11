@@ -196,9 +196,9 @@ class OsRunTests(unittest.TestCase):
 
     def test_spawn_is_rejected(self):
         with self.assertRaises(AssertionError):
-            os.spawnv(os.P_WAIT, "/usr/bin/true", ["true"])
+            os.spawnv(os.P_WAIT, "/usr/bin/true", ["true"])  # ty: ignore[deprecated]
         with self.assertRaises(AssertionError):
-            os.spawnvpe(os.P_WAIT, "true", ["true"], dict(os.environ))
+            os.spawnvpe(os.P_WAIT, "true", ["true"], dict(os.environ))  # ty: ignore[deprecated]
 
     def test_exec_in_a_forked_child_exits_the_child(self):
         # Exec in a child, so an unguarded exec replaces the child and not this test run.
