@@ -5807,6 +5807,42 @@ class NoneReadWriteTests(unittest.TestCase):
         self.assertEqual((write, ok), ("watch", True))
 
 
+class AppTerminalReportTests(unittest.TestCase):
+    """herdr report-agent and release-agent are for a Herdr TUI pane.
+
+    An App terminal (HC_TERMINAL_ID without HERDR_ENV=1) gets OSC only.
+    """
+
+    def test_reports_and_release_skip_herdr_in_an_app_terminal(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-app-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "t7.json")
+        calls = []
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+        ):
+            for kind in ("working", "idle", "blocked"):
+                self.assertTrue(hook.send_report("t7", path, kind))
+            self.assertTrue(hook.release_authority("t7", path))
+        self.assertEqual(calls, [])
+
+    def test_reports_and_release_reach_herdr_in_a_tui_pane(self):
+        directory = tempfile.mkdtemp(prefix="herdr-kiro-tui-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "pane.json")
+        calls = []
+        env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(hook, "herdr", lambda *args: calls.append(args) or True),
+        ):
+            self.assertTrue(hook.send_report("w1:p1", path, "idle"))
+            self.assertTrue(hook.release_authority("w1:p1", path))
+        self.assertEqual([args[:2] for args in calls], [("report-agent", "w1:p1"), ("release-agent", "w1:p1")])
+
+
 class KiroThreeOneLineageTests(unittest.TestCase):
     """Kiro CLI 3.1 runs each hook under node <- bun <- kiro-cli.
 
@@ -5838,8 +5874,9 @@ class KiroThreeOneLineageTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         return proc, chain, root
 
-    def _main(self, root, chain, event):
+    def _main(self, root, chain, event, calls=None):
         payload = json.dumps({"cwd": root, "hook_event_name": event, "session_id": "sess_31"})
+        sink = [] if calls is None else calls
         env = {
             "HERDR_ENV": "",
             "HERDR_PANE_ID": "",
@@ -5858,7 +5895,7 @@ class KiroThreeOneLineageTests(unittest.TestCase):
             mock.patch.object(hook, "ensure_watcher", lambda *_args: None),
             mock.patch.object(hook, "pane_text", lambda _pane: self._PROMPT),
             mock.patch.object(hook, "screen_view", lambda _text: hook._unknown_screen()),
-            mock.patch.object(hook, "herdr", lambda *_args: True),
+            mock.patch.object(hook, "herdr", lambda *args: sink.append(args) or True),
         ):
             hook.begin_tick()
             self.assertEqual(hook.main(), 0)
@@ -5885,6 +5922,14 @@ class KiroThreeOneLineageTests(unittest.TestCase):
         self.assertNotIn("sess_31", saved["busy"], saved)
         with open(os.path.join(root, "hook.log"), encoding="utf-8") as handle:
             self.assertIn("event=Stop", handle.read())
+
+    def test_an_app_terminal_stop_runs_no_herdr_report(self):
+        _proc, chain, root = self._kiro()
+        calls = []
+        for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+            self._main(root, chain, event, calls)
+        self.assertNotIn("sess_31", self._saved(root)["busy"])
+        self.assertEqual(calls, [])
 
     def test_compaction_events_do_not_touch_the_pane(self):
         _proc, chain, root = self._kiro()
