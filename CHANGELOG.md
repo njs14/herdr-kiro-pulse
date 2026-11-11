@@ -4,7 +4,7 @@
 
 Kiro CLI 3.1 is supported. It runs each hook under `node` and `bun` below the outer `kiro-cli`, and there is no `kiro-cli-chat`.
 
-On a host without `/proc` start times, such as macOS, the hook cannot tell the outer `kiro-cli` start time to better than one second. It used to record that process as the pane's owner anyway, and after that a Stop never ended the turn, so the plugin's pane state stayed busy. The hook now records no owner in that case, and Stop ends the turn. A pane file saved by 0.1.0 can still hold such an owner. The next hook in that pane drops it, so a `kiro-cli` that kept running across the upgrade does not need a restart.
+On a host without `/proc` start times, such as macOS, the hook cannot tell the outer `kiro-cli` start time to better than one second. It used to record that process as the pane's owner anyway, and after that a Stop never ended the turn, so the plugin's pane state stayed busy. The hook now records no owner in that case, and Stop ends the turn. A pane file saved by 0.1.0 can still hold such an owner. The next hook in that pane drops it. A `kiro-cli` that kept running across the upgrade needs no restart for this as long as its hook command still points at the upgraded script. If the upgrade put the plugin in a new directory, restart `kiro-cli` so it loads the new hook path.
 
 This restores the plugin's own pane state and its Herdr TUI reports. It does not change what the Herdr App shows on macOS: there the App status comes from herdr-core and Kiro, not from this plugin.
 
