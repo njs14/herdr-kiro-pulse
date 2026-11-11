@@ -200,13 +200,16 @@ class OsRunTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             os.spawnvpe(os.P_WAIT, "true", ["true"], dict(os.environ))
 
-    def test_exec_is_rejected(self):
+    def test_exec_in_a_forked_child_exits_the_child(self):
         # Exec in a child, so an unguarded exec replaces the child and not this test run.
+        # A refused exec must end the child: raising would unwind it into a second copy of the test run.
         for name in ("execv", "execve", "execvp", "execl"):
             with self.subTest(name=name):
                 pid = os.fork()
                 if pid == 0:
                     try:
+                        devnull = os.open(os.devnull, os.O_WRONLY)
+                        os.dup2(devnull, 2)
                         call = getattr(os, name)
                         if name == "execve":
                             call("/usr/bin/true", ["true"], dict(os.environ))
@@ -219,7 +222,21 @@ class OsRunTests(unittest.TestCase):
                     finally:
                         os._exit(98)
                 _pid, status = os.waitpid(pid, 0)
-                self.assertEqual(os.waitstatus_to_exitcode(status), 99)
+                self.assertEqual(os.waitstatus_to_exitcode(status), _state_guard.REFUSED_IN_CHILD)
+
+    def test_posix_spawn_in_a_forked_child_exits_the_child(self):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, 2)
+                os.posix_spawn("/bin/sh", ["sh", "-c", "true"], dict(os.environ))
+            except AssertionError:
+                os._exit(99)
+            finally:
+                os._exit(98)
+        _pid, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), _state_guard.REFUSED_IN_CHILD)
 
     def test_posix_spawn_of_a_shell_with_the_inherited_env_is_rejected(self):
         for spawn in (os.posix_spawn, os.posix_spawnp):
