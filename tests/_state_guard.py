@@ -11,10 +11,12 @@ KIRO_HOOKS_DIR at a temp dir. The rest of the herdr config dir holds the live
 server socket, so it is not watched.
 
 While a module is isolated, subprocess.Popen, and so run, call, and
-check_output, refuses a shell or script run whose env could reach those dirs.
+check_output, refuses a shell or script run whose env could reach those dirs. A
+shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run.
 """
 
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -48,6 +50,13 @@ HOOK_ROOTS = tuple(sorted({os.path.join(REAL_HOME, ".kiro")} | set(_hooks[1:])))
 
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 SCRIPTS = {"herdr_kiro_state.py", "herdr_kiro_doctor.py"}
+# Commands that run the next word as the command, with the options that take a value.
+WRAPPERS = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-P"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "exec": {"-a"},
+}
 
 
 def _real(path):
@@ -102,13 +111,48 @@ def _argv(args):
     return [os.fsdecode(item) for item in args]
 
 
+def _is_assignment(word):
+    name, eq, _value = word.partition("=")
+    return bool(eq) and name.replace("_", "a").isalnum() and not name[0].isdigit()
+
+
+def _command(argv):
+    """argv without leading VAR=val words and env, nice, timeout, or exec wrappers and their options."""
+    argv = list(argv)
+    while argv:
+        if _is_assignment(argv[0]):
+            argv.pop(0)
+            continue
+        name = os.path.basename(argv.pop(0))
+        if name not in WRAPPERS:
+            return [name, *argv]
+        while argv and argv[0].startswith("-") and argv[0] != "-":
+            option = argv.pop(0)
+            if option == "--":
+                break
+            if option in ("-S", "--split-string") and argv:
+                argv[:1] = shlex.split(argv[0])
+            elif option.startswith("-S") and not option.startswith("--"):
+                argv[:0] = shlex.split(option[2:])
+            elif option.startswith("--split-string="):
+                argv[:0] = shlex.split(option.partition("=")[2])
+            elif option in WRAPPERS[name] and argv:
+                argv.pop(0)
+        if argv and argv[0] == "-":
+            argv.pop(0)
+        if name == "timeout" and argv:
+            argv.pop(0)
+    return argv
+
+
 def _is_script_run(args, shell):
     if shell:
         return True
     argv = _argv(args)
     if not argv:
         return False
-    if os.path.basename(argv[0]) in SHELLS:
+    command = _command(argv)
+    if command and os.path.basename(command[0]) in SHELLS:
         return True
     return any(item.endswith(".sh") or os.path.basename(item) in SCRIPTS for item in argv)
 
