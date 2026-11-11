@@ -8,7 +8,7 @@ On a host without `/proc` start times, such as macOS, the hook cannot tell the o
 
 This restores the plugin's own pane state and its Herdr TUI reports. It does not change what the Herdr App shows on macOS: there the App status comes from herdr-core and Kiro, not from this plugin.
 
-The hook no longer runs `herdr report-agent` or `herdr release-agent` from an App terminal. Those are for a Herdr TUI pane only. A watcher in an App terminal with no owner process, which is every App terminal on macOS, no longer runs `herdr agent get` either. The Herdr TUI server does not know an App terminal id, and that watcher has nothing to paint, so it exits as it did when herdr answered that the agent was gone.
+The hook no longer runs `herdr report-agent` or `herdr release-agent` from an App terminal. Those are for a Herdr TUI pane only. A watcher in an App terminal with no owner process, which is every App terminal on macOS, no longer runs `herdr agent get` either. The Herdr TUI server does not know an App terminal id, and that watcher has nothing to paint, so it exits as it did when herdr answered that the agent was gone. It logs `watcher exit app no owner` instead of `watcher exit agent gone`, since herdr was not asked.
 
 If `kiro-cli` is killed in the middle of a turn that this version recorded on such a host, that session stays busy in the plugin's pane state. A later session in the same pane ends its own turns but does not clear the killed one. Deleting that pane's file under `$XDG_STATE_HOME/herdr-kiro` (by default `~/.local/state/herdr-kiro`) clears it.
 

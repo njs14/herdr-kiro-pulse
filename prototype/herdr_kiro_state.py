@@ -3201,8 +3201,12 @@ def _run_watch(pane: str, path: str) -> None:
                 return
             # The Herdr TUI server does not know an App terminal id. With no
             # pane owner an App watcher has nothing to paint, so it exits as
-            # it would on gone. An App owner keeps herdr's answer.
-            looked = "gone" if not in_tui() and _pane_owner(state) is None else agent_lookup(pane)
+            # it would on gone, but logs why, since herdr was not asked. An
+            # App owner keeps herdr's answer.
+            if not in_tui() and _pane_owner(state) is None:
+                looked, gone_reason = "gone", "app no owner"
+            else:
+                looked, gone_reason = agent_lookup(pane), "agent gone"
             now = time.time()
             current_owners = []
             for owner in (state.get("owners") or {}).values():
@@ -3246,7 +3250,7 @@ def _run_watch(pane: str, path: str) -> None:
                 if gone_confirmed(gone_since, now, gone_hits):
                     # An empty owner table is not an outer exit. Do not release.
                     clear_watcher(path)
-                    log("watcher exit agent gone")
+                    log(f"watcher exit {gone_reason}")
                     return
             else:
                 gone_since = None
