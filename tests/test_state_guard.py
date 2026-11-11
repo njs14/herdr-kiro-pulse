@@ -26,6 +26,12 @@ def tearDownModule():
 
 
 REAL_HOME = os.path.expanduser("~")
+# For each written dir: the real top dir it sits under, and a link one level below a scratch top dir.
+DEEP_LINKS = {
+    "hooks": (".kiro", os.path.join(".kiro", "hooks")),
+    "config": (".config", os.path.join("xc", "herdr")),
+    "state": (os.path.join(".local", "state"), os.path.join("xs", "herdr-kiro")),
+}
 
 
 class RunCheckTests(unittest.TestCase):
@@ -194,6 +200,38 @@ class RunCheckTests(unittest.TestCase):
             with self.subTest(name=name):
                 own = tempfile.mkdtemp(dir=self.base)
                 self.assertIsNone(_state_guard.scratch_env_problem(self.symlinked_home(name, own)))
+
+    def deep_linked_env(self, kind, target):
+        """A scratch HOME, XDG_CONFIG_HOME, and XDG_STATE_HOME whose top dirs are real dirs, with one link below them."""
+        home = tempfile.mkdtemp(dir=self.base)
+        link = os.path.join(home, DEEP_LINKS[kind][1])
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+        return self.scratch(
+            {
+                "HOME": home,
+                "XDG_CONFIG_HOME": os.path.join(home, "xc"),
+                "XDG_STATE_HOME": os.path.join(home, "xs"),
+            }
+        )
+
+    def test_a_link_below_the_top_dirs_to_the_real_dirs_is_rejected(self):
+        real = self.fake_real_home()
+        for kind, (root, below) in DEEP_LINKS.items():
+            with self.subTest(kind=kind):
+                target = os.path.join(real[root], os.path.basename(below))
+                os.makedirs(target, exist_ok=True)
+                env = self.deep_linked_env(kind, target)
+                self.assertIsNotNone(_state_guard.scratch_env_problem(env))
+                with self.assertRaises(AssertionError):
+                    subprocess.run(["sh", "-c", "true"], env=env, check=False)
+
+    def test_a_link_below_the_top_dirs_to_other_scratch_dirs_runs(self):
+        self.fake_real_home()
+        for kind in DEEP_LINKS:
+            with self.subTest(kind=kind):
+                own = tempfile.mkdtemp(dir=self.base)
+                self.assertIsNone(_state_guard.scratch_env_problem(self.deep_linked_env(kind, own)))
 
     def test_relative_paths_are_rejected(self):
         # The guard resolves paths against this process's cwd, not the child's cwd=, so it cannot vouch for them.
