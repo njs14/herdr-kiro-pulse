@@ -84,6 +84,10 @@ def scratch_env_problem(env):
     """Say why a script env could reach the real home, herdr config, state, or hooks, or return None."""
     if env is None:
         return "env is None, so the script inherits this process env"
+    for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "KIRO_HOOKS_DIR"):
+        value = env.get(key)
+        if value and not os.path.isabs(value):
+            return f"{key} {value} is relative, so it resolves against the child's cwd, which this check cannot see"
     home = env.get("HOME")
     if not home:
         return "HOME is not set"
