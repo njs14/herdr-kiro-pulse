@@ -2,7 +2,19 @@
 
 ## Unreleased
 
-Kiro CLI 3.1 is supported. It runs each hook under `node` and `bun` below the outer `kiro-cli`, and there is no `kiro-cli-chat`. Where `/proc` start ticks are absent, as on macOS, that outer start is `sec:` plus a whole-second lstart. The hook used to record that weak owner, and every later Stop was none, so the turn never ended. A hook now records no owner when its start is not a fine token, and Stop ends the slot. `PreCompact` and `PostCompact` are not registered. The hook ignores them, so compaction does not change the pane.
+Kiro CLI 3.1 is supported. It runs each hook under `node` and `bun` below the outer `kiro-cli`, and there is no `kiro-cli-chat`.
+
+On a host without `/proc` start times, such as macOS, the hook cannot tell the outer `kiro-cli` start time to better than one second. It used to record that process as the pane's owner anyway, and after that a Stop never ended the turn, so the plugin's pane state stayed busy. The hook now records no owner in that case, and Stop ends the turn. A pane file saved by 0.1.0 can still hold such an owner. The next hook in that pane drops it, so a `kiro-cli` that kept running across the upgrade does not need a restart.
+
+This restores the plugin's own pane state and its Herdr TUI reports. It does not change what the Herdr App shows on macOS: there the App status comes from herdr-core and Kiro, not from this plugin.
+
+The hook no longer runs `herdr report-agent` or `herdr release-agent` from an App terminal. Those are for a Herdr TUI pane only.
+
+If `kiro-cli` is killed in the middle of a turn on such a host, that session stays busy in the plugin's pane state. A later session in the same pane ends its own turns but does not clear the killed one. Deleting that pane's file under `$XDG_STATE_HOME/herdr-kiro` (by default `~/.local/state/herdr-kiro`) clears it.
+
+`PreCompact` and `PostCompact` are not registered. Kiro sends no Stop after `/compact` (seen live on Kiro 3.2.0), so a busy mark set there would never clear. If those events arrive anyway, the hook returns without reading or writing anything.
+
+Uninstall puts a file of yours back with the mode it had before install. It used to come back as 0600.
 
 ## 0.1.0
 
