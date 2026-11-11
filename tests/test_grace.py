@@ -5878,7 +5878,9 @@ class AppTerminalReportTests(unittest.TestCase):
         env = {"HC_TERMINAL_ID": "t7", "HERDR_ENV": "", "HERDR_PANE_ID": ""}
         saved, logged = self._no_owner_watch(env, lookup)
         lookup.assert_not_called()
-        self.assertIn("watcher exit agent gone", logged)
+        # herdr was not asked, so the log does not say it answered gone.
+        self.assertIn("watcher exit app no owner", logged)
+        self.assertNotIn("watcher exit agent gone", logged)
         self.assertEqual(sorted(saved["busy"]), ["sess"])
 
     def test_a_tui_watcher_still_asks_herdr_for_the_pane(self):
