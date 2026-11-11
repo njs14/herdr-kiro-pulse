@@ -25,9 +25,11 @@ always raise. In a forked child a refusal exits the child instead.
 Out of scope, and caught only by the snapshot at module teardown: a separate
 Python (python -c, a script, multiprocessing spawn) and what it runs, ctypes
 calls into libc, overrides inside a shell string (sh -c 'HOME=... ...', or a
-prefix in a shell=True command), wrappers not listed below (setsid, nohup,
-stdbuf), a shell reached through a renamed symlink, and a Popen executable=
-that differs from argv[0] (only the posix_spawn path checks the real path).
+prefix in a shell=True command), wrappers not in WRAPPERS (setsid, nohup,
+stdbuf), abbreviated long options (env --split, nice --adj, timeout --sig) and
+GNU -S escapes such as \\_, a shell reached through a renamed symlink, and a
+Popen executable= that differs from argv[0] (only the posix_spawn path checks
+the real path).
 """
 
 import os
