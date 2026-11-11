@@ -5810,5 +5810,94 @@ class NoneReadWriteTests(unittest.TestCase):
         self.assertEqual((write, ok), ("watch", True))
 
 
+class KiroThreeOneLineageTests(unittest.TestCase):
+    """Kiro CLI 3.1 runs each hook under node <- bun <- kiro-cli.
+
+    There is no kiro-cli-chat. Where /proc start ticks are absent, as on
+    macOS, the outer kiro-cli start is sec: plus a whole-second lstart.
+    """
+
+    _NODE = 990003
+    _BUN = 990002
+    _ZSH = 990001
+    _PROMPT = "› ask a question or describe a task\n"
+
+    def _kiro(self):
+        proc = subprocess.Popen(
+            ["sleep", "60"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+        chain = {
+            self._NODE: {"ppid": self._BUN, "lstart": "1794361689", "comm": "node"},
+            self._BUN: {"ppid": proc.pid, "lstart": "1794361689", "comm": "bun"},
+            proc.pid: {"ppid": self._ZSH, "lstart": "1794361688", "comm": "kiro-cli"},
+            self._ZSH: {"ppid": 1, "lstart": "1794361688", "comm": "zsh"},
+        }
+        root = tempfile.mkdtemp(prefix="herdr-kiro-31-")
+        self.addCleanup(shutil.rmtree, root, True)
+        return proc, chain, root
+
+    def _main(self, root, chain, event):
+        payload = json.dumps({"cwd": root, "hook_event_name": event, "session_id": "sess_31"})
+        env = {
+            "HERDR_ENV": "",
+            "HERDR_PANE_ID": "",
+            "HC_TERMINAL_ID": "t5",
+            "XDG_STATE_HOME": root,
+            "HERDR_KIRO_LOG": os.path.join(root, "hook.log"),
+            "HERDR_BIN_PATH": os.path.join(root, "missing-herdr"),
+        }
+        with (
+            mock.patch.dict(os.environ, env, clear=False),
+            mock.patch.object(sys, "argv", ["herdr-kiro", event]),
+            mock.patch.object(sys, "stdin", io.StringIO(payload)),
+            mock.patch.object(hook.os, "getppid", return_value=self._NODE),
+            mock.patch.object(hook, "process_snapshot", lambda pid: chain.get(int(pid))),
+            mock.patch.object(hook, "_linux_start_ticks", return_value=None),
+            mock.patch.object(hook, "ensure_watcher", lambda *_args: None),
+            mock.patch.object(hook, "pane_text", lambda _pane: self._PROMPT),
+            mock.patch.object(hook, "screen_view", lambda _text: hook._unknown_screen()),
+            mock.patch.object(hook, "herdr", lambda *_args: True),
+        ):
+            hook.begin_tick()
+            self.assertEqual(hook.main(), 0)
+
+    def _saved(self, root):
+        with open(os.path.join(root, "herdr-kiro", "t5.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_lineage_has_an_outer_and_no_chat_child(self):
+        proc, chain, _root = self._kiro()
+        with (
+            mock.patch.object(hook.os, "getppid", return_value=self._NODE),
+            mock.patch.object(hook, "process_snapshot", lambda pid: chain.get(int(pid))),
+        ):
+            self.assertEqual(hook.kiro_lineage(), (proc.pid, "1794361688", 0, ""))
+
+    def test_stop_ends_the_turn_when_the_outer_start_is_whole_seconds(self):
+        _proc, chain, root = self._kiro()
+        for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"):
+            self._main(root, chain, event)
+        self.assertIn("sess_31", self._saved(root)["busy"])
+        self._main(root, chain, "Stop")
+        saved = self._saved(root)
+        self.assertNotIn("sess_31", saved["busy"], saved)
+        with open(os.path.join(root, "hook.log"), encoding="utf-8") as handle:
+            self.assertIn("event=Stop", handle.read())
+
+    def test_compaction_events_do_not_touch_the_pane(self):
+        _proc, chain, root = self._kiro()
+        for event in ("SessionStart", "UserPromptSubmit"):
+            self._main(root, chain, event)
+        before = self._saved(root)
+        for event in ("PreCompact", "PostCompact"):
+            self._main(root, chain, event)
+        self.assertEqual(self._saved(root), before)
+
+
 if __name__ == "__main__":
     unittest.main()
