@@ -14,9 +14,16 @@ While a module is isolated, subprocess.Popen, and so run, call, and
 check_output, refuses a shell or script run whose env could reach those dirs. A
 shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run,
 and the env checked is the one it gets after those words, env -S, env -u, and
-env -i are applied. os.posix_spawn and os.posix_spawnp get the same check, and os.system, os.exec*,
-and os.spawn* always raise. In a forked child a refusal exits the child instead.
-A child Python that calls them is not checked.
+env -i are applied. The hooks, agent-detection, and state dirs that env leads
+to are resolved through any symlink on the way. os.posix_spawn and
+os.posix_spawnp get the same check, and os.system, os.exec*, and os.spawn*
+always raise. In a forked child a refusal exits the child instead.
+
+Out of scope, and caught only by the snapshot at module teardown: a separate
+Python (python -c, a script, multiprocessing spawn) and what it runs, ctypes
+calls into libc, overrides inside a shell string (sh -c 'HOME=... ...', or a
+prefix in a shell=True command), wrappers not listed below (setsid, nohup,
+stdbuf), and a shell reached through a renamed symlink.
 """
 
 import os
@@ -117,6 +124,14 @@ def scratch_env_problem(env):
     hooks = env.get("KIRO_HOOKS_DIR")
     if hooks and _inside(hooks, HOOK_ROOTS):
         return f"KIRO_HOOKS_DIR {hooks} is the real Kiro hooks dir"
+    # realpath resolves a link anywhere along these paths, even before the last dir exists.
+    for written, roots in (
+        (hooks or os.path.join(home, ".kiro", "hooks"), REAL_HOOK_DIRS + HOOK_ROOTS),
+        (os.path.join(config, "herdr", "agent-detection"), REAL_CONFIG_DIRS + CONFIG_BASES),
+        (os.path.join(state, "herdr-kiro"), REAL_DIRS + STATE_BASES),
+    ):
+        if _inside(written, roots):
+            return f"{written} resolves to {_real(written)}, inside the real dirs"
     return None
 
 
