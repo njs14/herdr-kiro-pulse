@@ -263,6 +263,7 @@ class GraceTests(unittest.TestCase):
 
     def test_watcher_exits_after_idle_and_a_new_session_restarts_it(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         hook.update(path, lambda _state: None)
         reads = {"n": 0}
@@ -321,6 +322,7 @@ class GraceTests(unittest.TestCase):
 
     def test_reset_seq_does_not_fall_below_the_high_water(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def raise_seq(state):
@@ -346,6 +348,7 @@ class GraceTests(unittest.TestCase):
 
     def test_state_file_is_private(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def touch(state):
@@ -357,6 +360,7 @@ class GraceTests(unittest.TestCase):
 
     def test_log_stays_bounded_and_private(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "hook.log")
         with (
             mock.patch.dict(os.environ, {"HERDR_KIRO_LOG": path}),
@@ -471,6 +475,7 @@ class GraceTests(unittest.TestCase):
 
     def test_release_authority_reports_success(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         hook.update(path, lambda _state: None)
         calls = []
@@ -494,6 +499,7 @@ class GraceTests(unittest.TestCase):
 
     def test_missing_agent_is_a_blip_while_the_owner_lives(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         holder = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: holder.poll() is not None or holder.kill())
@@ -539,6 +545,7 @@ class GraceTests(unittest.TestCase):
 
     def test_dead_owner_with_banner_stops_the_watcher(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         reports = []
@@ -590,6 +597,7 @@ class GraceTests(unittest.TestCase):
 
     def test_session_end_then_process_exit_stops_the_watcher(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -670,6 +678,7 @@ class GraceTests(unittest.TestCase):
 
     def test_late_release_does_not_fire_after_the_slot_moves(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def seed(state):
@@ -690,6 +699,7 @@ class GraceTests(unittest.TestCase):
 
     def test_retiring_watcher_does_not_block_the_next_one(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def mark(state):
@@ -724,6 +734,7 @@ class GraceTests(unittest.TestCase):
             return None
 
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def seed(current):
@@ -899,6 +910,7 @@ class GraceTests(unittest.TestCase):
 
     def test_exit_prompt_text_does_not_release_a_live_owner(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -955,6 +967,7 @@ class GraceTests(unittest.TestCase):
 
     def test_no_owner_and_sustained_not_found_exits(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
 
         def seed(state):
@@ -1074,6 +1087,7 @@ class GraceTests(unittest.TestCase):
 
     def test_explain_failure_under_a_banner_stays_working(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -1113,6 +1127,7 @@ class GraceTests(unittest.TestCase):
 
     def test_dead_owner_does_not_spin_when_another_watcher_holds_the_slot(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
@@ -1177,6 +1192,7 @@ class GraceTests(unittest.TestCase):
 
     def test_dead_slot_holder_exits_without_waiting_for_the_owner(self):
         directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         path = os.path.join(directory, "pane.json")
         owner = subprocess.Popen(["sleep", "30"])
         self.addCleanup(lambda: owner.poll() is not None or owner.kill())
