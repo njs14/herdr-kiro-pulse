@@ -4316,7 +4316,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
         if self._chooser_follow_up(book.state, held["chosen"]):
             blocked_osc = self._osc("blocked")
             reported = "blocked"
-        if held["chosen"] not in ("none", "refresh"):
+        # A dropped unpinned owner is a write even when the table says none.
+        if held["chosen"] not in ("none", "refresh") or (held["chosen"] == "none" and self._forgot):
             self._record_hook_log(book, event, painted, busy, grace, reported, blocked_osc)
         return book.files, painted + blocked_osc
 
@@ -4666,7 +4667,20 @@ class PaneWriteMatrixTests(unittest.TestCase):
             expected["hook.log"] = raw_log.replace(b"__SPAWN__", str(pid).encode())
         return ""
 
+    def _forget_unpinned(self, state):
+        """The hook drops a saved owner whose stored start is not a fine token."""
+        if hook._owner_held_unconfirmed(state):
+            return False
+        owners = state.get("owners") or {}
+        idents = state.get("owner_ident") or {}
+        dropped = [key for key in owners if not hook.fine_start(idents.get(key) or "")]
+        for key in dropped:
+            owners.pop(key, None)
+            idents.pop(key, None)
+        return bool(dropped)
+
     def _hook_fold(self, state, event):
+        self._forgot = self._forget_unpinned(state)
         owner_before = hook._pane_owner(state)
         ev = hook.choose_pane_event(state, event, hook.AGGREGATE)
         write, ok, osc = self._commit(state, ev, self._BASE, session=hook.AGGREGATE, hook_name=event)

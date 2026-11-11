@@ -2057,6 +2057,23 @@ def _persist_watch(path: str, state: dict, event: str, now: float, arm, generati
     return recorded, bool(_PANE_OUTCOME.get("ok")), saved, False
 
 
+def _forget_unpinned_owners(state: dict) -> None:
+    """Drop a saved owner whose stored start is not finer than one second.
+
+    main() records no such owner. A pane file written before that rule can
+    still hold one, and that owner kept every Stop at none. A stored fine
+    token stays, including one that no longer matches the live pid.
+    """
+    owners = state.get("owners")
+    if not isinstance(owners, dict):
+        return
+    idents = _ident_map(state)
+    for key in list(owners):
+        if not fine_start(idents.get(key) or ""):
+            owners.pop(key, None)
+            idents.pop(key, None)
+
+
 def _fold_hook(
     state: dict,
     event: str,
@@ -2068,6 +2085,7 @@ def _fold_hook(
     chosen: dict,
 ) -> None:
     """The hook fold. A later none keeps an earlier mutation for update()."""
+    _forget_unpinned_owners(state)
     revised = apply_event(state, event, session, now, owner, owner_started, chat_pid)
     chosen["write"] = str(_PANE_OUTCOME["write"])
     chosen["ok"] = bool(_PANE_OUTCOME["ok"])
