@@ -2686,7 +2686,11 @@ def command_name(comm: str) -> str:
 
 
 def kiro_lineage() -> tuple:
-    """Outer kiro-cli and the kiro-cli-chat under it. Hook shells are not owners."""
+    """Outer kiro-cli and the kiro-cli-chat under it. Hook shells are not owners.
+
+    Kiro CLI 3.1 has no kiro-cli-chat. Its hooks run under node and bun, so
+    the chat pid is 0.
+    """
     pid = os.getppid()
     seen = set()
     outer = (0, "")
@@ -3412,6 +3416,12 @@ def main() -> int:
         return 0
     begin_tick()
     owner, owner_started, chat_pid, _chat_lstart = kiro_lineage()
+    # Kiro CLI 3.1 keeps the outer kiro-cli above every hook. Without /proc
+    # start ticks its token is sec: plus a whole-second lstart, so that owner
+    # is weak and Stop is none for the rest of the session. An owner that
+    # cannot be proven is not recorded, and the slot ends on Stop.
+    if owner and not fine_start(hires_start(owner)):
+        owner, owner_started = 0, ""
     commit_pane(
         fresh_state(),
         event,

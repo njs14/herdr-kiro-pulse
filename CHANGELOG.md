@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Kiro CLI 3.1 is supported. It runs each hook under `node` and `bun` below the outer `kiro-cli`, and there is no `kiro-cli-chat`. Where `/proc` start ticks are absent, as on macOS, that outer start is `sec:` plus a whole-second lstart. The hook used to record that weak owner, and every later Stop was none, so the turn never ended. A hook now records no owner when its start is not a fine token, and Stop ends the slot. `PreCompact` and `PostCompact` are not registered. The hook ignores them, so compaction does not change the pane.
+
 ## 0.1.0
 
 herdr-kiro reports a Kiro CLI session to the Herdr App with OSC 7501 on the pane tty, and still reports the Herdr TUI with `herdr pane report-agent`. Kiro CLI 3.0 is the supported CLI. Interactive `kiro-cli chat` starts on V3. A saved `chat.agentEngine` of `v2` still selects V2. The hook writes `app=kiro-cli`. A status whose app is `kiro` is still this program.
