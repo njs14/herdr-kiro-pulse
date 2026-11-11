@@ -1,6 +1,7 @@
 """The state guard rejects a script run that could reach the real config, state, or hooks dir."""
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -182,6 +183,56 @@ class RunCheckTests(unittest.TestCase):
         ):
             with self.subTest(argv=argv):
                 subprocess.run(argv, env=env, check=True)
+
+    def test_combined_env_short_options_are_rejected(self):
+        real, _hooks = fake_real_home_root(self, self.base)
+        home = os.path.join(self.base, "home")
+        for argv in (
+            ["env", "-iS", f"PATH=/usr/bin:/bin HOME={real} sh -c true"],
+            ["env", "-vS", f"HOME={real} XDG_CONFIG_HOME= KIRO_HOOKS_DIR= sh -c true"],
+            ["env", "-ivS", f"PATH=/usr/bin:/bin HOME={home} sh -c true"],
+            ["env", "-iu", "XDG_CONFIG_HOME", f"HOME={home}", "PATH=/usr/bin:/bin", "sh", "-c", "true"],
+            ["env", "-vuXDG_STATE_HOME", "sh", "-c", "true"],
+            ["env", "-vC", self.base, f"HOME={real}", "sh", "-c", "true"],
+        ):
+            with self.subTest(argv=argv), self.assertRaises(AssertionError):
+                subprocess.run(argv, env=self.scratch(), stderr=subprocess.DEVNULL, check=False)
+
+    def test_combined_env_short_options_with_scratch_values_run(self):
+        env = self.scratch()
+        other = os.path.join(self.base, "other")
+        words = [f"{key}={env[key]}" for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME")]
+        for argv in (
+            ["env", "-vS", shlex.join([f"HOME={other}", *words[1:], "sh", "-c", "true"])],
+            ["env", "-iS", shlex.join([*words, "PATH=/usr/bin:/bin", "sh", "-c", "true"])],
+            ["env", "-iu", "KIRO_HOOKS_DIR", *words, "PATH=/usr/bin:/bin", "sh", "-c", "true"],
+        ):
+            with self.subTest(argv=argv):
+                subprocess.run(argv, env=env, stderr=subprocess.DEVNULL, check=True)
+
+    def test_env_options_are_applied_in_order(self):
+        env = {"HOME": "/h", "PATH": "/p", "X": "x"}
+        for argv, expected in (
+            (["env", "-iS", "A=1 sh"], (["sh"], {"A": "1"})),
+            (["env", "-vS", "A=1 sh"], (["sh"], {**env, "A": "1"})),
+            (["env", "-SA=1 sh"], (["sh"], {**env, "A": "1"})),
+            (["env", "-iu", "X", "A=1", "sh"], (["sh"], {"A": "1"})),
+            (["env", "-uiX", "sh"], (["sh"], {"HOME": "/h", "PATH": "/p", "X": "x"})),
+            (["env", "-viuX", "sh"], (["sh"], {})),
+            (["env", "-0vuX", "sh"], (["sh"], {"HOME": "/h", "PATH": "/p"})),
+            (["env", "-vC", "/tmp", "A=1", "sh"], (["sh"], {**env, "A": "1"})),
+            (["env", "-vP/bin", "A=1", "sh"], (["sh"], {**env, "A": "1"})),
+            (["env", "-uX", "-i", "A=1", "sh"], (["sh"], {"A": "1"})),
+            (["env", "-u", "X", "sh"], (["sh"], {"HOME": "/h", "PATH": "/p"})),
+            (["env", "--unset=X", "--split-string=A=1 sh"], (["sh"], {"HOME": "/h", "PATH": "/p", "A": "1"})),
+            (["env", "--unset", "X", "--split-string", "sh"], (["sh"], {"HOME": "/h", "PATH": "/p"})),
+            (["env", "--ignore-environment", "A=1", "sh"], (["sh"], {"A": "1"})),
+            (["env", "-", "A=1", "sh"], (["sh"], {"A": "1"})),
+            (["env", "-v", "--", "A=1", "sh"], (["sh"], {**env, "A": "1"})),
+            (["nice", "-n", "5", "timeout", "-s", "KILL", "5", "sh"], (["sh"], env)),
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(_state_guard._parse(argv, env), expected)
 
     def test_argv_overrides_do_not_excuse_an_inherited_env(self):
         self.assert_rejected(
