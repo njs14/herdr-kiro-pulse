@@ -89,6 +89,13 @@ def scratch_env_problem(env):
         return "HOME is not set"
     if _real(home) == _real(REAL_HOME):
         return f"HOME {home} is the real home"
+    for name, roots in (
+        (".kiro", HOOK_ROOTS),
+        (".config", CONFIG_BASES),
+        (os.path.join(".local", "state"), STATE_BASES),
+    ):
+        if _inside(os.path.join(home, name), roots):
+            return f"HOME {home} has a {name} that resolves to the real one"
     config = env.get("XDG_CONFIG_HOME")
     if not config:
         return "XDG_CONFIG_HOME is not set, so the script falls back to $HOME/.config"
