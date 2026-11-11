@@ -183,6 +183,61 @@ class RunCheckTests(unittest.TestCase):
         subprocess.run([sys.executable, "-c", "pass"], check=True)
 
 
+class OsRunTests(unittest.TestCase):
+    """os.system, os.exec*, os.spawn*, and posix_spawn skip Popen, so the guard owns them too."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base, True)
+
+    def test_system_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            os.system("true")  # noqa: S605 - the call under test, which the guard must refuse
+
+    def test_spawn_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            os.spawnv(os.P_WAIT, "/usr/bin/true", ["true"])
+        with self.assertRaises(AssertionError):
+            os.spawnvpe(os.P_WAIT, "true", ["true"], dict(os.environ))
+
+    def test_exec_is_rejected(self):
+        # Exec in a child, so an unguarded exec replaces the child and not this test run.
+        for name in ("execv", "execve", "execvp", "execl"):
+            with self.subTest(name=name):
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        call = getattr(os, name)
+                        if name == "execve":
+                            call("/usr/bin/true", ["true"], dict(os.environ))
+                        elif name == "execl":
+                            call("/usr/bin/true", "true")
+                        else:
+                            call("/usr/bin/true", ["true"])
+                    except AssertionError:
+                        os._exit(99)
+                    finally:
+                        os._exit(98)
+                _pid, status = os.waitpid(pid, 0)
+                self.assertEqual(os.waitstatus_to_exitcode(status), 99)
+
+    def test_posix_spawn_of_a_shell_with_the_inherited_env_is_rejected(self):
+        for spawn in (os.posix_spawn, os.posix_spawnp):
+            with self.subTest(spawn=spawn.__name__), self.assertRaises(AssertionError):
+                os.waitpid(spawn("/bin/sh", ["sh", "-c", "true"], dict(os.environ)), 0)
+
+    def test_posix_spawn_of_a_plain_command_and_popen_still_run(self):
+        os.waitpid(os.posix_spawn("/usr/bin/true", ["true"], dict(os.environ)), 0)
+        env = dict(os.environ)
+        env["HOME"] = os.path.join(self.base, "home")
+        env["XDG_CONFIG_HOME"] = os.path.join(self.base, "xc")
+        env["XDG_STATE_HOME"] = os.path.join(self.base, "xs")
+        env.pop("KIRO_HOOKS_DIR", None)
+        # close_fds=False and an absolute path send Popen through os.posix_spawn.
+        subprocess.run(["/usr/bin/true"], close_fds=False, check=True)
+        subprocess.run(["/bin/sh", "-c", "true"], env=env, close_fds=False, check=True)
+
+
 class SnapshotTests(unittest.TestCase):
     def test_hooks_dirs_are_watched(self):
         base = tempfile.mkdtemp()
