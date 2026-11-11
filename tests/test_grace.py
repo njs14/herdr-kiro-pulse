@@ -994,6 +994,14 @@ class GraceTests(unittest.TestCase):
         state = hook.apply_event(state, "UserPromptSubmit", "sess", 3.0, owner=50, owner_started="200.000000")
         self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
 
+    def test_remember_owner_stores_no_start_coarser_than_one_second(self):
+        for started in ("sec:1794361688", "1794361688", "x"):
+            with self.subTest(started=started):
+                state = hook.fresh_state()
+                hook.remember_owner(state, "sess", 50, started)
+                self.assertEqual(state["owners"], {"sess": 50})
+                self.assertEqual(state["owner_ident"], {})
+
     def test_a_hook_drops_a_saved_owner_with_no_fine_start(self):
         # A stored sec: or empty token is not the owner. The hook fold drops
         # that owner and keeps the busy row while the pid is not gone. A
