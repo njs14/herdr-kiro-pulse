@@ -378,10 +378,14 @@ class GraceTests(unittest.TestCase):
             f"import sys; sys.path.insert(0, {root!r}); import herdr_kiro_state as hook; print(hook.session_of({{}}))"
         )
         quoted = shlex.quote(code)
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        env = _state_guard.scratch_env(base)
 
         def run():
             completed = subprocess.run(
                 ["sh", "-c", "python3 -c " + quoted],
+                env=env,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1364,8 +1368,9 @@ class GraceTests(unittest.TestCase):
             path = hook.resolved_state_file("w1:p1")
             self.assertTrue(path.endswith(os.path.join("herdr-kiro", "w1_p1.json")))
             self.assertTrue(hook.inside_state_dir(path))
-            env = dict(os.environ)
+            env = _state_guard.scratch_env(os.path.join(base, "home"))
             env["XDG_CONFIG_HOME"] = os.path.join(base, "config")
+            env["XDG_STATE_HOME"] = state_home
             script = os.path.abspath(hook.__file__)
             completed = subprocess.run(
                 [sys.executable, script, "--watch", "w1:p1", outside],
@@ -3841,7 +3846,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
     no log. A read, a reload, and a generation mismatch are none results:
     they do not store the seq floor. A refresh changes exactly one value in
     that directory, the busy timestamp. Seq stays, generation stays, no
-    floor file is written, and no watcher pid or pid file appears.
+    floor file is written, and no watcher pid or pid file appears. A spawned
+    watcher gets a scratch HOME and config and no KIRO_HOOKS_DIR, and keeps
+    the cell's state dir and log.
     """
 
     _FLOOR = 50
@@ -3880,6 +3887,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
     def setUpClass(cls):
         cls._owner_pins = None
         cls.addClassCleanup(cls._stop_owner_pins)
+        cls.scratch_home = tempfile.mkdtemp()
+        cls.addClassCleanup(shutil.rmtree, cls.scratch_home, True)
         hook.begin_tick()
         master, slave = os.openpty()
         cls.live_master = master
@@ -4221,7 +4230,20 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return self._screen_for(event)
 
         if not watching:
+            checked = subprocess.Popen
+
+            def popen(args, *rest, **kwargs):
+                if kwargs.get("env") is None:
+                    env = dict(os.environ)
+                    env["HOME"] = self.scratch_home
+                    env["XDG_CONFIG_HOME"] = os.path.join(self.scratch_home, ".config")
+                    env.pop("KIRO_HOOKS_DIR", None)
+                    env.pop("HERDR_SESSION", None)
+                    kwargs["env"] = env
+                return checked(args, *rest, **kwargs)
+
             with (
+                mock.patch.object(hook.subprocess, "Popen", popen),
                 mock.patch.object(hook.time, "time", now),
                 mock.patch.object(hook.time, "sleep", sleep),
                 mock.patch.object(sys, "argv", ["herdr-kiro", event]),

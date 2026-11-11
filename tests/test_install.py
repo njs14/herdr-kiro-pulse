@@ -30,22 +30,6 @@ def tearDownModule():
 
 
 class InstallTests(unittest.TestCase):
-    def setUp(self):
-        real_run = subprocess.run
-
-        def checked_run(args, *rest, **kwargs):
-            # A script run must pin its config and state to scratch. Raise before it runs.
-            env = kwargs.get("env")
-            if env is not None and args and args[0] == "sh":
-                problem = _state_guard.scratch_env_problem(env)
-                if problem:
-                    raise AssertionError(f"{args[1:]}: {problem}")
-            return real_run(args, *rest, **kwargs)
-
-        patcher = mock.patch.object(subprocess, "run", checked_run)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_install_quotes_a_path_with_space_quote_and_backslash(self):
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
@@ -86,14 +70,7 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(handle.read(), b'{"version":"v1","hooks":[]}\n')
 
     def _home_env(self, home):
-        env = dict(os.environ)
-        env["HOME"] = home
-        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
-        env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
-        env.pop("HERDR_KIRO_LOG", None)
-        env.pop("KIRO_HOOKS_DIR", None)
-        env.pop("HERDR_SESSION", None)
-        return env
+        return _state_guard.scratch_env(home)
 
     def _files(self, home):
         found = {}
@@ -197,11 +174,12 @@ class InstallTests(unittest.TestCase):
         script = os.path.join(base, "herdr_kiro_state.py")
         with open(script, "w", encoding="utf-8") as handle:
             handle.write("import time\ntime.sleep(60)\n")
-        watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file])
-        decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file])
-        wrong_start = subprocess.Popen([sys.executable, script, "--watch", "start", state_file])
-        wrong_uid = subprocess.Popen([sys.executable, script, "--watch", "uid", state_file])
-        reuse = subprocess.Popen([sys.executable, script, "--watch", "reuse", state_file])
+        fake_env = self._home_env(home)
+        watcher = subprocess.Popen([sys.executable, script, "--watch", "w1:p1", state_file], env=fake_env)
+        decoy = subprocess.Popen([sys.executable, script, "--watch", "other", state_file], env=fake_env)
+        wrong_start = subprocess.Popen([sys.executable, script, "--watch", "start", state_file], env=fake_env)
+        wrong_uid = subprocess.Popen([sys.executable, script, "--watch", "uid", state_file], env=fake_env)
+        reuse = subprocess.Popen([sys.executable, script, "--watch", "reuse", state_file], env=fake_env)
         self.addCleanup(lambda: watcher.poll() is not None or watcher.kill())
         self.addCleanup(lambda: decoy.poll() is not None or decoy.kill())
         self.addCleanup(lambda: wrong_start.poll() is not None or wrong_start.kill())
