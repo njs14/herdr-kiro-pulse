@@ -13,6 +13,8 @@ server socket, so it is not watched.
 While a module is isolated, subprocess.Popen, and so run, call, and
 check_output, refuses a shell or script run whose env could reach those dirs. A
 shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run.
+os.posix_spawn and os.posix_spawnp get the same check, and os.system, os.exec*,
+and os.spawn* always raise. A child Python that calls them is not checked.
 """
 
 import os
@@ -182,6 +184,36 @@ class CheckedPopen(_REAL_POPEN):
         super().__init__(args, *rest, **kwargs)
 
 
+# os calls that start a program without Popen. No guarded module needs them.
+_OS_RUNS = """
+system execl execle execlp execlpe execv execve execvp execvpe
+spawnl spawnle spawnlp spawnlpe spawnv spawnve spawnvp spawnvpe
+"""
+OS_RUNS = tuple(name for name in _OS_RUNS.split() if hasattr(os, name))
+# Popen itself calls os.posix_spawn on some runs, so these get the same check as Popen instead.
+OS_SPAWNS = tuple(name for name in ("posix_spawn", "posix_spawnp") if hasattr(os, name))
+
+
+def _refuse(name):
+    def refuse(*_args, **_kwargs):
+        raise AssertionError(f"os.{name} skips the state guard's run check; use subprocess with a scratch env")
+
+    return refuse
+
+
+def _checked_spawn(real):
+    def spawn(path, argv, env, *rest, **kwargs):
+        # path is what runs. argv[0] is only the name it sees.
+        command = [path, *list(argv)[1:]]
+        if _is_script_run(command, False):
+            problem = scratch_env_problem(env)
+            if problem:
+                raise AssertionError(f"{_argv(command)}: {problem}")
+        return real(path, argv, env, *rest, **kwargs)
+
+    return spawn
+
+
 def _stat(path):
     try:
         info = os.stat(path)
@@ -262,7 +294,7 @@ class Isolation:
         self.saved = {}
         self.root = ""
         self.before = None
-        self.popen = None
+        self.patches = []
 
     def start(self):
         self.before = snapshot()
@@ -270,14 +302,16 @@ class Isolation:
         self.root = tempfile.mkdtemp(prefix="herdr-kiro-tests-")
         os.environ["XDG_STATE_HOME"] = os.path.join(self.root, "state")
         os.environ["HERDR_KIRO_LOG"] = os.path.join(self.root, "hook.log")
-        self.popen = mock.patch.object(subprocess, "Popen", CheckedPopen)
-        self.popen.start()
+        self.patches = [mock.patch.object(subprocess, "Popen", CheckedPopen)]
+        self.patches += [mock.patch.object(os, name, _refuse(name)) for name in OS_RUNS]
+        self.patches += [mock.patch.object(os, name, _checked_spawn(getattr(os, name))) for name in OS_SPAWNS]
+        for patch in self.patches:
+            patch.start()
 
     def stop(self):
         try:
-            if self.popen is not None:
-                self.popen.stop()
-                self.popen = None
+            while self.patches:
+                self.patches.pop().stop()
             for key, value in self.saved.items():
                 if value is None:
                     os.environ.pop(key, None)
