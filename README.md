@@ -111,7 +111,7 @@ Stay on the stock file if you want herdr to keep applying newer remote Kiro rule
 
 Version 0.1.0, from `herdr-plugin.toml`. Kiro CLI 3.0 and 3.1 are the supported CLIs.
 
-The unit command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
+The unit command is `python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc tests.test_state_guard`. `tests.test_osc` writes OSC 7501 to a pty and reads the bytes back, and it keeps a finished turn at `state=done`. It does not launch the Herdr App. `tests/run_py39.sh` is the 3.9 run. CI also runs `uvx ruff check`, `uvx ruff format --check`, and `uvx ty check`. The rule set is in `pyproject.toml`. Live notes are in [VERIFY.md](VERIFY.md). A live App check is a Kiro session inside an App terminal, and it is not this suite. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 `python3 harness/run_suite.py` drives workflows in a herdr pane. It needs a session, a Kiro pane, and `KIRO_API_KEY` in that environment. Do not print the key.
 

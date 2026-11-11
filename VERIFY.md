@@ -6,7 +6,7 @@ Kiro CLI 3.0 and 3.1 are the supported CLIs. Interactive `kiro-cli chat` starts 
 
 ## What passing looks like
 
-`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty, including that a finished turn stays `state=done` and that a focused Agents row stays under Done until it is left. It does not launch the Herdr App. A live App check is a Kiro session inside an App terminal. `hc --json get` status `app` is `kiro-cli` or `kiro`. The painted sidebar check selects another tab. It uses `echo` or `true` when a tool approval is required. Do not pass `--trust-all-tools`.
+`python3 -m unittest tests.test_grace tests.test_install tests.test_detection tests.test_doctor tests.test_redaction tests.test_osc tests.test_state_guard` exits 0. `tests.test_osc` proves the OSC 7501 bytes on a pty, including that a finished turn stays `state=done` and that a focused Agents row stays under Done until it is left. It does not launch the Herdr App. A live App check is a Kiro session inside an App terminal. `hc --json get` status `app` is `kiro-cli` or `kiro`. The painted sidebar check selects another tab. It uses `echo` or `true` when a tool approval is required. Do not pass `--trust-all-tools`.
 
 `tests/run_py39.sh` runs those tests on Python 3.9. The hook uses `from __future__ import annotations`, so `int | None` is not evaluated at import.
 
