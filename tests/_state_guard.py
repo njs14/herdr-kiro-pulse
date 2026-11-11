@@ -3,6 +3,11 @@
 The real paths are fixed when this module is first imported, before any test
 module points XDG_STATE_HOME and HERDR_KIRO_LOG at a temp dir. They are built
 by hand: hook.state_dir() would create the real dir.
+
+The real herdr agent-detection dir, where install writes kiro.toml, is only
+watched: a test that needs it must point XDG_CONFIG_HOME or HOME at a temp
+dir. The rest of the herdr config dir holds the live server socket, so it is
+not watched.
 """
 
 import os
@@ -19,6 +24,11 @@ _logs = {os.path.join(path, "hook.log") for path in REAL_DIRS}
 if os.environ.get("HERDR_KIRO_LOG"):
     _logs.add(os.environ["HERDR_KIRO_LOG"])
 REAL_LOGS = tuple(sorted(_logs))
+
+_configs = [os.path.join(os.path.expanduser("~"), ".config")]
+if os.environ.get("XDG_CONFIG_HOME"):
+    _configs.append(os.environ["XDG_CONFIG_HOME"])
+REAL_CONFIG_DIRS = tuple(sorted({os.path.join(base, "herdr", "agent-detection") for base in _configs}))
 
 
 def _stat(path):
@@ -37,10 +47,24 @@ def _files(root):
     return found
 
 
+def _file_stats(root):
+    """Each file under root with its stat, so an overwrite in place shows."""
+    found = {}
+    for name in _files(root):
+        path = os.path.join(root, name)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        found[name] = (info.st_mtime_ns, info.st_size, info.st_mode)
+    return found
+
+
 def snapshot():
     logs = {path: _stat(path) for path in REAL_LOGS}
     dirs = {path: (os.path.isdir(path), _files(path)) for path in REAL_DIRS}
-    return logs, dirs
+    configs = {path: (os.path.isdir(path), _file_stats(path)) for path in REAL_CONFIG_DIRS}
+    return logs, dirs, configs
 
 
 def _tail(path, size):
@@ -66,6 +90,14 @@ def changes(before, after):
             added = sorted(now_files - was_files)
             removed = sorted(was_files - now_files)
             lines.append(f"{path}: files added {added} removed {removed}")
+    for path, (was_dir, was_files) in before[2].items():
+        now_dir, now_files = after[2][path]
+        if now_dir != was_dir:
+            lines.append(f"{path}: dir exists {was_dir} -> {now_dir}")
+        if now_files != was_files:
+            names = sorted(set(was_files) | set(now_files))
+            moved = [name for name in names if was_files.get(name) != now_files.get(name)]
+            lines.append(f"{path}: files changed {moved}")
     return lines
 
 
@@ -97,4 +129,6 @@ class Isolation:
                 shutil.rmtree(self.root, ignore_errors=True)
         lines = changes(self.before, snapshot())
         if lines:
-            raise AssertionError(f"{self.module} touched the real herdr-kiro state:\n" + "\n".join(lines))
+            raise AssertionError(
+                f"{self.module} touched the real herdr-kiro state or herdr config:\n" + "\n".join(lines)
+            )
