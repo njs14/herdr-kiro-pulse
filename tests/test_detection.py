@@ -4,11 +4,26 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unicodedata
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tests"))
+import _state_guard
+
+_ISOLATION = _state_guard.Isolation(__name__)
+
+
+def setUpModule():
+    _ISOLATION.start()
+
+
+def tearDownModule():
+    _ISOLATION.stop()
+
+
 RULES = os.path.join(ROOT, "prototype", "kiro-detection.toml")
 WIDTHS = (40, 54, 70, 80, 100, 133, 200)
 
