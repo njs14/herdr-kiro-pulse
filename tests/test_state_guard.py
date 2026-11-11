@@ -34,6 +34,32 @@ DEEP_LINKS = {
 }
 
 
+def fake_real_home_root(test, base):
+    """Register a temp dir as the real home, with its .kiro/hooks, config, and state dirs, so no run targets the real one."""
+    home = os.path.join(base, "real-home")
+    hooks = os.path.join(home, ".kiro", "hooks")
+    config = os.path.join(home, ".config")
+    state = os.path.join(home, ".local", "state")
+    for path in (hooks, os.path.join(config, "herdr", "agent-detection"), os.path.join(state, "herdr-kiro")):
+        os.makedirs(path)
+    extra = {
+        "HOOK_ROOTS": os.path.join(home, ".kiro"),
+        "REAL_HOOK_DIRS": hooks,
+        "CONFIG_BASES": config,
+        "REAL_CONFIG_DIRS": os.path.join(config, "herdr", "agent-detection"),
+        "STATE_BASES": state,
+        "REAL_DIRS": os.path.join(state, "herdr-kiro"),
+    }
+    patchers = [mock.patch.object(_state_guard, "REAL_HOME", home)]
+    patchers += [
+        mock.patch.object(_state_guard, attr, (*getattr(_state_guard, attr), path)) for attr, path in extra.items()
+    ]
+    for patcher in patchers:
+        patcher.start()
+        test.addCleanup(patcher.stop)
+    return home, hooks
+
+
 class RunCheckTests(unittest.TestCase):
     def setUp(self):
         self.base = tempfile.mkdtemp()
@@ -129,13 +155,13 @@ class RunCheckTests(unittest.TestCase):
                 self.assertFalse(_state_guard._is_script_run(argv, False))
 
     def test_argv_overrides_of_a_scratch_env_are_rejected(self):
-        hooks = os.path.join(REAL_HOME, ".kiro", "hooks")
+        real, hooks = fake_real_home_root(self, self.base)
         for argv in (
-            ["env", f"HOME={REAL_HOME}", "XDG_CONFIG_HOME=", "KIRO_HOOKS_DIR=", "sh", "-c", "true"],
-            ["env", "-S", f"HOME={REAL_HOME} sh -c true"],
+            ["env", f"HOME={real}", "XDG_CONFIG_HOME=", "KIRO_HOOKS_DIR=", "sh", "-c", "true"],
+            ["env", "-S", f"HOME={real} sh -c true"],
             ["env", f"KIRO_HOOKS_DIR={hooks}", "sh", "-c", "true"],
             [f"KIRO_HOOKS_DIR={hooks}", "sh", "-c", "true"],
-            ["nice", "-n", "5", f"HOME={REAL_HOME}", "sh", "-c", "true"],
+            ["nice", "-n", "5", f"HOME={real}", "sh", "-c", "true"],
             ["env", "-u", "XDG_CONFIG_HOME", "sh", "-c", "true"],
             ["env", "--unset=XDG_STATE_HOME", "sh", "-c", "true"],
             ["env", "-i", "PATH=/usr/bin:/bin", "sh", "-c", "true"],
@@ -316,9 +342,10 @@ class OsRunTests(unittest.TestCase):
                 os.waitpid(spawn("/bin/sh", ["sh", "-c", "true"], dict(os.environ)), 0)
 
     def test_posix_spawn_with_an_argv_override_is_rejected(self):
+        real, _hooks = fake_real_home_root(self, self.base)
         env = _state_guard.scratch_env(os.path.join(self.base, "home"))
         with self.assertRaises(AssertionError):
-            os.waitpid(os.posix_spawn("/usr/bin/env", ["env", f"HOME={REAL_HOME}", "sh", "-c", "true"], env), 0)
+            os.waitpid(os.posix_spawn("/usr/bin/env", ["env", f"HOME={real}", "sh", "-c", "true"], env), 0)
 
     def test_posix_spawn_of_a_plain_command_and_popen_still_run(self):
         os.waitpid(os.posix_spawn("/usr/bin/true", ["true"], dict(os.environ)), 0)
