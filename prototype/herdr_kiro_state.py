@@ -945,7 +945,10 @@ def send_report(pane: str, path: str, kind: str) -> bool:
     # place while kiro-cli is running. release-agent after it drops done:
     # an idle screen settles to idle with no completion, and a working
     # footer returns to working before that later idle screen also settles idle.
-    # OSC is commit_pane's paint. This report is the Herdr TUI only.
+    # OSC is commit_pane's paint. This report is the Herdr TUI only: an App
+    # terminal id is not a TUI pane, so there is nothing to report.
+    if not in_tui():
+        return True
     return emit_report(pane, path, kind)
 
 
@@ -974,6 +977,9 @@ def release_authority(pane: str, path: str) -> bool:
     if not pane_id_ok(pane):
         log("refusing release")
         return False
+    # release-agent is the Herdr TUI only, like send_report.
+    if not in_tui():
+        return True
 
     def bump_release(state: dict) -> None:
         state["seq"] += 1

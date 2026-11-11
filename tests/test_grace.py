@@ -479,7 +479,10 @@ class GraceTests(unittest.TestCase):
             calls.append(args)
             return True
 
-        with mock.patch.object(hook, "herdr", fake_herdr):
+        with (
+            mock.patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p9"}),
+            mock.patch.object(hook, "herdr", fake_herdr),
+        ):
             self.assertTrue(hook.release_authority("w1:p9", path))
         self.assertEqual(calls[0][0], "release-agent")
         self.assertIn("w1:p9", calls[0])
@@ -1511,7 +1514,10 @@ class GraceTests(unittest.TestCase):
                 calls.append(args)
                 return True
 
-            with mock.patch.object(hook, "herdr", fake_herdr):
+            with (
+                mock.patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}),
+                mock.patch.object(hook, "herdr", fake_herdr),
+            ):
                 self.assertTrue(hook.send_report("w1:p1", path, kind))
             return [args[args.index("--state") + 1] for args in calls]
 
@@ -1548,7 +1554,10 @@ class GraceTests(unittest.TestCase):
                     pane.release()
                 return True
 
-            with mock.patch.object(hook, "herdr", fake_herdr):
+            with (
+                mock.patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "w1:p1"}),
+                mock.patch.object(hook, "herdr", fake_herdr),
+            ):
                 self.assertTrue(hook.send_report("w1:p1", path, "idle"))
                 self.assertTrue(
                     hook.finish_if_unchanged(
@@ -2190,7 +2199,7 @@ class PaneFindingTests(unittest.TestCase):
         self.assertEqual((write, ok), ("none", False))
         self.assertEqual(state["phase"], "proven")
 
-    def test_gone_proven_outer_still_writes_done_and_releases(self):
+    def test_gone_proven_outer_still_writes_done_and_drops_the_owner(self):
         events = ("Stop", "SessionEnd", "UserPromptSubmit")
         for event in events:
             with self.subTest(event=event):
@@ -2261,7 +2270,8 @@ class PaneFindingTests(unittest.TestCase):
             self.assertEqual(saved["owners"].get("sess"), proc.pid)
         else:
             self.assertIn(done, _read_pty(master))
-            self.assertIn(("release-agent", "t7"), [args[:2] for args in calls])
+            # An App terminal runs no report-agent or release-agent.
+            self.assertEqual(calls, [])
             self.assertNotIn("sess", saved.get("owners") or {})
         hook._close_held_fd()
 
@@ -4305,8 +4315,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
         blocked_osc = b""
         if self._chooser_follow_up(book.state, held["chosen"]):
             blocked_osc = self._osc("blocked")
-            if reported == "":
-                book.apply(lambda state: self._bump_report(state, "blocked"), self._BASE)
             reported = "blocked"
         if held["chosen"] not in ("none", "refresh"):
             self._record_hook_log(book, event, painted, busy, grace, reported, blocked_osc)
@@ -4382,6 +4390,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return [], quiet_since, reported, False
         screen = self._screen_for(event)
         painted = []
+        if hook.approval_text(screen) and reported == "blocked":
+            return painted, None, reported, False
         if hook.approval_text(screen):
             mark = {"write": "none", "ok": False}
 
@@ -4401,8 +4411,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if mark["write"] == "paint_blocked" and mark["ok"]:
                 self._arm_log(book, now)
                 self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-                book.apply(lambda state: self._bump_report(state, "blocked"), now)
-                self._note_report(book, now, "blocked")
+                reported = "blocked"
             return painted, None, reported, False
         banner = hook.workflow_banner_from(screen)
         if banner:
@@ -4449,8 +4458,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if mark["write"] == "working" and mark.get("ok"):
                 self._arm_log(book, now)
                 self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-                book.apply(lambda state: self._bump_report(state, "working"), now)
-                self._note_report(book, now, "working")
+                reported = "working"
             return painted, quiet_since, reported, False
         if action == "idle" and hook.screen_is_quiet(screen):
             if reported != "idle" and not stale:
@@ -4469,8 +4477,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 if mark["write"] == "done" and mark["ok"]:
                     self._arm_log(book, now)
                     self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-                    book.apply(lambda state: self._bump_report(state, "idle"), now)
-                    self._note_report(book, now, "idle")
                     self._note(book, now, "watcher idle")
                     reported = "idle"
                 else:
@@ -4480,7 +4486,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
                 self._clear_watch_slot(book)
                 return painted, quiet_since, reported, True
             return painted, quiet_since, reported, False
-        if action != "working":
+        # An App terminal runs no herdr report, so a paint counts as reported.
+        if action != "working" or action == reported:
             return painted, quiet_since, reported, False
 
         mark = {"write": "none"}
@@ -4500,8 +4507,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
         if mark["write"] == "working" and mark.get("ok"):
             self._arm_log(book, now)
             self._note_watch_osc(book, now, painted[-1] if painted else b"", held_done)
-            book.apply(lambda state: self._bump_report(state, "working"), now)
-            self._note_report(book, now, "working")
+            reported = "working"
         return painted, quiet_since, reported, False
 
     def _clear_watch_slot(self, book):
@@ -4518,12 +4524,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
         state["watcher_started"] = token
         return ""
 
-    def _bump_report(self, state, kind):
-        state["seq"] = int(state.get("seq") or 0) + 1
-        if kind == "idle":
-            state["grace_until"] = 0.0
-        return ""
-
     def _report_after_hook(self, book, event, chosen, ok, release):
         if self._pane_mode == "app_fail":
             return ""
@@ -4531,11 +4531,11 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return ""
         action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), False, self._BASE)
         kind = hook.report_for("", action)
+        # t7 is an App terminal. The report is the TUI's, so herdr is not run
+        # and seq is not bumped. The kind still counts as reported.
         if chosen == "done" and ok and (event in hook.END_EVENTS or release):
-            book.apply(lambda state: self._bump_report(state, "idle"), self._BASE)
             return "idle"
         if kind == "working" and chosen == "working":
-            book.apply(lambda state: self._bump_report(state, "working"), self._BASE)
             return "working"
         return ""
 
@@ -4562,18 +4562,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             lines.append("watcher spawned pid=__SPAWN__")
         if blocked_osc and device:
             lines.append(f"osc blocked via {device}")
-        if reported and book.state is not None:
-            seq = int(book.state.get("seq") or 0)
-            lines.append(
-                "herdr report-agent t7 --source "
-                + hook.SOURCE
-                + " --agent "
-                + hook.AGENT
-                + " --state "
-                + reported
-                + " --seq "
-                + str(seq)
-            )
         self._append_log(book, lines)
 
     def _note(self, book, clock, line):
@@ -4611,23 +4599,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
             where = self._owner_device(self.live.pid)
         if where:
             self._note(book, clock, f"osc {kind} via {where}")
-
-    def _note_report(self, book, clock, kind):
-        if book.state is None:
-            return
-        seq = int(book.state.get("seq") or 0)
-        self._note(
-            book,
-            clock,
-            "herdr report-agent t7 --source "
-            + hook.SOURCE
-            + " --agent "
-            + hook.AGENT
-            + " --state "
-            + kind
-            + " --seq "
-            + str(seq),
-        )
 
     def _done_via_held(self, state):
         if state is None:
