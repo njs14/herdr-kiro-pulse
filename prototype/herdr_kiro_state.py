@@ -3199,7 +3199,10 @@ def _run_watch(pane: str, path: str) -> None:
             if slot_holder_gone(state):
                 log("watcher exit slot holder gone")
                 return
-            looked = agent_lookup(pane)
+            # The Herdr TUI server does not know an App terminal id. With no
+            # pane owner an App watcher has nothing to paint, so it exits as
+            # it would on gone. An App owner keeps herdr's answer.
+            looked = "gone" if not in_tui() and _pane_owner(state) is None else agent_lookup(pane)
             now = time.time()
             current_owners = []
             for owner in (state.get("owners") or {}).values():
