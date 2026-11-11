@@ -47,12 +47,7 @@ class InstallTests(unittest.TestCase):
         previous = os.path.join(existing, "herdr-kiro.json")
         with open(previous, "w", encoding="utf-8") as handle:
             handle.write('{"version":"v1","hooks":[]}\n')
-        env = dict(os.environ)
-        env["HOME"] = home
-        env.pop("XDG_STATE_HOME", None)
-        env.pop("HERDR_KIRO_LOG", None)
-        env.pop("KIRO_HOOKS_DIR", None)
-        env.pop("HERDR_SESSION", None)
+        env = self._home_env(home)
         completed = subprocess.run(
             ["sh", os.path.join(weird, "install.sh")],
             env=env,

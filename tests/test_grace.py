@@ -358,24 +358,15 @@ class GraceTests(unittest.TestCase):
     def test_log_stays_bounded_and_private(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "hook.log")
-        previous = os.environ.get("HERDR_KIRO_LOG")
-        os.environ["HERDR_KIRO_LOG"] = path
-        limit = hook.LOG_LIMIT
-        keep = hook.LOG_KEEP
-        hook.LOG_LIMIT = 400
-        hook.LOG_KEEP = 180
-        try:
+        with (
+            mock.patch.dict(os.environ, {"HERDR_KIRO_LOG": path}),
+            mock.patch.object(hook, "LOG_LIMIT", 400),
+            mock.patch.object(hook, "LOG_KEEP", 180),
+        ):
             for index in range(40):
                 hook.log(f"row {index} " + ("x" * 30))
             self.assertLess(os.path.getsize(path), 700)
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
-        finally:
-            hook.LOG_LIMIT = limit
-            hook.LOG_KEEP = keep
-            if previous is None:
-                os.environ.pop("HERDR_KIRO_LOG", None)
-            else:
-                os.environ["HERDR_KIRO_LOG"] = previous
 
     def test_shell_wrapper_reuses_the_ancestor_key(self):
         root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "prototype"))
