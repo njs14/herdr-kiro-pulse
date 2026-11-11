@@ -161,6 +161,22 @@ class RunCheckTests(unittest.TestCase):
                 own = tempfile.mkdtemp(dir=self.base)
                 self.assertIsNone(_state_guard.scratch_env_problem(self.symlinked_home(name, own)))
 
+    def test_relative_paths_are_rejected(self):
+        # The guard resolves paths against this process's cwd, not the child's cwd=, so it cannot vouch for them.
+        for key, value in (
+            ("HOME", "."),
+            ("HOME", "home"),
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_STATE_HOME", os.path.join(".local", "state")),
+            ("KIRO_HOOKS_DIR", "hooks"),
+            ("KIRO_HOOKS_DIR", "~/.kiro/hooks"),
+        ):
+            with self.subTest(key=key, value=value):
+                env = self.scratch({key: value})
+                self.assertIsNotNone(_state_guard.scratch_env_problem(env))
+                with self.assertRaises(AssertionError):
+                    subprocess.run(["sh", "-c", "true"], env=env, cwd=self.base, check=False)
+
     def test_scratch_shell_and_plain_commands_run(self):
         subprocess.run(["sh", "-c", "true"], env=self.scratch(), check=True)
         subprocess.run(["sleep", "0"], check=True)
