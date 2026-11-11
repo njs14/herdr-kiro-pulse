@@ -4234,11 +4234,9 @@ class PaneWriteMatrixTests(unittest.TestCase):
 
             def popen(args, *rest, **kwargs):
                 if kwargs.get("env") is None:
-                    env = dict(os.environ)
-                    env["HOME"] = self.scratch_home
-                    env["XDG_CONFIG_HOME"] = os.path.join(self.scratch_home, ".config")
-                    env.pop("KIRO_HOOKS_DIR", None)
-                    env.pop("HERDR_SESSION", None)
+                    env = _state_guard.scratch_env(self.scratch_home)
+                    # Keep the cell's state dir and log.
+                    env.update((key, os.environ[key]) for key in _state_guard.KEYS if key in os.environ)
                     kwargs["env"] = env
                 return checked(args, *rest, **kwargs)
 
