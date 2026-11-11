@@ -222,15 +222,17 @@ def members_of(busy: dict, key: str) -> list:
 
 
 def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
+    """Record a slot's owner pid and the start token main() read for it.
+
+    main() decides who is an owner, and it passes one only with a start
+    finer than one second. The pid file is a separate store and is not
+    this proof.
+    """
     if not owner:
         return
     state["owners"][key] = int(owner)
     if not started:
         return
-    # owner_ident keeps hires_start only when that token is finer than one
-    # second. sec: plus whole-second lstart, and a bare whole-second lstart,
-    # match a pid reused in that same second, so neither is this owner. The
-    # pid file is a separate store and is not this proof.
     idents = state.get("owner_ident")
     if not isinstance(idents, dict):
         idents = {}
@@ -239,11 +241,7 @@ def remember_owner(state: dict, key: str, owner: int, started: str) -> None:
     current = idents.get(key) or ""
     if isinstance(current, str) and fine_start(current):
         return
-    ident = hires_start(int(owner))
-    if fine_start(ident):
-        idents[key] = ident
-        return
-    idents.pop(key, None)
+    idents[key] = started
 
 
 def _keep_proven_pane(state: dict, key: str) -> None:
@@ -3439,12 +3437,13 @@ def main() -> int:
     if event not in BUSY_EVENTS and event not in END_EVENTS:
         return 0
     begin_tick()
-    owner, owner_started, chat_pid, _chat_lstart = kiro_lineage()
-    # Kiro CLI 3.1 keeps the outer kiro-cli above every hook. Without /proc
-    # start ticks its token is sec: plus a whole-second lstart, so that owner
-    # is weak and Stop is none for the rest of the session. An owner that
-    # cannot be proven is not recorded, and the slot ends on Stop.
-    if owner and not fine_start(hires_start(owner)):
+    owner, _owner_lstart, chat_pid, _chat_lstart = kiro_lineage()
+    # An owner whose start cannot be pinned below one second is not recorded,
+    # so its slot ends on Stop. That is any host without /proc start ticks,
+    # including macOS on Kiro CLI 3.0 and 3.1. This is the one read of the
+    # owner's start for this hook.
+    owner_started = hires_start(owner) if owner else ""
+    if not fine_start(owner_started):
         owner, owner_started = 0, ""
     commit_pane(
         fresh_state(),

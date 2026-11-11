@@ -984,53 +984,28 @@ class GraceTests(unittest.TestCase):
 
     def test_later_busy_event_records_a_fine_token(self):
         # The first event can see no start token. A later busy event for the
-        # session already in busy has to store a fine one. sec: plus lstart
-        # is not that token.
-        calls = {"n": 0}
-
-        def hires(_pid):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return ""
-            return "100.000000"
-
-        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
-        with (
-            mock.patch.object(hook, "hires_start", hires),
-            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
-        ):
-            state = hook.apply_event(
-                hook.fresh_state(),
-                "SessionStart",
-                "sess",
-                1.0,
-                owner=50,
-                owner_started="10",
-            )
-            self.assertEqual(state["owner_ident"], {})
-            self.assertEqual(state["owners"].get("sess"), 50)
-            self.assertNotIn("owner_started", state)
-            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
+        # session already in busy stores the fine token main() read.
+        state = hook.apply_event(hook.fresh_state(), "SessionStart", "sess", 1.0, owner=50, owner_started="")
+        self.assertEqual(state["owner_ident"], {})
+        self.assertEqual(state["owners"].get("sess"), 50)
+        self.assertNotIn("owner_started", state)
+        state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="100.000000")
+        self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
+        state = hook.apply_event(state, "UserPromptSubmit", "sess", 3.0, owner=50, owner_started="200.000000")
         self.assertEqual(state["owner_ident"].get("sess"), "100.000000")
 
-    def test_later_prompt_drops_a_sec_owner_ident(self):
-        # A stored sec: token is not the owner. The next prompt must not
-        # leave it in place. The live pid is not an exit.
+    def test_a_hook_drops_a_saved_owner_with_no_fine_start(self):
+        # A stored sec: or empty token is not the owner. The hook fold drops
+        # that owner and keeps the busy row. A stored fine token stays, even
+        # when it no longer matches the live pid.
         state = hook.fresh_state()
-        state["busy"] = {"sess": 1.0}
-        state["owners"] = {"sess": 50}
-        state["owner_ident"] = {"sess": "sec:10"}
-        state["generation"] = 1
-        snap = {"ppid": 1, "lstart": "10", "comm": "kiro-cli"}
-        with (
-            mock.patch.object(hook, "hires_start", lambda _pid: "sec:10"),
-            mock.patch.object(hook, "process_snapshot", lambda _pid: snap),
-        ):
-            state = hook.apply_event(state, "UserPromptSubmit", "sess", 2.0, owner=50, owner_started="10")
-            self.assertTrue(hook.alive(50))
-            self.assertEqual(hook.owner_phase(state), "weak")
-        self.assertIn("sess", state["busy"])
-        self.assertNotIn("sess", state["owner_ident"])
+        state["busy"] = {"sec": 1.0, "empty": 1.0, "fine": 1.0}
+        state["owners"] = {"sec": 50, "empty": 51, "fine": 52}
+        state["owner_ident"] = {"sec": "sec:10", "fine": "100.000000"}
+        hook._forget_unpinned_owners(state)
+        self.assertEqual(state["owners"], {"fine": 52})
+        self.assertEqual(state["owner_ident"], {"fine": "100.000000"})
+        self.assertEqual(sorted(state["busy"]), ["empty", "fine", "sec"])
 
     def test_a_gone_chat_child_is_not_an_owner_exit(self):
         state = hook.fresh_state()
@@ -4309,16 +4284,15 @@ class PaneWriteMatrixTests(unittest.TestCase):
         painted = b"".join(osc)
         busy = len((book.state or {}).get("busy") or {})
         grace = float((book.state or {}).get("grace_until") or 0.0)
-        reported = self._report_after_hook(book, event, held["chosen"], held["ok"], held["release"])
+        # t7 is an App terminal, so the hook runs no herdr report and seq stays.
         if held["chosen"] not in ("none", "refresh") and not self._watcher_current(book.state):
             self._spawn_into(book)
         blocked_osc = b""
         if self._chooser_follow_up(book.state, held["chosen"]):
             blocked_osc = self._osc("blocked")
-            reported = "blocked"
         # A dropped unpinned owner is a write even when the table says none.
         if held["chosen"] not in ("none", "refresh") or (held["chosen"] == "none" and self._forgot):
-            self._record_hook_log(book, event, painted, busy, grace, reported, blocked_osc)
+            self._record_hook_log(book, event, painted, busy, grace, blocked_osc)
         return book.files, painted + blocked_osc
 
     def _expect_watch(self, start, event, prepared):
@@ -4525,21 +4499,6 @@ class PaneWriteMatrixTests(unittest.TestCase):
         state["watcher_started"] = token
         return ""
 
-    def _report_after_hook(self, book, event, chosen, ok, release):
-        if self._pane_mode == "app_fail":
-            return ""
-        if book.state is None:
-            return ""
-        action = hook.next_action(len(book.state["busy"]), float(book.state["grace_until"]), False, self._BASE)
-        kind = hook.report_for("", action)
-        # t7 is an App terminal. The report is the TUI's, so herdr is not run
-        # and seq is not bumped. The kind still counts as reported.
-        if chosen == "done" and ok and (event in hook.END_EVENTS or release):
-            return "idle"
-        if kind == "working" and chosen == "working":
-            return "working"
-        return ""
-
     def _chooser_follow_up(self, state, chosen):
         if self._pane_mode != "chooser" or chosen in ("none", "refresh") or state is None:
             return False
@@ -4547,7 +4506,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return False
         return hook.pane_transition(hook.owner_phase(state), "blocked") == "paint_blocked"
 
-    def _record_hook_log(self, book, event, osc, busy, grace, reported, blocked_osc):
+    def _record_hook_log(self, book, event, osc, busy, grace, blocked_osc):
         lines = [f"event={event} session={hook.AGGREGATE} pane=t7 chain={hook.process_chain()}"]
         device = self._owner_device(self.live.pid)
         if osc and device:
