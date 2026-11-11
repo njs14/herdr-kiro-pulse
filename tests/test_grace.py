@@ -996,13 +996,14 @@ class GraceTests(unittest.TestCase):
 
     def test_a_hook_drops_a_saved_owner_with_no_fine_start(self):
         # A stored sec: or empty token is not the owner. The hook fold drops
-        # that owner and keeps the busy row. A stored fine token stays, even
-        # when it no longer matches the live pid.
+        # that owner and keeps the busy row while the pid is not gone. A
+        # stored fine token stays, even when it no longer matches the live pid.
         state = hook.fresh_state()
         state["busy"] = {"sec": 1.0, "empty": 1.0, "fine": 1.0}
         state["owners"] = {"sec": 50, "empty": 51, "fine": 52}
         state["owner_ident"] = {"sec": "sec:10", "fine": "100.000000"}
-        hook._forget_unpinned_owners(state)
+        with mock.patch.object(hook, "_pid_gone", return_value=False):
+            hook._forget_unpinned_owners(state)
         self.assertEqual(state["owners"], {"fine": 52})
         self.assertEqual(state["owner_ident"], {"fine": "100.000000"})
         self.assertEqual(sorted(state["busy"]), ["empty", "fine", "sec"])

@@ -2061,15 +2061,24 @@ def _forget_unpinned_owners(state: dict) -> None:
     main() records no such owner. A pane file written before that rule can
     still hold one, and that owner kept every Stop at none. A stored fine
     token stays, including one that no longer matches the live pid.
+
+    When kill reports that pid gone (ESRCH), the named slot keyed to it
+    loses its busy row too: 0.1.0 never cleared a row on Stop, and that
+    owner is the only proof the session ended. A live pid, EPERM, and the
+    aggregate slot, which every session with no id shares, keep the row.
     """
     owners = state.get("owners")
     if not isinstance(owners, dict):
         return
     idents = _ident_map(state)
+    busy = state.get("busy")
     for key in list(owners):
-        if not fine_start(idents.get(key) or ""):
-            owners.pop(key, None)
-            idents.pop(key, None)
+        if fine_start(idents.get(key) or ""):
+            continue
+        pid = owners.pop(key, None)
+        idents.pop(key, None)
+        if key != AGGREGATE and isinstance(busy, dict) and _pid_gone(pid):
+            busy.pop(key, None)
 
 
 def _fold_hook(
