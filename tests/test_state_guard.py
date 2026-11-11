@@ -122,6 +122,45 @@ class RunCheckTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 self.assertFalse(_state_guard._is_script_run(argv, False))
 
+    def fake_real_home(self):
+        """Register a temp dir as the real home's .kiro, .config, and .local/state, so no test links the real ones."""
+        real = os.path.join(self.base, "real")
+        dirs = {name: os.path.join(real, name) for name in (".kiro", ".config", os.path.join(".local", "state"))}
+        for path in dirs.values():
+            os.makedirs(path)
+        for attr, name in (("HOOK_ROOTS", ".kiro"), ("CONFIG_BASES", ".config"), ("STATE_BASES", ".local/state")):
+            patcher = mock.patch.object(_state_guard, attr, (*getattr(_state_guard, attr), dirs[name]))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return dirs
+
+    def symlinked_home(self, name, target):
+        home = tempfile.mkdtemp(dir=self.base)
+        os.makedirs(os.path.dirname(os.path.join(home, name)), exist_ok=True)
+        os.symlink(target, os.path.join(home, name))
+        return self.scratch(
+            {
+                "HOME": home,
+                "XDG_CONFIG_HOME": os.path.join(self.base, "xc"),
+                "XDG_STATE_HOME": os.path.join(self.base, "xs"),
+            }
+        )
+
+    def test_home_linked_to_the_real_dirs_is_rejected(self):
+        for name, target in self.fake_real_home().items():
+            with self.subTest(name=name):
+                env = self.symlinked_home(name, target)
+                self.assertIsNotNone(_state_guard.scratch_env_problem(env))
+                with self.assertRaises(AssertionError):
+                    subprocess.run(["sh", "-c", "true"], env=env, check=False)
+
+    def test_home_with_its_own_dirs_runs(self):
+        self.fake_real_home()
+        for name in (".kiro", ".config", os.path.join(".local", "state")):
+            with self.subTest(name=name):
+                own = tempfile.mkdtemp(dir=self.base)
+                self.assertIsNone(_state_guard.scratch_env_problem(self.symlinked_home(name, own)))
+
     def test_scratch_shell_and_plain_commands_run(self):
         subprocess.run(["sh", "-c", "true"], env=self.scratch(), check=True)
         subprocess.run(["sleep", "0"], check=True)
