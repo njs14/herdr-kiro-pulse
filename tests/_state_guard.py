@@ -12,8 +12,9 @@ server socket, so it is not watched.
 
 While a module is isolated, subprocess.Popen, and so run, call, and
 check_output, refuses a shell or script run whose env could reach those dirs. A
-shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run.
-os.posix_spawn and os.posix_spawnp get the same check, and os.system, os.exec*,
+shell behind env, nice, timeout, exec, or VAR=val words counts as a shell run,
+and the env checked is the one it gets after those words, env -S, env -u, and
+env -i are applied. os.posix_spawn and os.posix_spawnp get the same check, and os.system, os.exec*,
 and os.spawn* always raise. In a forked child a refusal exits the child instead.
 A child Python that calls them is not checked.
 """
@@ -130,16 +131,22 @@ def _is_assignment(word):
     return bool(eq) and name.replace("_", "a").isalnum() and not name[0].isdigit()
 
 
-def _command(argv):
-    """argv without leading VAR=val words and env, nice, timeout, or exec wrappers and their options."""
+def _parse(argv, env):
+    """Split off leading VAR=val words and env, nice, timeout, or exec wrappers.
+
+    Return the command left and the env it runs with: env with the VAR=val words
+    applied, and cleared by env -i or a bare - and unset by env -u on the way.
+    """
     argv = list(argv)
+    env = dict(env)
     while argv:
         if _is_assignment(argv[0]):
-            argv.pop(0)
+            key, _eq, value = argv.pop(0).partition("=")
+            env[key] = value
             continue
         name = os.path.basename(argv.pop(0))
         if name not in WRAPPERS:
-            return [name, *argv]
+            return [name, *argv], env
         while argv and argv[0].startswith("-") and argv[0] != "-":
             option = argv.pop(0)
             if option == "--":
@@ -150,13 +157,37 @@ def _command(argv):
                 argv[:0] = shlex.split(option[2:])
             elif option.startswith("--split-string="):
                 argv[:0] = shlex.split(option.partition("=")[2])
+            elif name == "env" and option in ("-i", "--ignore-environment"):
+                env = {}
+            elif name == "env" and option in ("-u", "--unset") and argv:
+                env.pop(argv.pop(0), None)
+            elif name == "env" and option.startswith("--unset="):
+                env.pop(option.partition("=")[2], None)
+            elif name == "env" and option.startswith("-u") and not option.startswith("--"):
+                env.pop(option[2:], None)
             elif option in WRAPPERS[name] and argv:
                 argv.pop(0)
         if argv and argv[0] == "-":
             argv.pop(0)
+            if name == "env":
+                env = {}
         if name == "timeout" and argv:
             argv.pop(0)
-    return argv
+    return argv, env
+
+
+def _command(argv):
+    """argv without leading VAR=val words and env, nice, timeout, or exec wrappers and their options."""
+    return _parse(argv, {})[0]
+
+
+def _run_problem(args, shell, env):
+    """Say why a shell or script run could reach the real dirs, or return None. Other runs are not checked."""
+    if not _is_script_run(args, shell):
+        return None
+    if env is None or shell:
+        return scratch_env_problem(env)
+    return scratch_env_problem(_parse(_argv(args), env)[1])
 
 
 def _is_script_run(args, shell):
@@ -178,10 +209,9 @@ class CheckedPopen(_REAL_POPEN):
     """Popen that raises before a shell or script run whose env could reach real dirs."""
 
     def __init__(self, args, *rest, **kwargs):
-        if _is_script_run(args, kwargs.get("shell")):
-            problem = scratch_env_problem(kwargs.get("env"))
-            if problem:
-                raise AssertionError(f"{_argv(args)}: {problem}")
+        problem = _run_problem(args, kwargs.get("shell"), kwargs.get("env"))
+        if problem:
+            raise AssertionError(f"{_argv(args)}: {problem}")
         super().__init__(args, *rest, **kwargs)
 
 
@@ -217,10 +247,9 @@ def _checked_spawn(real, pid):
     def spawn(path, argv, env, *rest, **kwargs):
         # path is what runs. argv[0] is only the name it sees.
         command = [path, *list(argv)[1:]]
-        if _is_script_run(command, False):
-            problem = scratch_env_problem(env)
-            if problem:
-                _fail(f"{_argv(command)}: {problem}", pid)
+        problem = _run_problem(command, False, env)
+        if problem:
+            _fail(f"{_argv(command)}: {problem}", pid)
         return real(path, argv, env, *rest, **kwargs)
 
     return spawn
