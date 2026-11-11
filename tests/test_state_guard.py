@@ -88,6 +88,40 @@ class RunCheckTests(unittest.TestCase):
             lambda: subprocess.run(["sh", "-c", "true"], env=self.scratch({"XDG_CONFIG_HOME": inherited}), check=False)
         )
 
+    def test_shell_behind_a_wrapper_is_rejected(self):
+        env = self.scratch(drop=["XDG_CONFIG_HOME"])
+        for argv in (["/usr/bin/env", "sh", "-c", "true"], ["nice", "-n", "5", "sh", "-c", "true"]):
+            with self.subTest(argv=argv), self.assertRaises(AssertionError):
+                subprocess.run(argv, env=env, check=False)
+
+    def test_wrappers_are_stripped_before_the_shell_check(self):
+        for argv in (
+            ["/usr/bin/env", "sh", "-c", "true"],
+            ["env", "FOO=1", "bash", "-c", "true"],
+            ["env", "-i", "-u", "PATH", "--", "zsh", "-c", "true"],
+            ["env", "-S", "sh -c true"],
+            ["nice", "-n", "5", "sh"],
+            ["nice", "-5", "dash"],
+            ["timeout", "5", "/bin/sh"],
+            ["timeout", "-s", "KILL", "--preserve-status", "5s", "ksh"],
+            ["exec", "bash"],
+            ["FOO=1", "BAR=2", "sh"],
+            ["env", "nice", "-n", "1", "timeout", "5", "sh"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertTrue(_state_guard._is_script_run(argv, False))
+
+    def test_plain_commands_behind_a_wrapper_stay_unchecked(self):
+        for argv in (
+            ["env", "git", "status"],
+            ["env", "FOO=1", "true"],
+            ["nice", "-n", "5", "sleep", "0"],
+            ["timeout", "5", "sleep", "0"],
+            ["env"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertFalse(_state_guard._is_script_run(argv, False))
+
     def test_scratch_shell_and_plain_commands_run(self):
         subprocess.run(["sh", "-c", "true"], env=self.scratch(), check=True)
         subprocess.run(["sleep", "0"], check=True)
