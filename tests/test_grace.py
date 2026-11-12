@@ -441,7 +441,12 @@ class GraceTests(unittest.TestCase):
             "record_named",
             "reap",
         )
-        working = {("proven", "start"), ("proven", "prompt")}
+        working = {
+            ("proven", "start"),
+            ("proven", "prompt"),
+            ("no_owner", "start"),
+            ("no_owner", "prompt"),
+        }
         done = {
             ("proven", "stop"),
             ("proven", "idle_clear"),
@@ -466,7 +471,7 @@ class GraceTests(unittest.TestCase):
                     self.assertEqual(got, "working", pair)
                 elif pair in done:
                     self.assertEqual(got, "done", pair)
-                elif pair == ("proven", "blocked"):
+                elif pair in (("proven", "blocked"), ("no_owner", "blocked")):
                     self.assertEqual(got, "paint_blocked", pair)
                 elif pair == ("proven", "aggregate_zero"):
                     self.assertEqual(got, "refresh", pair)
@@ -3696,8 +3701,13 @@ class SettledDecisionTests(unittest.TestCase):
     def _row_no_owner_blocked(self, _row):
         state = hook.fresh_state()
         before = self._pane_fields(state)
-        with mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc:
-            self.assertEqual(hook.pane_transition("no_owner", "blocked"), "none")
+        # Outside an App terminal there is no lineage paint target, so the
+        # table cell becomes none and the directory stays untouched.
+        with (
+            mock.patch.dict(os.environ, {"HC_TERMINAL_ID": "", "HERDR_ENV": "", "HERDR_PANE_ID": ""}, clear=False),
+            mock.patch.object(hook.herdr_kiro_osc, "write_pid", return_value="/dev/pts/1") as osc,
+        ):
+            self.assertEqual(hook.pane_transition("no_owner", "blocked"), "paint_blocked")
             write, ok = hook.commit_pane(state, "blocked")
         self.assertEqual((write, ok), ("none", True))
         self.assertEqual(self._pane_fields(state), before)
@@ -3732,7 +3742,12 @@ class SettledDecisionTests(unittest.TestCase):
             write, ok = hook.commit_blocked(proven, "workflow_requires_approval")
             self.assertEqual((write, ok), ("paint_blocked", True))
             weak_write, weak_ok = hook.commit_blocked(weak, "workflow_requires_approval")
-            empty_write, empty_ok = hook.commit_blocked(empty, "")
+            with mock.patch.dict(
+                os.environ,
+                {"HC_TERMINAL_ID": "", "HERDR_ENV": "", "HERDR_PANE_ID": ""},
+                clear=False,
+            ):
+                empty_write, empty_ok = hook.commit_blocked(empty, "")
         self.assertEqual((weak_write, weak_ok), ("none", True))
         self.assertEqual((empty_write, empty_ok), ("none", True))
         self.assertEqual(osc.call_count, 1)
@@ -4744,6 +4759,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
     def _commit(self, state, event, now, session="", hook_name="", rule_id=""):
         count = int(state.get("aggregate") or 0)
         prompt_at_zero = count == 0 and event in ("prompt", "start")
+        if prompt_at_zero and hook._pane_owner(state) is None and hook.in_app() and not hook.in_tui():
+            prompt_at_zero = False
         stop_at_zero = session == hook.AGGREGATE and count == 0 and event in ("stop", "piped_chat")
         if prompt_at_zero or stop_at_zero:
             event = "aggregate_zero"
@@ -4766,6 +4783,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if owner_now is not None and hook._held_pid_unconfirmed(owner_now[0], owner_now[1]):
                 return write, False, b""
             ok = self._can_paint(state)
+            if not ok and owner_now is None:
+                return "none", True, b""
             return write, ok, self._osc("blocked", rule_id) if ok else b""
         if write == "record_aggregate":
             if hook._owner_held_unconfirmed(state):
@@ -4805,6 +4824,8 @@ class PaneWriteMatrixTests(unittest.TestCase):
             if owner_now is not None and hook._held_pid_unconfirmed(owner_now[0], owner_now[1]):
                 return write, False, b""
             ok = self._can_paint(state)
+            if not ok and owner_now is None:
+                return "none", True, b""
             state["phase"] = hook.pane_next(phase, event)
             return write, ok, self._osc("working") if ok else b""
         raise AssertionError(write)
@@ -4816,9 +4837,11 @@ class PaneWriteMatrixTests(unittest.TestCase):
             drops = False
         stamp = now if now else self._BASE
         if owner_now is None:
+            # Best-effort App lineage paint, same as commit_pane.
+            osc = self._osc("idle") if self._can_paint(state) else b""
             if drops:
                 hook._finish_slot(state, session, stamp)
-            return "done", True, b""
+            return "done", True, osc
         hook._save_proven_owner(state)
         if not self._can_paint(state):
             return "done", False, b""
@@ -4835,7 +4858,7 @@ class PaneWriteMatrixTests(unittest.TestCase):
             return False
         owner = hook._pane_owner(state)
         if owner is None:
-            return False
+            return bool(hook.app_lineage_pid())
         pid, token = owner
         if not hook.fine_start(token) or hook._pid_gone(pid):
             return False
@@ -6108,6 +6131,49 @@ class KiroThreeOneLineageTests(unittest.TestCase):
                 logged.assert_not_called()
         self.assertFalse(os.path.exists(os.path.join(root, "herdr-kiro", "t5.json")))
         self.assertFalse(os.path.exists(os.path.join(root, "hook.log")))
+
+    def test_app_lineage_paints_without_storing_an_owner(self):
+        proc, chain, root = self._kiro()
+        paints = []
+
+        def capture(payload, pid):
+            paints.append((payload, pid))
+            return "/dev/ttys001"
+
+        with mock.patch.object(hook.herdr_kiro_osc, "write_pid", side_effect=capture):
+            self._main(root, chain, "SessionStart")
+            self._main(root, chain, "UserPromptSubmit")
+            self._main(root, chain, "Stop")
+        saved = self._saved(root)
+        self.assertEqual(saved.get("owners") or {}, {})
+        self.assertEqual(saved.get("owner_ident") or {}, {})
+        self.assertNotIn("sess_31", saved.get("busy") or {})
+        states = []
+        for payload, pid in paints:
+            self.assertEqual(pid, proc.pid)
+            text = payload.decode("ascii")
+            if "state=working" in text:
+                states.append("working")
+            if "state=done" in text:
+                states.append("done")
+        self.assertIn("working", states)
+        self.assertIn("done", states)
+
+    def test_app_lineage_pid_is_zero_outside_the_app(self):
+        proc, chain, _root = self._kiro()
+        with (
+            mock.patch.dict(os.environ, {"HC_TERMINAL_ID": "", "HERDR_ENV": "", "HERDR_PANE_ID": ""}, clear=False),
+            mock.patch.object(hook.os, "getppid", return_value=self._NODE),
+            mock.patch.object(hook, "process_snapshot", lambda pid: chain.get(int(pid))),
+        ):
+            self.assertEqual(hook.app_lineage_pid(), 0)
+            self.assertFalse(hook.paint_app_status("working"))
+        with (
+            mock.patch.dict(os.environ, {"HC_TERMINAL_ID": "t5", "HERDR_ENV": "", "HERDR_PANE_ID": ""}, clear=False),
+            mock.patch.object(hook.os, "getppid", return_value=self._NODE),
+            mock.patch.object(hook, "process_snapshot", lambda pid: chain.get(int(pid))),
+        ):
+            self.assertEqual(hook.app_lineage_pid(), proc.pid)
 
 
 if __name__ == "__main__":

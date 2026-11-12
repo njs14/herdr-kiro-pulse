@@ -20,10 +20,12 @@ after Stop, and it remembers the sequence number. This process sends one
 working report. It does not send that report again for the rest of the grace.
 The idle report stays in place while kiro-cli is running. A live pid whose
 token is empty, ``sec:`` plus a whole-second lstart, a bare whole-second
-lstart, or a fine token that no longer matches is not an exit and is not
-painted. The owner is the outer process. A gone chat child is not an exit
-and does not release the pane. release-agent runs only after that proven
-outer process is gone. A screen read returns a result and does not touch
+lstart, or a fine token that no longer matches is not an exit and is not a
+stored owner. The owner is the outer process with a fine start token. A
+gone chat child is not an exit and does not release the pane. release-agent
+runs only after that proven outer process is gone. In an App terminal with
+no stored owner, OSC still paints through the live outer ``kiro-cli`` from
+the hook parent chain; that lineage pid is never stored in ``owners``. A screen read returns a result and does not touch
 the filesystem, the tty, or OSC. A failed App read is none. It is not an
 empty screen, a prompt, a banner, a start, or aggregate_zero, and it is
 not refresh. It is not explained and it is not painted, including when a
@@ -798,6 +800,55 @@ def identity_proven(pid: int, token: object) -> bool:
     return hires_start(number) == token
 
 
+def app_lineage_pid() -> int:
+    """Live outer kiro-cli for App OSC only. Not an owner. Not stored.
+
+    Used when /proc start ticks are absent and main() recorded no owner.
+    The hook process still sits under that outer kiro-cli, so the parent
+    walk names it. The watcher is start_new_session and cannot use this.
+    """
+    if not in_app() or in_tui():
+        return 0
+    pid, _lstart, _chat, _chat_lstart = kiro_lineage()
+    try:
+        number = int(pid)
+    except (TypeError, ValueError):
+        return 0
+    if number <= 1 or _pid_gone(number) or not alive(number):
+        return 0
+    snap = process_snapshot(number)
+    if not snap or snap.get("error"):
+        return 0
+    if command_name(snap.get("comm") or "") != "kiro-cli":
+        return 0
+    return number
+
+
+def paint_app_status(kind: str, rule_id: str = "") -> bool:
+    """OSC via the live App lineage tty. Never identity_proven. Never owners."""
+    if in_tui() or not in_app():
+        return False
+    pid = app_lineage_pid()
+    if not pid:
+        return False
+    fields = herdr_kiro_osc.fields_for(kind, rule_id)
+    if fields is None:
+        return False
+    try:
+        payload = herdr_kiro_osc.encode(fields)
+    except ValueError:
+        if not _COMMIT_DRY:
+            log("refusing osc")
+        return False
+    if _COMMIT_DRY:
+        return True
+    written = herdr_kiro_osc.write_pid(payload, pid)
+    if written:
+        log(f"osc {fields['state']} via lineage {written}")
+        return True
+    return False
+
+
 def paint_status(kind: str, pid: int, token: str, *, held_fd: int = -1) -> bool:
     """Write state=working or state=done for one proven owner.
 
@@ -895,7 +946,8 @@ def emit_osc(state: dict | str, kind: str, rule_id: str = "") -> bool:
     and this process's tty are not targets. Unknown is not a protocol
     state, so it is a no-op. An unconfirmed held pid, including zero,
     writes nothing and does not open the live stdout. A path loads the
-    saved pane.
+    saved pane. An App terminal with no stored owner paints through
+    paint_app_status instead of identity_proven.
     """
     if isinstance(state, str):
         state = _load_state(state)
@@ -910,7 +962,7 @@ def emit_osc(state: dict | str, kind: str, rule_id: str = "") -> bool:
         return True
     owner = _pane_owner(state)
     if owner is None:
-        return False
+        return paint_app_status(kind, rule_id)
     pid, token = owner
     if not identity_proven(pid, token):
         return False
@@ -1628,6 +1680,8 @@ _DIRECT_EVENTS = (
 _PANE_WRITES = {
     ("proven", "start"): "working",
     ("proven", "prompt"): "working",
+    ("no_owner", "start"): "working",
+    ("no_owner", "prompt"): "working",
     ("proven", "stop"): "done",
     ("proven", "idle_clear"): "done",
     ("proven", "process_exit"): "done",
@@ -1637,6 +1691,7 @@ _PANE_WRITES = {
     ("idle_clear", "process_exit"): "done",
     ("idle_clear", "piped_chat"): "done",
     ("proven", "blocked"): "paint_blocked",
+    ("no_owner", "blocked"): "paint_blocked",
     ("proven", "aggregate_zero"): "refresh",
     ("no_owner", "stop"): "done",
     ("no_owner", "piped_chat"): "done",
@@ -1925,17 +1980,18 @@ def _paint_one_owner(state: dict, kind: str) -> bool:
     A TUI pane, including one inside the App, gets no OSC. A chat pty and a
     second recorded pid are not targets. The current token is checked before
     any held fd is written. An empty token or sec: plus whole-second lstart
-    writes nothing, including when a held fd is open. An unconfirmed held
-    pid writes nothing for every kind, including working, and does not open
-    the live stdout. The held fd is eligible only when its pid is this
-    owner. With no held fd, a live proven owner still paints through
-    paint_status.
+    is not a stored-owner paint, including when a held fd is open. An
+    unconfirmed held pid writes nothing for every kind, including working,
+    and does not open the live stdout. The held fd is eligible only when
+    its pid is this owner. With no held fd, a live proven owner still
+    paints through paint_status. An App terminal with no stored owner
+    paints through paint_app_status instead.
     """
     if in_tui():
         return True
     owner = _pane_owner(state)
     if owner is None:
-        return False
+        return paint_app_status(kind)
     pid, token = owner
     if not fine_start(token):
         return False
@@ -2288,6 +2344,11 @@ def commit_pane(
         return _commit_persisted(event, session, now, owner, owner_started, chat_pid, path, pane)
     count = int(state.get("aggregate") or 0)
     prompt_at_zero = count == 0 and event in ("prompt", "start")
+    # App terminals with no stored owner still need start/prompt to paint.
+    # Remapping those to aggregate_zero would hit none for no_owner and leave
+    # OSC dark; the watcher cannot lineage-paint either.
+    if prompt_at_zero and _pane_owner(state) is None and in_app() and not in_tui():
+        prompt_at_zero = False
     stop_at_zero = session == AGGREGATE and count == 0 and event in ("stop", "piped_chat")
     if prompt_at_zero or stop_at_zero:
         event = "aggregate_zero"
@@ -2314,6 +2375,9 @@ def commit_pane(
             return _pane_result(write, False)
         with _in_apply():
             painted = emit_osc(state, "blocked", rule_id)
+        # No stored owner and no App lineage tty: leave the directory alone.
+        if not painted and owner_now is None:
+            return _pane_result("none", True)
         return _pane_result(write, painted)
     if write == "record_aggregate":
         if _owner_held_unconfirmed(state):
@@ -2350,6 +2414,9 @@ def commit_pane(
         if owner_now is not None and alive(owner_now[0]):
             drops = False
         if owner_now is None:
+            # App lineage paint is best-effort. Slot clear must not depend on it.
+            with _in_apply():
+                _paint_one_owner(state, "idle")
             if drops:
                 _finish_slot(state, session, now)
             return _pane_result(write, True)
@@ -2375,6 +2442,10 @@ def commit_pane(
             return _pane_result(write, False)
         with _in_apply():
             ok = _paint_one_owner(state, "working")
+        # App lineage miss with no stored owner must not arm a watcher or
+        # rewrite phase. Proven owners still record the phase on a miss.
+        if not ok and owner_now is None:
+            return _pane_result("none", True)
         state["phase"] = pane_next(phase, event)
         return _pane_result(write, ok)
     raise ValueError(write)
