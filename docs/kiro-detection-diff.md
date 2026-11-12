@@ -8,6 +8,8 @@ min_engine_version = 2
 updated_at = "2026-09-19T00:00:00Z"
 ```
 
+Last verified against herdr 0.9.5 bundled `manifest_version` `2026.09.19.1` (matches `BUILT_AGAINST` in `prototype/herdr_kiro_doctor.py`). CI fails when that bundled version drifts ahead of `BUILT_AGAINST`; rebase this override, bump `BUILT_AGAINST`, and refresh this doc when that happens.
+
 Herdr 0.9.5 does not merge a local `agent-detection/kiro.toml` with the remote manifest. The file replaces it. `prototype/kiro-detection.toml` is that upstream file plus the edits below. While it is installed, a newer remote Kiro manifest is not applied. Uninstall restores the previous file.
 
 ## Changed rules
