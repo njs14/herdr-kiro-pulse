@@ -1,0 +1,27 @@
+---
+description: Commit identity that the identity CI job requires
+alwaysApply: true
+---
+
+# Commit identity
+
+The `identity` job in `.github/workflows/tests.yml` runs `harness/check_commit_identity.py`.
+It fails any commit not on `main` whose author email, committer email, or trailer email is
+not exactly `73196388+njs14@users.noreply.github.com`.
+
+Before the first commit in a session, run:
+
+```sh
+git config user.name njs14
+git config user.email 73196388+njs14@users.noreply.github.com
+```
+
+Before every push:
+
+1. Rewrite any commit authored or committed as Cursor Agent (`cursoragent@cursor.com`) to the
+   identity above, for example with
+   `git rebase origin/main --exec 'git commit --amend --no-edit --reset-author'`.
+2. Drop `Co-authored-by` trailers. If a trailer must stay, it uses
+   `73196388+njs14@users.noreply.github.com`, never `njs14@users.noreply.github.com`.
+3. Run `CHECK_HEAD=HEAD python3 harness/check_commit_identity.py` and push only when it prints
+   `commit identity ok`.
