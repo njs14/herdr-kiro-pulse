@@ -6,22 +6,26 @@ alwaysApply: true
 # Commit identity
 
 The `identity` job in `.github/workflows/tests.yml` runs `harness/check_commit_identity.py`.
-It fails any commit not on `main` whose author email, committer email, or trailer email is
-not exactly `73196388+njs14@users.noreply.github.com`.
+It fails any commit not on `origin/main` whose author email, committer email, or any trailer
+email (Co-authored-by, Signed-off-by, or another) differs from `ALLOWED` in that script,
+currently `73196388+njs14@users.noreply.github.com`.
 
-Before the first commit in a session, run:
+Cursor Cloud Agents commit as Cursor Agent whatever the repo's git config says, so before every
+push, rewrite this branch's own commits:
 
 ```sh
-git config user.name njs14
-git config user.email 73196388+njs14@users.noreply.github.com
+git fetch origin main
+id=73196388+njs14@users.noreply.github.com
+GIT_AUTHOR_NAME=njs14 GIT_AUTHOR_EMAIL=$id GIT_COMMITTER_NAME=njs14 GIT_COMMITTER_EMAIL=$id \
+  git rebase --rebase-merges "$(git merge-base HEAD origin/main)" \
+  --exec 'git log -1 --format=%B | sed -E "/^[A-Za-z-]+: .*<[^>]*@[^>]*>[[:space:]]*$/d" | git commit -q --amend --reset-author --cleanup=strip -F -'
+python3 harness/check_commit_identity.py
 ```
 
-Before every push:
-
-1. Rewrite any commit authored or committed as Cursor Agent (`cursoragent@cursor.com`) to the
-   identity above, for example with
-   `git rebase origin/main --exec 'git commit --amend --no-edit --reset-author'`.
-2. Drop `Co-authored-by` trailers. If a trailer must stay, it uses
-   `73196388+njs14@users.noreply.github.com`, never `njs14@users.noreply.github.com`.
-3. Run `CHECK_HEAD=HEAD python3 harness/check_commit_identity.py` and push only when it prints
-   `commit identity ok`.
+- The inline `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables win over any identity Cursor sets in
+  the environment.
+- Rebasing onto the merge base rewrites only this branch's commits. It does not move the branch
+  onto a newer `main`.
+- The `sed` removes every trailer line that carries an email address.
+- Push only when the check prints `commit identity ok`. A branch that was already pushed needs
+  `git push --force-with-lease`, because the rewrite changes every commit's SHA.
