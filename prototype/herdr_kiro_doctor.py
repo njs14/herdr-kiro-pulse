@@ -77,6 +77,8 @@ def setting_from_file(key):
             data = json.loads(handle.read())
     except (OSError, ValueError):
         return None
+    if not isinstance(data, dict):
+        return None
     value = data.get(key)
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -119,9 +121,16 @@ def read_lifecycle():
     return state, via, pending
 
 
+def session_command(*args: str) -> list[str]:
+    """Target the same named Herdr session as install and uninstall."""
+    session = os.environ.get("HERDR_SESSION")
+    target = ["--session", session] if session else []
+    return [herdr_bin(), *target, *args]
+
+
 def explain_upstream():
     code, text = run(
-        [herdr_bin(), "agent", "explain", "--file", os.devnull, "--agent", "kiro", "--json"],
+        session_command("agent", "explain", "--file", os.devnull, "--agent", "kiro", "--json"),
         5,
     )
     if code != 0 or not text:
@@ -156,7 +165,7 @@ def warn_upstream():
 
 
 def plugin_registered():
-    code, text = run([herdr_bin(), "plugin", "list"], 5)
+    code, text = run(session_command("plugin", "list"), 5)
     if code != 0:
         return None
     return "herdr-kiro" in text
@@ -239,6 +248,8 @@ def main() -> int:
             print(f"hand edit: {path} matches the marker")
         else:
             raise RuntimeError(f"unknown ownership {kind}")
+    if not state_name and not owned_paths:
+        problems.append("no plugin-owned hook or detection override; install the plugin to enable reporting")
     if state_name == "uninstalled" and owned_paths:
         problems.append("lifecycle is uninstalled but our files remain: {}".format(", ".join(owned_paths)))
     registered = plugin_registered() if herdr_code == 0 else None
@@ -273,7 +284,10 @@ def main() -> int:
     if stale:
         problems.append("stale watcher pid files: {}".format(", ".join(stale)))
         commit_pane(fresh_state(), "reap")
-    server_code, server_text = run([herdr_bin(), "pane", "list"], 3)
+    session = os.environ.get("HERDR_SESSION")
+    if session:
+        print(f"herdr session: {session}")
+    server_code, server_text = run(session_command("pane", "list"), 3)
     if server_code != 0 or "server_not_running" in server_text:
         problems.append("herdr server is not running")
         print("server: not running")
