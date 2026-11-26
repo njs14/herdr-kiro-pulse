@@ -53,11 +53,18 @@ class DoctorTests(unittest.TestCase):
         self.env["PATH"] = self.bindir + os.pathsep + self.env.get("PATH", "")
         self.env.pop("HERDR_BIN_PATH", None)
 
-    def write_herdr(self, remote="2026.09.19.1", server=True, plugin=True):
+    def write_herdr(self, remote="2026.09.19.1", server=True, plugin=True, session=None):
         server_body = '{"result":{"panes":[]}}' if server else '{"error":{"code":"server_not_running"}}'
         server_rc = "0" if server else "1"
         plugin_body = "- herdr-kiro" if plugin else "No plugins installed."
+        session_setup = (
+            f'if [ "$1" = --session ] && [ "$2" = "{session}" ]; then shift 2; '
+            'elif [ "$1" != --version ]; then echo server_not_running; exit 1; fi'
+            if session
+            else ""
+        )
         script = f"""#!/bin/sh
+{session_setup}
 case "$1" in
   --version) echo herdr 0.9.5; exit 0 ;;
   pane) echo '{server_body}'; exit {server_rc} ;;
@@ -111,6 +118,47 @@ exit 0
             check=False,
         )
         return _Timed(completed, time.time() - started)
+
+    def test_named_session_is_used_for_diagnostics(self):
+        self.env["HERDR_SESSION"] = "work"
+        self.env["HERDR_PLUGIN_ID"] = "herdr-kiro"
+        self.write_herdr(session="work", remote="2026.09.18.1")
+        self.write_kiro()
+        self.install()
+        completed = self.doctor()
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("herdr session: work", completed.stdout)
+        self.assertIn("server: running", completed.stdout)
+        self.assertIn("cached remote kiro.toml: 2026.09.18.1", completed.stdout)
+
+    def test_named_session_detects_missing_plugin_registration(self):
+        self.env["HERDR_SESSION"] = "work"
+        self.env["HERDR_PLUGIN_ID"] = "herdr-kiro"
+        self.write_herdr(session="work", plugin=False)
+        self.write_kiro()
+        self.install()
+        completed = self.doctor()
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("unlink does not delete files", completed.stdout)
+
+    def test_non_object_settings_show_problem_instead_of_traceback(self):
+        settings = os.path.join(self.home, ".kiro", "settings", "cli.json")
+        with open(settings, "w", encoding="utf-8") as handle:
+            json.dump([], handle)
+        self.write_herdr()
+        self.write_kiro(engine=None, workflows="")
+        self.install()
+        completed = self.doctor()
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("chat.enableWorkflows is unknown", completed.stdout)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_never_installed_is_not_healthy(self):
+        self.write_herdr()
+        self.write_kiro()
+        completed = self.doctor()
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("no plugin-owned hook or detection override", completed.stdout)
 
     def test_default_3_0_without_agent_engine_exits_zero(self):
         settings = os.path.join(self.home, ".kiro", "settings", "cli.json")
